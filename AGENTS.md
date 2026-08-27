@@ -6,6 +6,7 @@
 - `docs/Postbot_v1_기술_스택_확정서.docx`
 - `docs/implementation-plan.md`
 - `docs/architecture-decisions.md`
+- `docs/Postbot_Codex_전체_개발_프롬프트.md`
 
 ## 공통 실행 규칙
 
