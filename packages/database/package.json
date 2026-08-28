@@ -18,6 +18,11 @@
     "test": "vitest run --passWithNoTests"
   },
   "devDependencies": {
+    "prisma": "6.19.1",
+    "tsx": "^4.23.12",
     "vitest": "^4.0.14"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.1"
   }
 }

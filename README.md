@@ -2,7 +2,7 @@
 
 Postbot is an AI-assisted short-form content automation product for YouTube Shorts, Instagram Reels, and TikTok.
 
-This repository is currently at **1단계: 모노레포와 로컬 인프라 구축**. The codebase contains only the executable foundation: workspace layout, minimal app entry points, shared package boundaries, local infrastructure, and validation commands. Product features start in later steps.
+This repository is currently at **3단계: 인증·사용자·보안 기반**. The codebase contains the monorepo foundation, Prisma data model, and email/password authentication with secure cookie sessions.
 
 ## Requirements
 
@@ -41,10 +41,10 @@ Start MySQL, Redis, and MinIO:
 docker compose up -d
 ```
 
-Check health:
+Apply the Prisma schema:
 
 ```bash
-docker compose ps
+pnpm --filter @postbot/database exec prisma migrate dev --schema prisma/schema.prisma
 ```
 
 Local endpoints:
@@ -53,12 +53,6 @@ Local endpoints:
 - Redis: `localhost:6379`
 - MinIO API: `http://localhost:9000`
 - MinIO Console: `http://localhost:9001`
-
-Stop local infrastructure:
-
-```bash
-docker compose down
-```
 
 ## Development
 
@@ -81,15 +75,29 @@ Default ports:
 
 - Web: `http://localhost:5173`
 - API: `http://localhost:3000`
+- API OpenAPI UI: `http://localhost:3000/openapi`
 - Renderer Studio: `http://localhost:3001`
 
-The API exposes:
+## API
+
+Public:
 
 ```text
 GET /health
+POST /auth/register
+POST /auth/login
+POST /auth/refresh
+POST /auth/logout
 ```
 
-The web app displays the API health response.
+Authenticated:
+
+```text
+GET /auth/me
+GET /auth/workspaces/:workspaceId/access-check
+```
+
+Authentication uses short-lived JWT access tokens and rotating refresh tokens in `HttpOnly`, `SameSite=Lax` cookies. Mutating authenticated requests must send `x-csrf-token` with the value from the `postbot_csrf` cookie. In production, cookies are also marked `Secure`.
 
 ## Validation
 

@@ -1,0 +1,813 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum WorkspaceRole {
+  OWNER
+  MEMBER
+}
+
+enum ChannelStatus {
+  ACTIVE
+  PAUSED
+  ERROR
+}
+
+enum AutomationMode {
+  APPROVAL
+  FULL_AUTO
+}
+
+enum Platform {
+  YOUTUBE
+  INSTAGRAM
+  TIKTOK
+}
+
+enum PlatformAccountStatus {
+  CONNECTED
+  EXPIRED
+  REVOKED
+  DISCONNECTED
+}
+
+enum ContentStatus {
+  IDEA
+  VALIDATING
+  GENERATING
+  REVIEW_REQUIRED
+  APPROVED
+  SCHEDULED
+  PUBLISHING
+  PUBLISHED
+  FAILED
+  HELD
+}
+
+enum SourceKind {
+  NEWS
+  OFFICIAL
+  PAPER
+  RSS
+  PUBLIC_DATA
+  MANUAL
+}
+
+enum AssetKind {
+  IMAGE
+  VIDEO
+  AUDIO
+  FONT
+  GRAPHIC
+}
+
+enum AssetOrigin {
+  INTERNAL
+  STOCK_FREE
+  STOCK_PAID
+  PUBLIC_DOMAIN
+  AI_GENERATED
+}
+
+enum LicenseStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+  EXPIRED
+}
+
+enum ProductionJobType {
+  COLLECT
+  SCRIPT
+  ASSET
+  TTS
+  RENDER
+  POLICY
+  PUBLISH
+  ANALYTICS
+}
+
+enum ProductionJobStatus {
+  QUEUED
+  RUNNING
+  RETRY_WAIT
+  NEEDS_REVIEW
+  SUCCEEDED
+  FAILED
+  CANCEL_REQUESTED
+  CANCELLED
+}
+
+enum PolicyCheckStatus {
+  PASS
+  WARNING
+  FAIL
+  UNKNOWN
+}
+
+enum PublishPlanStatus {
+  DRAFT
+  SCHEDULED
+  PUBLISHING
+  PUBLISHED
+  FAILED
+  HELD
+  CANCELLED
+}
+
+enum PublishAttemptStatus {
+  QUEUED
+  RUNNING
+  RETRY_WAIT
+  SUCCEEDED
+  FAILED
+}
+
+enum CostDirection {
+  ESTIMATED
+  ACTUAL
+  CREDIT
+}
+
+enum SuggestionStatus {
+  PROPOSED
+  APPROVED
+  REJECTED
+  HELD
+  APPLIED
+}
+
+enum ExperimentStatus {
+  DRAFT
+  RUNNING
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+
+model User {
+  id          String       @id @default(cuid())
+  email       String       @unique @db.VarChar(320)
+  displayName String       @db.VarChar(120)
+  passwordHash String      @db.VarChar(255)
+  timezone    String       @default("Asia/Seoul") @db.VarChar(64)
+  createdAt   DateTime     @default(now()) @db.DateTime(3)
+  updatedAt   DateTime     @updatedAt @db.DateTime(3)
+  memberships Membership[]
+  workspaces  Workspace[]  @relation("WorkspaceOwner")
+  authSessions AuthSession[]
+
+  @@map("users")
+}
+
+model AuthSession {
+  id              String    @id @default(cuid())
+  userId          String
+  workspaceId     String
+  tokenHash       String    @unique @db.VarChar(128)
+  familyId        String    @db.VarChar(191)
+  replacedById    String?   @unique
+  userAgentHash   String?   @db.VarChar(128)
+  ipHash          String?   @db.VarChar(128)
+  expiresAt       DateTime  @db.DateTime(3)
+  revokedAt       DateTime? @db.DateTime(3)
+  reuseDetectedAt DateTime? @db.DateTime(3)
+  createdAt       DateTime  @default(now()) @db.DateTime(3)
+  updatedAt       DateTime  @updatedAt @db.DateTime(3)
+  user            User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  replacement     AuthSession? @relation("AuthSessionReplacement", fields: [replacedById], references: [id], onDelete: SetNull)
+  replacedSession AuthSession? @relation("AuthSessionReplacement")
+
+  @@index([userId, expiresAt])
+  @@index([workspaceId])
+  @@index([familyId])
+  @@map("auth_sessions")
+}
+
+model Workspace {
+  id               String            @id @default(cuid())
+  ownerId          String
+  name             String            @db.VarChar(120)
+  slug             String            @unique @db.VarChar(80)
+  createdAt        DateTime          @default(now()) @db.DateTime(3)
+  updatedAt        DateTime          @updatedAt @db.DateTime(3)
+  owner            User              @relation("WorkspaceOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  memberships      Membership[]
+  channels         Channel[]
+  platformAccounts PlatformAccount[]
+  authSessions     AuthSession[]
+
+  @@index([ownerId])
+  @@map("workspaces")
+}
+
+model Membership {
+  id          String        @id @default(cuid())
+  workspaceId String
+  userId      String
+  role        WorkspaceRole @default(OWNER)
+  createdAt   DateTime      @default(now()) @db.DateTime(3)
+  updatedAt   DateTime      @updatedAt @db.DateTime(3)
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  user        User          @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([workspaceId, userId])
+  @@index([userId])
+  @@map("memberships")
+}
+
+model Channel {
+  id                      String                   @id @default(cuid())
+  workspaceId             String
+  name                    String                   @db.VarChar(120)
+  slug                    String                   @db.VarChar(80)
+  description             String?                  @db.Text
+  language                String                   @default("ko") @db.VarChar(16)
+  targetAudience          String?                  @db.VarChar(255)
+  topic                   String?                  @db.VarChar(255)
+  excludedTopics          Json?
+  status                  ChannelStatus            @default(ACTIVE)
+  automationMode          AutomationMode           @default(APPROVAL)
+  minInventoryCount       Int                      @default(3)
+  dailyPublishLimit       Int                      @default(1)
+  errorAction             Json?
+  createdAt               DateTime                 @default(now()) @db.DateTime(3)
+  updatedAt               DateTime                 @updatedAt @db.DateTime(3)
+  workspace               Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  platformAccounts        PlatformAccount[]
+  templates               ChannelTemplate[]
+  outputProfiles          PlatformOutputProfile[]
+  scheduleRules           ScheduleRule[]
+  contentItems            ContentItem[]
+  assets                  Asset[]
+  productionJobs          ProductionJob[]
+  policySnapshots         PolicySnapshot[]
+  strategyVersions        StrategyVersion[]
+  experiments             Experiment[]
+  optimizationSuggestions OptimizationSuggestion[]
+
+  @@unique([workspaceId, slug])
+  @@index([workspaceId, status])
+  @@map("channels")
+}
+
+model PlatformAccount {
+  id                String                @id @default(cuid())
+  workspaceId       String
+  channelId         String?
+  platform          Platform
+  externalAccountId String                @db.VarChar(191)
+  handle            String?               @db.VarChar(191)
+  displayName       String?               @db.VarChar(191)
+  status            PlatformAccountStatus @default(CONNECTED)
+  connectedAt       DateTime?             @db.DateTime(3)
+  disconnectedAt    DateTime?             @db.DateTime(3)
+  createdAt         DateTime              @default(now()) @db.DateTime(3)
+  updatedAt         DateTime              @updatedAt @db.DateTime(3)
+  channel           Channel?              @relation(fields: [channelId], references: [id], onDelete: Restrict)
+  workspace         Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  credential        OAuthCredential?
+  publishPlans      PublishPlan[]
+  platformPosts     PlatformPost[]
+
+  @@unique([platform, externalAccountId])
+  @@unique([channelId, platform])
+  @@index([workspaceId, platform, status])
+  @@map("platform_accounts")
+}
+
+model OAuthCredential {
+  id                    String          @id @default(cuid())
+  platformAccountId     String          @unique
+  encryptedAccessToken  String          @db.Text
+  encryptedRefreshToken String?         @db.Text
+  tokenCipher           String          @db.VarChar(64)
+  tokenKeyVersion       Int
+  scopeHash             String          @db.VarChar(128)
+  scopes                Json
+  expiresAt             DateTime?       @db.DateTime(3)
+  lastRefreshedAt       DateTime?       @db.DateTime(3)
+  createdAt             DateTime        @default(now()) @db.DateTime(3)
+  updatedAt             DateTime        @updatedAt @db.DateTime(3)
+  platformAccount       PlatformAccount @relation(fields: [platformAccountId], references: [id], onDelete: Restrict)
+
+  @@index([expiresAt])
+  @@map("oauth_credentials")
+}
+
+model ChannelTemplate {
+  id            String   @id @default(cuid())
+  channelId     String
+  version       Int
+  name          String   @db.VarChar(120)
+  tone          String?  @db.VarChar(120)
+  voiceProfile  String?  @db.VarChar(120)
+  subtitleStyle Json?
+  visualStyle   Json?
+  aiStockRatio  Decimal  @default(0.500000) @db.Decimal(7, 6)
+  isActive      Boolean  @default(false)
+  createdAt     DateTime @default(now()) @db.DateTime(3)
+  updatedAt     DateTime @updatedAt @db.DateTime(3)
+  channel       Channel  @relation(fields: [channelId], references: [id], onDelete: Restrict)
+
+  @@unique([channelId, version])
+  @@index([channelId, isActive])
+  @@map("channel_templates")
+}
+
+model PlatformOutputProfile {
+  id                 String   @id @default(cuid())
+  channelId          String
+  platform           Platform
+  version            Int      @default(1)
+  minDurationSeconds Int      @default(30)
+  maxDurationSeconds Int      @default(90)
+  hookStyle          String?  @db.VarChar(120)
+  captionStyle       String?  @db.VarChar(120)
+  metadataRules      Json?
+  publicSetting      String   @default("PUBLIC") @db.VarChar(40)
+  isActive           Boolean  @default(true)
+  createdAt          DateTime @default(now()) @db.DateTime(3)
+  updatedAt          DateTime @updatedAt @db.DateTime(3)
+  channel            Channel  @relation(fields: [channelId], references: [id], onDelete: Restrict)
+
+  @@unique([channelId, platform, version])
+  @@index([channelId, platform, isActive])
+  @@map("platform_output_profiles")
+}
+
+model ScheduleRule {
+  id           String    @id @default(cuid())
+  channelId    String
+  platform     Platform?
+  dayOfWeek    Int
+  timeOfDayUtc String    @db.VarChar(8)
+  timezone     String    @default("Asia/Seoul") @db.VarChar(64)
+  maxPosts     Int       @default(1)
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now()) @db.DateTime(3)
+  updatedAt    DateTime  @updatedAt @db.DateTime(3)
+  channel      Channel   @relation(fields: [channelId], references: [id], onDelete: Restrict)
+
+  @@index([channelId, platform, isActive])
+  @@map("schedule_rules")
+}
+
+model ContentItem {
+  id                      String                   @id @default(cuid())
+  channelId               String
+  status                  ContentStatus            @default(IDEA)
+  title                   String                   @db.VarChar(255)
+  summary                 String?                  @db.Text
+  topicKey                String                   @db.VarChar(191)
+  eventAt                 DateTime?                @db.DateTime(3)
+  collectedAt             DateTime?                @db.DateTime(3)
+  riskLevel               Int                      @default(0)
+  suitabilityScore        Decimal?                 @db.Decimal(7, 6)
+  duplicateGroupKey       String?                  @db.VarChar(191)
+  approvedAt              DateTime?                @db.DateTime(3)
+  heldReason              String?                  @db.Text
+  failureReason           String?                  @db.Text
+  createdAt               DateTime                 @default(now()) @db.DateTime(3)
+  updatedAt               DateTime                 @updatedAt @db.DateTime(3)
+  channel                 Channel                  @relation(fields: [channelId], references: [id], onDelete: Restrict)
+  sourceReferences        SourceReference[]
+  scriptVersions          ScriptVersion[]
+  sceneVersions           SceneVersion[]
+  assetUsages             AssetUsage[]
+  productionJobs          ProductionJob[]
+  policyChecks            PolicyCheck[]
+  publishPlans            PublishPlan[]
+  providerUsages          ProviderUsage[]
+  costLedger              CostLedger[]
+  strategyVersions        StrategyVersion[]
+  optimizationSuggestions OptimizationSuggestion[]
+  experiments             Experiment[]
+
+  @@unique([channelId, topicKey])
+  @@index([channelId, status, createdAt])
+  @@index([channelId, duplicateGroupKey])
+  @@map("content_items")
+}
+
+model SourceReference {
+  id                 String      @id @default(cuid())
+  contentItemId      String
+  kind               SourceKind
+  title              String      @db.VarChar(255)
+  url                String      @db.Text
+  urlHash            String      @db.VarChar(128)
+  sourceName         String      @db.VarChar(191)
+  author             String?     @db.VarChar(191)
+  publishedAt        DateTime?   @db.DateTime(3)
+  eventAt            DateTime?   @db.DateTime(3)
+  reliabilityScore   Decimal?    @db.Decimal(7, 6)
+  isPrimary          Boolean     @default(false)
+  normalizedSnapshot Json?
+  createdAt          DateTime    @default(now()) @db.DateTime(3)
+  contentItem        ContentItem @relation(fields: [contentItemId], references: [id], onDelete: Restrict)
+
+  @@unique([contentItemId, urlHash])
+  @@index([kind, publishedAt])
+  @@map("source_references")
+}
+
+model ScriptVersion {
+  id              String         @id @default(cuid())
+  contentItemId   String
+  version         Int
+  platform        Platform?
+  hook            String         @db.Text
+  body            String         @db.Text
+  callToAction    String?        @db.Text
+  language        String         @default("ko") @db.VarChar(16)
+  durationSeconds Decimal?       @db.Decimal(8, 3)
+  promptVersion   String?        @db.VarChar(80)
+  qualitySnapshot Json?
+  approvedAt      DateTime?      @db.DateTime(3)
+  createdAt       DateTime       @default(now()) @db.DateTime(3)
+  contentItem     ContentItem    @relation(fields: [contentItemId], references: [id], onDelete: Restrict)
+  sceneVersions   SceneVersion[]
+
+  @@unique([contentItemId, platform, version])
+  @@index([contentItemId, createdAt])
+  @@map("script_versions")
+}
+
+model SceneVersion {
+  id              String         @id @default(cuid())
+  contentItemId   String
+  scriptVersionId String?
+  version         Int
+  schemaVersion   String         @db.VarChar(40)
+  platform        Platform?
+  sceneDocument   Json
+  renderManifest  Json?
+  durationSeconds Decimal?       @db.Decimal(8, 3)
+  createdAt       DateTime       @default(now()) @db.DateTime(3)
+  contentItem     ContentItem    @relation(fields: [contentItemId], references: [id], onDelete: Restrict)
+  scriptVersion   ScriptVersion? @relation(fields: [scriptVersionId], references: [id], onDelete: SetNull)
+  publishPlans    PublishPlan[]
+  assetUsages     AssetUsage[]
+
+  @@unique([contentItemId, platform, version])
+  @@index([scriptVersionId])
+  @@map("scene_versions")
+}
+
+model Asset {
+  id              String         @id @default(cuid())
+  channelId       String?
+  kind            AssetKind
+  origin          AssetOrigin
+  storageKey      String         @db.VarChar(512)
+  checksumSha256  String         @unique @db.VarChar(64)
+  mimeType        String         @db.VarChar(120)
+  width           Int?
+  height          Int?
+  durationSeconds Decimal?       @db.Decimal(8, 3)
+  hasWatermark    Boolean        @default(false)
+  createdAt       DateTime       @default(now()) @db.DateTime(3)
+  updatedAt       DateTime       @updatedAt @db.DateTime(3)
+  channel         Channel?       @relation(fields: [channelId], references: [id], onDelete: SetNull)
+  sources         AssetSource[]
+  licenses        AssetLicense[]
+  usages          AssetUsage[]
+
+  @@index([channelId, kind, origin])
+  @@map("assets")
+}
+
+model AssetSource {
+  id               String    @id @default(cuid())
+  assetId          String
+  provider         String    @db.VarChar(80)
+  model            String?   @db.VarChar(120)
+  prompt           String?   @db.Text
+  sourceUrl        String?   @db.Text
+  creator          String?   @db.VarChar(191)
+  downloadedAt     DateTime? @db.DateTime(3)
+  providerResponse Json?
+  createdAt        DateTime  @default(now()) @db.DateTime(3)
+  asset            Asset     @relation(fields: [assetId], references: [id], onDelete: Restrict)
+
+  @@index([assetId, provider])
+  @@map("asset_sources")
+}
+
+model AssetLicense {
+  id                   String        @id @default(cuid())
+  assetId              String
+  status               LicenseStatus @default(PENDING)
+  licenseName          String        @db.VarChar(191)
+  commercialUseAllowed Boolean       @default(false)
+  derivativeAllowed    Boolean       @default(false)
+  attributionRequired  Boolean       @default(false)
+  attributionText      String?       @db.Text
+  proofUrl             String?       @db.Text
+  validFrom            DateTime?     @db.DateTime(3)
+  validUntil           DateTime?     @db.DateTime(3)
+  checkedAt            DateTime?     @db.DateTime(3)
+  createdAt            DateTime      @default(now()) @db.DateTime(3)
+  asset                Asset         @relation(fields: [assetId], references: [id], onDelete: Restrict)
+
+  @@index([assetId, status, checkedAt])
+  @@map("asset_licenses")
+}
+
+model AssetUsage {
+  id             String        @id @default(cuid())
+  assetId        String
+  contentItemId  String
+  sceneVersionId String?
+  purpose        String        @db.VarChar(120)
+  usageSnapshot  Json?
+  createdAt      DateTime      @default(now()) @db.DateTime(3)
+  asset          Asset         @relation(fields: [assetId], references: [id], onDelete: Restrict)
+  contentItem    ContentItem   @relation(fields: [contentItemId], references: [id], onDelete: Restrict)
+  sceneVersion   SceneVersion? @relation(fields: [sceneVersionId], references: [id], onDelete: SetNull)
+
+  @@unique([assetId, contentItemId, purpose])
+  @@index([contentItemId])
+  @@map("asset_usages")
+}
+
+model ProductionJob {
+  id             String              @id @default(cuid())
+  channelId      String?
+  contentItemId  String?
+  type           ProductionJobType
+  status         ProductionJobStatus @default(QUEUED)
+  queueName      String              @db.VarChar(80)
+  idempotencyKey String              @unique @db.VarChar(191)
+  payload        Json
+  result         Json?
+  errorCode      String?             @db.VarChar(80)
+  errorMessage   String?             @db.Text
+  runAfter       DateTime?           @db.DateTime(3)
+  startedAt      DateTime?           @db.DateTime(3)
+  finishedAt     DateTime?           @db.DateTime(3)
+  createdAt      DateTime            @default(now()) @db.DateTime(3)
+  updatedAt      DateTime            @updatedAt @db.DateTime(3)
+  channel        Channel?            @relation(fields: [channelId], references: [id], onDelete: SetNull)
+  contentItem    ContentItem?        @relation(fields: [contentItemId], references: [id], onDelete: SetNull)
+  attempts       JobAttempt[]
+  providerUsages ProviderUsage[]
+
+  @@index([queueName, status, runAfter])
+  @@index([contentItemId, type, status])
+  @@map("production_jobs")
+}
+
+model JobAttempt {
+  id              String              @id @default(cuid())
+  productionJobId String
+  attemptNumber   Int
+  status          ProductionJobStatus
+  startedAt       DateTime            @default(now()) @db.DateTime(3)
+  finishedAt      DateTime?           @db.DateTime(3)
+  errorCode       String?             @db.VarChar(80)
+  errorMessage    String?             @db.Text
+  logsRef         String?             @db.VarChar(512)
+  productionJob   ProductionJob       @relation(fields: [productionJobId], references: [id], onDelete: Restrict)
+
+  @@unique([productionJobId, attemptNumber])
+  @@map("job_attempts")
+}
+
+model PolicyRule {
+  id               String           @id @default(cuid())
+  platform         Platform
+  region           String           @default("GLOBAL") @db.VarChar(32)
+  version          Int
+  effectiveAt      DateTime         @db.DateTime(3)
+  checkedAt        DateTime         @db.DateTime(3)
+  durationRule     Json
+  originalityRule  Json
+  aiDisclosureRule Json
+  rightsRule       Json
+  restrictedTopics Json
+  createdAt        DateTime         @default(now()) @db.DateTime(3)
+  policyChecks     PolicyCheck[]
+  policySnapshots  PolicySnapshot[]
+
+  @@unique([platform, region, version])
+  @@index([platform, region, effectiveAt])
+  @@map("policy_rules")
+}
+
+model PolicyCheck {
+  id            String            @id @default(cuid())
+  contentItemId String
+  policyRuleId  String
+  platform      Platform
+  status        PolicyCheckStatus
+  reasons       Json
+  checkedAt     DateTime          @default(now()) @db.DateTime(3)
+  createdAt     DateTime          @default(now()) @db.DateTime(3)
+  contentItem   ContentItem       @relation(fields: [contentItemId], references: [id], onDelete: Restrict)
+  policyRule    PolicyRule        @relation(fields: [policyRuleId], references: [id], onDelete: Restrict)
+  snapshots     PolicySnapshot[]
+
+  @@index([contentItemId, platform, status])
+  @@index([policyRuleId])
+  @@map("policy_checks")
+}
+
+model PolicySnapshot {
+  id            String        @id @default(cuid())
+  channelId     String?
+  policyRuleId  String
+  policyCheckId String?
+  snapshot      Json
+  checkedAt     DateTime      @db.DateTime(3)
+  createdAt     DateTime      @default(now()) @db.DateTime(3)
+  channel       Channel?      @relation(fields: [channelId], references: [id], onDelete: SetNull)
+  policyRule    PolicyRule    @relation(fields: [policyRuleId], references: [id], onDelete: Restrict)
+  policyCheck   PolicyCheck?  @relation(fields: [policyCheckId], references: [id], onDelete: SetNull)
+  publishPlans  PublishPlan[]
+
+  @@index([channelId, createdAt])
+  @@map("policy_snapshots")
+}
+
+model PublishPlan {
+  id                String            @id @default(cuid())
+  contentItemId     String
+  platform          Platform
+  platformAccountId String
+  sceneVersionId    String?
+  policySnapshotId  String?
+  status            PublishPlanStatus @default(DRAFT)
+  scheduledAt       DateTime          @db.DateTime(3)
+  idempotencyKey    String            @unique @db.VarChar(191)
+  title             String            @db.VarChar(255)
+  description       String?           @db.Text
+  hashtags          Json?
+  metadata          Json?
+  createdAt         DateTime          @default(now()) @db.DateTime(3)
+  updatedAt         DateTime          @updatedAt @db.DateTime(3)
+  contentItem       ContentItem       @relation(fields: [contentItemId], references: [id], onDelete: Restrict)
+  platformAccount   PlatformAccount   @relation(fields: [platformAccountId], references: [id], onDelete: Restrict)
+  sceneVersion      SceneVersion?     @relation(fields: [sceneVersionId], references: [id], onDelete: SetNull)
+  policySnapshot    PolicySnapshot?   @relation(fields: [policySnapshotId], references: [id], onDelete: SetNull)
+  attempts          PublishAttempt[]
+  platformPost      PlatformPost?
+
+  @@unique([contentItemId, platform])
+  @@index([platform, status, scheduledAt])
+  @@index([platformAccountId, scheduledAt])
+  @@map("publish_plans")
+}
+
+model PublishAttempt {
+  id               String               @id @default(cuid())
+  publishPlanId    String
+  attemptNumber    Int
+  status           PublishAttemptStatus @default(QUEUED)
+  idempotencyKey   String               @unique @db.VarChar(191)
+  requestSnapshot  Json?
+  responseSnapshot Json?
+  errorCode        String?              @db.VarChar(80)
+  errorMessage     String?              @db.Text
+  startedAt        DateTime?            @db.DateTime(3)
+  finishedAt       DateTime?            @db.DateTime(3)
+  createdAt        DateTime             @default(now()) @db.DateTime(3)
+  publishPlan      PublishPlan          @relation(fields: [publishPlanId], references: [id], onDelete: Restrict)
+
+  @@unique([publishPlanId, attemptNumber])
+  @@index([publishPlanId, status])
+  @@map("publish_attempts")
+}
+
+model PlatformPost {
+  id                String          @id @default(cuid())
+  publishPlanId     String          @unique
+  platformAccountId String
+  platform          Platform
+  externalPostId    String          @db.VarChar(191)
+  postUrl           String          @db.Text
+  publishedAt       DateTime        @db.DateTime(3)
+  policyVersion     Int
+  createdAt         DateTime        @default(now()) @db.DateTime(3)
+  publishPlan       PublishPlan     @relation(fields: [publishPlanId], references: [id], onDelete: Restrict)
+  platformAccount   PlatformAccount @relation(fields: [platformAccountId], references: [id], onDelete: Restrict)
+
+  @@unique([platform, externalPostId])
+  @@index([platformAccountId, publishedAt])
+  @@map("platform_posts")
+}
+
+model ProviderUsage {
+  id               String         @id @default(cuid())
+  contentItemId    String?
+  productionJobId  String?
+  provider         String         @db.VarChar(80)
+  model            String?        @db.VarChar(120)
+  operation        String         @db.VarChar(80)
+  quantity         Decimal        @db.Decimal(18, 6)
+  unit             String         @db.VarChar(40)
+  unitPrice        Decimal?       @db.Decimal(18, 6)
+  currency         String         @default("USD") @db.VarChar(3)
+  estimatedCost    Decimal?       @db.Decimal(18, 6)
+  actualCost       Decimal?       @db.Decimal(18, 6)
+  idempotencyKey   String?        @unique @db.VarChar(191)
+  providerResponse Json?
+  occurredAt       DateTime       @default(now()) @db.DateTime(3)
+  contentItem      ContentItem?   @relation(fields: [contentItemId], references: [id], onDelete: SetNull)
+  productionJob    ProductionJob? @relation(fields: [productionJobId], references: [id], onDelete: SetNull)
+  costLedger       CostLedger[]
+
+  @@index([provider, operation, occurredAt])
+  @@index([contentItemId])
+  @@map("provider_usages")
+}
+
+model CostLedger {
+  id              String         @id @default(cuid())
+  contentItemId   String?
+  providerUsageId String?
+  direction       CostDirection
+  category        String         @db.VarChar(80)
+  amount          Decimal        @db.Decimal(18, 6)
+  currency        String         @default("USD") @db.VarChar(3)
+  occurredAt      DateTime       @default(now()) @db.DateTime(3)
+  note            String?        @db.VarChar(255)
+  contentItem     ContentItem?   @relation(fields: [contentItemId], references: [id], onDelete: SetNull)
+  providerUsage   ProviderUsage? @relation(fields: [providerUsageId], references: [id], onDelete: SetNull)
+
+  @@index([contentItemId, occurredAt])
+  @@index([category, occurredAt])
+  @@map("cost_ledger")
+}
+
+model StrategyVersion {
+  id                      String                   @id @default(cuid())
+  channelId               String
+  contentItemId           String?
+  version                 Int
+  name                    String                   @db.VarChar(120)
+  strategy                Json
+  promptVersion           String?                  @db.VarChar(80)
+  appliedAt               DateTime?                @db.DateTime(3)
+  createdAt               DateTime                 @default(now()) @db.DateTime(3)
+  channel                 Channel                  @relation(fields: [channelId], references: [id], onDelete: Restrict)
+  contentItem             ContentItem?             @relation(fields: [contentItemId], references: [id], onDelete: SetNull)
+  optimizationSuggestions OptimizationSuggestion[]
+  experiments             Experiment[]
+
+  @@unique([channelId, version])
+  @@index([channelId, appliedAt])
+  @@map("strategy_versions")
+}
+
+model OptimizationSuggestion {
+  id                String           @id @default(cuid())
+  channelId         String
+  contentItemId     String?
+  strategyVersionId String?
+  status            SuggestionStatus @default(PROPOSED)
+  title             String           @db.VarChar(191)
+  rationale         String           @db.Text
+  evidence          Json
+  sampleSize        Int
+  confidenceScore   Decimal?         @db.Decimal(7, 6)
+  expectedImpact    Json?
+  decidedAt         DateTime?        @db.DateTime(3)
+  appliedAt         DateTime?        @db.DateTime(3)
+  createdAt         DateTime         @default(now()) @db.DateTime(3)
+  channel           Channel          @relation(fields: [channelId], references: [id], onDelete: Restrict)
+  contentItem       ContentItem?     @relation(fields: [contentItemId], references: [id], onDelete: SetNull)
+  strategyVersion   StrategyVersion? @relation(fields: [strategyVersionId], references: [id], onDelete: SetNull)
+
+  @@index([channelId, status, createdAt])
+  @@map("optimization_suggestions")
+}
+
+model Experiment {
+  id                String           @id @default(cuid())
+  channelId         String
+  contentItemId     String?
+  strategyVersionId String?
+  status            ExperimentStatus @default(DRAFT)
+  name              String           @db.VarChar(120)
+  hypothesis        String           @db.Text
+  allocation        Json
+  successCriteria   Json
+  startedAt         DateTime?        @db.DateTime(3)
+  endedAt           DateTime?        @db.DateTime(3)
+  createdAt         DateTime         @default(now()) @db.DateTime(3)
+  updatedAt         DateTime         @updatedAt @db.DateTime(3)
+  channel           Channel          @relation(fields: [channelId], references: [id], onDelete: Restrict)
+  contentItem       ContentItem?     @relation(fields: [contentItemId], references: [id], onDelete: SetNull)
+  strategyVersion   StrategyVersion? @relation(fields: [strategyVersionId], references: [id], onDelete: SetNull)
+
+  @@index([channelId, status, createdAt])
+  @@map("experiments")
+}
