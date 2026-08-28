@@ -8,5 +8,6 @@ coverage/
 !.env.example
 *.log
 apps/web/dist/
+apps/web/test-results/
 apps/renderer/out/
 tmp/

@@ -3,6 +3,7 @@ import { APP_GUARD } from "@nestjs/core";
 import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
 import { AppController } from "./app.controller.js";
 import { AuthModule } from "./auth/auth.module.js";
+import { ChannelsModule } from "./channels/channels.module.js";
 import { CsrfGuard } from "./auth/csrf.guard.js";
 import { DatabaseModule } from "./database/database.module.js";
 
@@ -15,7 +16,8 @@ import { DatabaseModule } from "./database/database.module.js";
       }
     ]),
     DatabaseModule,
-    AuthModule
+    AuthModule,
+    ChannelsModule
   ],
   controllers: [AppController],
   providers: [

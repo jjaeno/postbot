@@ -2,7 +2,7 @@
 
 Postbot is an AI-assisted short-form content automation product for YouTube Shorts, Instagram Reels, and TikTok.
 
-This repository is currently at **3단계: 인증·사용자·보안 기반**. The codebase contains the monorepo foundation, Prisma data model, and email/password authentication with secure cookie sessions.
+This repository is currently at **4단계: 채널·템플릿·일정 설정 Vertical Slice**. The codebase contains the monorepo foundation, Prisma data model, secure email/password authentication, and the first authenticated channel configuration workflow.
 
 ## Requirements
 
@@ -95,9 +95,18 @@ Authenticated:
 ```text
 GET /auth/me
 GET /auth/workspaces/:workspaceId/access-check
+GET /channels
+POST /channels
+GET /channels/:channelId
+PATCH /channels/:channelId
+POST /channels/:channelId/pause
+POST /channels/:channelId/resume
+PUT /channels/:channelId/platform-accounts/:platformAccountId
 ```
 
 Authentication uses short-lived JWT access tokens and rotating refresh tokens in `HttpOnly`, `SameSite=Lax` cookies. Mutating authenticated requests must send `x-csrf-token` with the value from the `postbot_csrf` cookie. In production, cookies are also marked `Secure`.
+
+Channels store one clear topic, target audience, language, collection rule, common video template, platform output profiles, schedule rules, minimum inventory, and automation safety settings. OAuth is not implemented in this stage; selected platforms without credentials are returned as `PLANNED` and shown as `연결 예정`.
 
 ## Validation
 
@@ -105,6 +114,7 @@ Authentication uses short-lived JWT access tokens and rotating refresh tokens in
 pnpm lint
 pnpm typecheck
 pnpm test
+pnpm --filter @postbot/web e2e
 pnpm build
 ```
 

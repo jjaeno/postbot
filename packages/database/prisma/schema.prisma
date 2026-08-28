@@ -242,6 +242,7 @@ model Channel {
   workspace               Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   platformAccounts        PlatformAccount[]
   templates               ChannelTemplate[]
+  collectionRules         CollectionRule[]
   outputProfiles          PlatformOutputProfile[]
   scheduleRules           ScheduleRule[]
   contentItems            ContentItem[]
@@ -255,6 +256,26 @@ model Channel {
   @@unique([workspaceId, slug])
   @@index([workspaceId, status])
   @@map("channels")
+}
+
+model CollectionRule {
+  id                         String   @id @default(cuid())
+  channelId                  String
+  version                    Int      @default(1)
+  keywords                   Json
+  excludedKeywords           Json?
+  allowedSources             Json?
+  excludedSources            Json?
+  recencyHours               Int
+  collectionFrequencyMinutes Int
+  isActive                   Boolean  @default(true)
+  createdAt                  DateTime @default(now()) @db.DateTime(3)
+  updatedAt                  DateTime @updatedAt @db.DateTime(3)
+  channel                    Channel  @relation(fields: [channelId], references: [id], onDelete: Restrict)
+
+  @@unique([channelId, version])
+  @@index([channelId, isActive])
+  @@map("collection_rules")
 }
 
 model PlatformAccount {

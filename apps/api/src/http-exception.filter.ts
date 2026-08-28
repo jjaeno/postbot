@@ -2,7 +2,7 @@ import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus } from
 import type { Response } from "express";
 import type { ErrorResponse } from "@postbot/contracts";
 
-const codeFromStatus = (status: number): string => {
+const codeFromStatus = (status: HttpStatus): string => {
   switch (status) {
     case HttpStatus.BAD_REQUEST:
       return "BAD_REQUEST";
