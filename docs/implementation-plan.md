@@ -252,12 +252,12 @@ packages/providers
 
 ### 1단계. 모노레포와 로컬 인프라 구축
 
-- [ ] pnpm workspace와 Turborepo 구성
-- [ ] `apps/web`, `apps/api`, `apps/worker`, `apps/renderer` 생성
-- [ ] 공통 `packages` 생성
-- [ ] Docker Compose로 MySQL 8, Redis, MinIO 구성
-- [ ] ESLint, Prettier, TypeScript strict, Vitest, Playwright 기본 설정
-- [ ] `.env.example`, 환경 변수 Zod 검증, `/health`, README 작성
+- [x] pnpm workspace와 Turborepo 구성
+- [x] `apps/web`, `apps/api`, `apps/worker`, `apps/renderer` 생성
+- [x] 공통 `packages` 생성
+- [x] Docker Compose로 MySQL 8, Redis, MinIO 구성
+- [x] ESLint, Prettier, TypeScript strict, Vitest, Playwright 기본 설정
+- [x] `.env.example`, 환경 변수 Zod 검증, `/health`, README 작성
 
 매핑 요구사항: 기술 스택 확정, 모노레포 구조, 로컬 개발 재현, 테스트·CI 기준.
 

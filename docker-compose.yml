@@ -1,0 +1,52 @@
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: postbot-mysql
+    environment:
+      MYSQL_DATABASE: postbot
+      MYSQL_USER: postbot
+      MYSQL_PASSWORD: postbot
+      MYSQL_ROOT_PASSWORD: postbot-root
+      TZ: UTC
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -upostbot -ppostbot --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: postbot-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: postbot-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: postbot
+      MINIO_ROOT_PASSWORD: postbot-password
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  mysql-data:
+  minio-data:
