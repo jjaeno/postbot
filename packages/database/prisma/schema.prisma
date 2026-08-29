@@ -202,9 +202,34 @@ model Workspace {
   channels         Channel[]
   platformAccounts PlatformAccount[]
   authSessions     AuthSession[]
+  oauthStates      OAuthConnectionState[]
 
   @@index([ownerId])
   @@map("workspaces")
+}
+
+model OAuthConnectionState {
+  id                    String    @id @default(cuid())
+  workspaceId           String
+  channelId             String?
+  platform              Platform
+  stateHash             String    @unique @db.VarChar(128)
+  encryptedCodeVerifier String    @db.Text
+  tokenCipher           String    @db.VarChar(64)
+  tokenKeyVersion       Int
+  scopes                Json
+  redirectUri           String    @db.VarChar(512)
+  provider              String    @db.VarChar(40)
+  expiresAt             DateTime  @db.DateTime(3)
+  usedAt                DateTime? @db.DateTime(3)
+  createdAt             DateTime  @default(now()) @db.DateTime(3)
+  updatedAt             DateTime  @updatedAt @db.DateTime(3)
+  workspace             Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  channel               Channel?  @relation(fields: [channelId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, platform, expiresAt])
+  @@index([channelId])
+  @@map("oauth_connection_states")
 }
 
 model Membership {
@@ -249,6 +274,7 @@ model Channel {
   assets                  Asset[]
   productionJobs          ProductionJob[]
   policySnapshots         PolicySnapshot[]
+  oauthStates             OAuthConnectionState[]
   strategyVersions        StrategyVersion[]
   experiments             Experiment[]
   optimizationSuggestions OptimizationSuggestion[]

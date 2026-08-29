@@ -2,7 +2,7 @@
 
 Postbot is an AI-assisted short-form content automation product for YouTube Shorts, Instagram Reels, and TikTok.
 
-This repository is currently at **4단계: 채널·템플릿·일정 설정 Vertical Slice**. The codebase contains the monorepo foundation, Prisma data model, secure email/password authentication, and the first authenticated channel configuration workflow.
+This repository is currently at **5단계: SNS OAuth 기반과 YouTube 연결**. The codebase contains the monorepo foundation, Prisma data model, secure email/password authentication, channel configuration workflow, and YouTube account connection through OAuth/Fake OAuth providers.
 
 ## Requirements
 
@@ -32,6 +32,19 @@ cp .env.example .env
 ```
 
 The example values are local placeholders only. Do not commit real API keys, OAuth tokens, or secrets.
+
+OAuth-related variables:
+
+```text
+OAUTH_ENCRYPTION_KEY=replace-with-32-byte-base64-key
+OAUTH_ENCRYPTION_KEY_VERSION=1
+YOUTUBE_OAUTH_PROVIDER=fake
+YOUTUBE_CLIENT_ID=
+YOUTUBE_CLIENT_SECRET=
+WEB_BASE_URL=http://localhost:5173
+```
+
+Use `YOUTUBE_OAUTH_PROVIDER=fake` for local E2E without real Google credentials. Use `google` only with a real client ID, client secret, and registered redirect URI.
 
 ## Local Infrastructure
 
@@ -88,6 +101,7 @@ POST /auth/register
 POST /auth/login
 POST /auth/refresh
 POST /auth/logout
+GET /platform-accounts/youtube/callback
 ```
 
 Authenticated:
@@ -102,11 +116,14 @@ PATCH /channels/:channelId
 POST /channels/:channelId/pause
 POST /channels/:channelId/resume
 PUT /channels/:channelId/platform-accounts/:platformAccountId
+GET /platform-accounts
+POST /platform-accounts/youtube/connect
+POST /platform-accounts/:platformAccountId/disconnect
 ```
 
 Authentication uses short-lived JWT access tokens and rotating refresh tokens in `HttpOnly`, `SameSite=Lax` cookies. Mutating authenticated requests must send `x-csrf-token` with the value from the `postbot_csrf` cookie. In production, cookies are also marked `Secure`.
 
-Channels store one clear topic, target audience, language, collection rule, common video template, platform output profiles, schedule rules, minimum inventory, and automation safety settings. OAuth is not implemented in this stage; selected platforms without credentials are returned as `PLANNED` and shown as `연결 예정`.
+YouTube OAuth uses state + PKCE, required scope validation, encrypted access/refresh token storage, and one-time callback state consumption. Uploading videos is intentionally not implemented in this stage.
 
 ## Validation
 
@@ -116,6 +133,21 @@ pnpm typecheck
 pnpm test
 pnpm --filter @postbot/web e2e
 pnpm build
+```
+
+For stage 5, the focused validation set is:
+
+```bash
+pnpm --filter @postbot/publishers lint
+pnpm --filter @postbot/publishers typecheck
+pnpm --filter @postbot/api lint
+pnpm --filter @postbot/api typecheck
+pnpm --filter @postbot/api test
+pnpm --filter @postbot/api build
+pnpm --filter @postbot/web lint
+pnpm --filter @postbot/web typecheck
+pnpm --filter @postbot/web build
+pnpm --filter @postbot/web e2e
 ```
 
 ## Workspace Layout

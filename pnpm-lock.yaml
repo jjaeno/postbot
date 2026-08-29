@@ -62,6 +62,9 @@ importers:
       '@postbot/logger':
         specifier: workspace:*
         version: link:../../packages/logger
+      '@postbot/publishers':
+        specifier: workspace:*
+        version: link:../../packages/publishers
       cookie-parser:
         specifier: ^1.4.7
         version: 1.4.7

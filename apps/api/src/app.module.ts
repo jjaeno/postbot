@@ -6,6 +6,7 @@ import { AuthModule } from "./auth/auth.module.js";
 import { ChannelsModule } from "./channels/channels.module.js";
 import { CsrfGuard } from "./auth/csrf.guard.js";
 import { DatabaseModule } from "./database/database.module.js";
+import { PlatformAccountsModule } from "./platform-accounts/platform-accounts.module.js";
 
 @Module({
   imports: [
@@ -17,7 +18,8 @@ import { DatabaseModule } from "./database/database.module.js";
     ]),
     DatabaseModule,
     AuthModule,
-    ChannelsModule
+    ChannelsModule,
+    PlatformAccountsModule
   ],
   controllers: [AppController],
   providers: [

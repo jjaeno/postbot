@@ -6,7 +6,7 @@ The NestJS API exposes the generated OpenAPI UI at:
 http://localhost:3000/openapi
 ```
 
-Current 4단계 endpoints:
+Current stage 5 endpoints:
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
@@ -24,6 +24,10 @@ Current 4단계 endpoints:
 | POST | `/channels/:channelId/pause` | Access cookie + CSRF | Pause channel automation |
 | POST | `/channels/:channelId/resume` | Access cookie + CSRF | Resume channel automation |
 | PUT | `/channels/:channelId/platform-accounts/:platformAccountId` | Access cookie + CSRF | Assign an existing platform account to one channel |
+| GET | `/platform-accounts` | Access cookie | List platform accounts for the authenticated workspace |
+| POST | `/platform-accounts/youtube/connect` | Access cookie + CSRF | Create a YouTube OAuth state with PKCE and return the provider authorization URL |
+| GET | `/platform-accounts/youtube/callback` | OAuth state | Consume a YouTube OAuth callback and connect the platform account |
+| POST | `/platform-accounts/:platformAccountId/disconnect` | Access cookie + CSRF | Revoke provider tokens when possible and disconnect the account |
 
 Authenticated mutating requests must include:
 
@@ -45,4 +49,26 @@ Access and refresh JWTs are stored only in `HttpOnly` cookies. API responses nev
 - `scheduleRules`: platform, day of week, local time, timezone, max posts
 - `automation`: `APPROVAL` or `FULL_AUTO`, minimum inventory, daily publish limit, and failure actions
 
-Selected platforms without OAuth credentials are returned in `platformConnections` as `PLANNED`. This stage does not create fake OAuth success states.
+Selected platforms without OAuth credentials are returned in `platformConnections` as `PLANNED`.
+
+## Platform Account Contract
+
+`GET /platform-accounts` returns:
+
+- `id`, `workspaceId`, `channelId`
+- `platform`
+- `externalAccountId`, `handle`, `displayName`
+- `status`: `PLANNED`, `CONNECTED`, `EXPIRED`, `SCOPE_MISSING`, or `DISCONNECTED`
+- granted `scopes`
+- `expiresAt`, `connectedAt`, `disconnectedAt`
+
+`POST /platform-accounts/youtube/connect` accepts an optional `channelId` and returns:
+
+- `authorizationUrl`
+- `stateExpiresAt`
+- `provider`: `fake` or `google`
+- `requiredScopes`
+
+The callback validates OAuth `state`, consumes it once, uses the stored PKCE verifier, validates required YouTube scopes, encrypts access/refresh tokens at application level, records the encryption key version, and links the external account to at most one workspace/channel.
+
+The stage 5 API does not upload videos and does not fake successful Google behavior when real credentials or scopes are missing.

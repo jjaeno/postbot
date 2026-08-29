@@ -16,7 +16,7 @@ type ChannelWithSettings = Prisma.ChannelGetPayload<{
     templates: true;
     outputProfiles: true;
     scheduleRules: true;
-    platformAccounts: true;
+  platformAccounts: { include: { credential: true } };
   };
 }>;
 
@@ -25,7 +25,7 @@ const channelInclude = {
   templates: { where: { isActive: true }, orderBy: { version: "desc" as const }, take: 1 },
   outputProfiles: { where: { isActive: true }, orderBy: { platform: "asc" as const } },
   scheduleRules: { where: { isActive: true }, orderBy: [{ dayOfWeek: "asc" as const }, { timeOfDayUtc: "asc" as const }] },
-  platformAccounts: true
+  platformAccounts: { include: { credential: true } }
 };
 
 const slugify = (value: string): string =>
@@ -53,7 +53,12 @@ const toPlatformConnections = (
     return account
       ? {
           platform,
-          status: account.status === "DISCONNECTED" ? "PLANNED" : account.status,
+          status:
+            account.status === "CONNECTED" && account.credential?.expiresAt && account.credential.expiresAt <= new Date()
+              ? "EXPIRED"
+              : account.status === "DISCONNECTED"
+                ? "PLANNED"
+                : account.status,
           handle: account.handle,
           displayName: account.displayName
         }

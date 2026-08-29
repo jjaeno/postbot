@@ -187,6 +187,49 @@ export const PlatformConnectionSchema = z.object({
   displayName: z.string().nullable()
 });
 
+export const PlatformAccountResponseSchema = z.object({
+  id: z.string().min(1),
+  workspaceId: z.string().min(1),
+  channelId: z.string().nullable(),
+  platform: PlatformSchema,
+  externalAccountId: z.string().min(1),
+  handle: z.string().nullable(),
+  displayName: z.string().nullable(),
+  status: ConnectionStatusSchema,
+  scopes: z.array(z.string()),
+  expiresAt: z.string().datetime().nullable(),
+  connectedAt: z.string().datetime().nullable(),
+  disconnectedAt: z.string().datetime().nullable()
+});
+
+export const PlatformAccountListResponseSchema = z.object({
+  accounts: z.array(PlatformAccountResponseSchema)
+});
+
+export const StartOAuthConnectionRequestSchema = z.object({
+  channelId: z.string().min(1).optional()
+});
+
+export const StartOAuthConnectionResponseSchema = z.object({
+  authorizationUrl: z.string().url(),
+  stateExpiresAt: z.string().datetime(),
+  provider: z.enum(["fake", "google"]),
+  requiredScopes: z.array(z.string())
+});
+
+export const OAuthCallbackQuerySchema = z.object({
+  state: z.string().min(32),
+  code: z.string().min(1)
+});
+
+export const OAuthCallbackResultSchema = z.object({
+  account: PlatformAccountResponseSchema
+});
+
+export const DisconnectPlatformAccountResponseSchema = z.object({
+  ok: z.literal(true)
+});
+
 export const ChannelResponseSchema = z.object({
   id: z.string().min(1),
   workspaceId: z.string().min(1),
@@ -226,5 +269,12 @@ export type AutomationSettings = z.infer<typeof AutomationSettingsSchema>;
 export type CreateChannelRequest = z.infer<typeof CreateChannelRequestSchema>;
 export type UpdateChannelRequest = z.infer<typeof UpdateChannelRequestSchema>;
 export type PlatformConnection = z.infer<typeof PlatformConnectionSchema>;
+export type PlatformAccountResponse = z.infer<typeof PlatformAccountResponseSchema>;
+export type PlatformAccountListResponse = z.infer<typeof PlatformAccountListResponseSchema>;
+export type StartOAuthConnectionRequest = z.infer<typeof StartOAuthConnectionRequestSchema>;
+export type StartOAuthConnectionResponse = z.infer<typeof StartOAuthConnectionResponseSchema>;
+export type OAuthCallbackQuery = z.infer<typeof OAuthCallbackQuerySchema>;
+export type OAuthCallbackResult = z.infer<typeof OAuthCallbackResultSchema>;
+export type DisconnectPlatformAccountResponse = z.infer<typeof DisconnectPlatformAccountResponseSchema>;
 export type ChannelResponse = z.infer<typeof ChannelResponseSchema>;
 export type ChannelListResponse = z.infer<typeof ChannelListResponseSchema>;

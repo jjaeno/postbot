@@ -11,7 +11,9 @@ import {
   LogOut,
   Pencil,
   Plus,
+  RefreshCw,
   ShieldCheck,
+  Unplug,
   UserPlus
 } from "lucide-react";
 import type { FormEvent, ReactElement } from "react";
@@ -24,10 +26,14 @@ import {
   ChannelListResponseSchema,
   ChannelResponseSchema,
   CreateChannelRequestSchema,
+  OAuthCallbackResultSchema,
+  PlatformAccountListResponseSchema,
+  StartOAuthConnectionResponseSchema,
   type AuthResponse,
   type AuthSession,
   type ChannelResponse,
   type CreateChannelRequest,
+  type PlatformAccountResponse,
   type Platform
 } from "@postbot/contracts";
 import { Button } from "./components/ui/button";
@@ -76,6 +82,25 @@ const authMutation = (path: "/auth/login" | "/auth/register", body: object): Pro
 const fetchMe = (): Promise<AuthSession> => request("/auth/me", { method: "GET" }, AuthSessionSchema);
 const fetchChannels = (): Promise<ChannelResponse[]> =>
   request("/channels", { method: "GET" }, ChannelListResponseSchema).then((data) => data.channels);
+const fetchPlatformAccounts = (): Promise<PlatformAccountResponse[]> =>
+  request("/platform-accounts", { method: "GET" }, PlatformAccountListResponseSchema).then((data) => data.accounts);
+
+const requestAbsolute = async <Result,>(
+  url: string,
+  options: RequestInit,
+  parser: { parse(value: unknown): Result }
+): Promise<Result> => {
+  const response = await fetch(url, { ...options, credentials: "include" });
+  const body = (await response.json().catch(() => null)) as unknown;
+  if (!response.ok) {
+    const message =
+      body && typeof body === "object" && "message" in body && typeof body.message === "string"
+        ? body.message
+        : "요청을 처리하지 못했습니다.";
+    throw new Error(message);
+  }
+  return parser.parse(body);
+};
 
 const formText = (formData: FormData, name: string): string => {
   const value = formData.get(name);
@@ -365,6 +390,11 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
     queryFn: fetchChannels,
     enabled: Boolean(session)
   });
+  const platformAccounts = useQuery({
+    queryKey: ["platform-accounts"],
+    queryFn: fetchPlatformAccounts,
+    enabled: Boolean(session)
+  });
 
   return (
     <main className="min-h-screen bg-background px-5 py-6 text-foreground md:px-8">
@@ -381,7 +411,7 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button className="gap-2" onClick={() => setWizardOpen(true)}>
+            <Button className="gap-2" data-testid="create-channel" onClick={() => setWizardOpen(true)}>
               <Plus aria-hidden="true" className="h-4 w-4" />
               채널 만들기
             </Button>
@@ -396,6 +426,7 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
 
         <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
           <ChannelList
+            accounts={platformAccounts.data ?? []}
             channels={channels.data ?? []}
             isLoading={channels.isLoading}
             onEdit={setEditing}
@@ -410,11 +441,13 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
 };
 
 const ChannelList = ({
+  accounts,
   channels,
   isLoading,
   onEdit,
   onError
 }: {
+  accounts: PlatformAccountResponse[];
   channels: ChannelResponse[];
   isLoading: boolean;
   onEdit: (channel: ChannelResponse) => void;
@@ -435,22 +468,30 @@ const ChannelList = ({
   return (
     <section className="grid gap-4">
       {channels.map((channel) => (
-        <ChannelCard key={channel.id} channel={channel} onEdit={onEdit} onError={onError} />
+        <ChannelCard key={channel.id} accounts={accounts} channel={channel} onEdit={onEdit} onError={onError} />
       ))}
     </section>
   );
 };
 
 const ChannelCard = ({
+  accounts,
   channel,
   onEdit,
   onError
 }: {
+  accounts: PlatformAccountResponse[];
   channel: ChannelResponse;
   onEdit: (channel: ChannelResponse) => void;
   onError: (error: string) => void;
 }): ReactElement => {
   const queryClient = useQueryClient();
+  const youtubeAccount = accounts.find((account) => account.platform === "YOUTUBE" && account.channelId === channel.id);
+  const youtubeConnected = youtubeAccount?.status === "CONNECTED";
+  const youtubeExpired = youtubeAccount?.status === "EXPIRED";
+  const youtubeScopeMissing =
+    youtubeAccount?.status === "CONNECTED" &&
+    !youtubeAccount.scopes.includes("https://www.googleapis.com/auth/youtube.readonly");
   const statusMutation = useMutation({
     mutationFn: (action: "pause" | "resume") =>
       request(`/channels/${channel.id}/${action}`, { method: "POST" }, ChannelResponseSchema),
@@ -459,9 +500,41 @@ const ChannelCard = ({
     },
     onError: (error) => onError(error instanceof Error ? error.message : "채널 상태를 변경하지 못했습니다.")
   });
+  const connectMutation = useMutation({
+    mutationFn: async () => {
+      const started = await request(
+        "/platform-accounts/youtube/connect",
+        { method: "POST", body: JSON.stringify({ channelId: channel.id }) },
+        StartOAuthConnectionResponseSchema
+      );
+      if (started.provider === "fake") {
+        await requestAbsolute(started.authorizationUrl, { method: "GET" }, OAuthCallbackResultSchema);
+        return;
+      }
+      window.location.assign(started.authorizationUrl);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["channels"] });
+      void queryClient.invalidateQueries({ queryKey: ["platform-accounts"] });
+    },
+    onError: (error) => onError(error instanceof Error ? error.message : "YouTube 계정을 연결하지 못했습니다.")
+  });
+  const disconnectMutation = useMutation({
+    mutationFn: () => {
+      if (!youtubeAccount) {
+        throw new Error("연결된 YouTube 계정이 없습니다.");
+      }
+      return request(`/platform-accounts/${youtubeAccount.id}/disconnect`, { method: "POST" }, { parse: () => ({ ok: true }) });
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["channels"] });
+      void queryClient.invalidateQueries({ queryKey: ["platform-accounts"] });
+    },
+    onError: (error) => onError(error instanceof Error ? error.message : "YouTube 계정 연결을 해제하지 못했습니다.")
+  });
 
   return (
-    <article className="rounded-md border border-border bg-white p-5 shadow-sm">
+    <article className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid={`channel-card-${channel.id}`}>
       <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
         <div>
           <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -472,7 +545,7 @@ const ChannelCard = ({
           <p className="mt-1 text-sm text-muted-foreground">{channel.targetAudience} · {channel.language}</p>
         </div>
         <div className="flex gap-2">
-          <Button className="gap-2 bg-foreground" onClick={() => onEdit(channel)}>
+          <Button className="gap-2 bg-foreground" data-testid={`edit-channel-${channel.id}`} onClick={() => onEdit(channel)}>
             <Pencil aria-hidden="true" className="h-4 w-4" />
             설정
           </Button>
@@ -494,8 +567,50 @@ const ChannelCard = ({
           <div key={connection.platform} className="rounded-md border border-border bg-muted px-3 py-2">
             <p className="text-sm font-medium">{platforms.find((item) => item.value === connection.platform)?.label}</p>
             <p className="mt-1 text-xs text-muted-foreground">
-              {connection.status === "PLANNED" ? "연결 예정" : connection.status}
+              {connection.platform === "YOUTUBE" && youtubeScopeMissing
+                ? "권한 부족"
+                : connection.status === "PLANNED"
+                  ? "연결 예정"
+                  : connection.status === "EXPIRED"
+                    ? "만료"
+                    : connection.status}
             </p>
+            {connection.platform === "YOUTUBE" ? (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {youtubeConnected || youtubeExpired ? (
+                  <>
+                    <Button
+                      className="h-9 gap-2"
+                      data-testid={`connect-youtube-${channel.id}`}
+                      disabled={connectMutation.isPending}
+                      onClick={() => connectMutation.mutate()}
+                    >
+                      <RefreshCw aria-hidden="true" className="h-4 w-4" />
+                      재연결
+                    </Button>
+                    <Button
+                      className="h-9 gap-2 bg-foreground"
+                      data-testid={`disconnect-youtube-${channel.id}`}
+                      disabled={disconnectMutation.isPending}
+                      onClick={() => disconnectMutation.mutate()}
+                    >
+                      <Unplug aria-hidden="true" className="h-4 w-4" />
+                      해제
+                    </Button>
+                  </>
+                ) : (
+                  <Button
+                    className="h-9 gap-2"
+                    data-testid={`connect-youtube-${channel.id}`}
+                    disabled={connectMutation.isPending}
+                    onClick={() => connectMutation.mutate()}
+                  >
+                    <Plus aria-hidden="true" className="h-4 w-4" />
+                    연결
+                  </Button>
+                )}
+              </div>
+            ) : null}
           </div>
         ))}
       </div>
@@ -596,7 +711,7 @@ const EditPanel = ({
           />
         </label>
         <div className="flex gap-2">
-          <Button className="gap-2" disabled={mutation.isPending} onClick={() => mutation.mutate()}>
+          <Button className="gap-2" data-testid="save-channel-settings" disabled={mutation.isPending} onClick={() => mutation.mutate()}>
             <CheckCircle2 aria-hidden="true" className="h-4 w-4" />
             저장
           </Button>
@@ -676,12 +791,12 @@ const ChannelWizard = ({
             이전
           </Button>
           {step === lastStep ? (
-            <Button className="gap-2" disabled={mutation.isPending} type="submit">
+            <Button className="gap-2" data-testid="wizard-create" disabled={mutation.isPending} type="submit">
               <CheckCircle2 aria-hidden="true" className="h-4 w-4" />
               생성
             </Button>
           ) : (
-            <Button className="gap-2" onClick={() => setStep((current) => current + 1)} type="button">
+            <Button className="gap-2" data-testid="wizard-next" onClick={() => setStep((current) => current + 1)} type="button">
               다음
               <ChevronRight aria-hidden="true" className="h-4 w-4" />
             </Button>
