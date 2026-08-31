@@ -278,3 +278,87 @@ export type OAuthCallbackResult = z.infer<typeof OAuthCallbackResultSchema>;
 export type DisconnectPlatformAccountResponse = z.infer<typeof DisconnectPlatformAccountResponseSchema>;
 export type ChannelResponse = z.infer<typeof ChannelResponseSchema>;
 export type ChannelListResponse = z.infer<typeof ChannelListResponseSchema>;
+
+export const ProductionJobTypeSchema = z.enum([
+  "COLLECT",
+  "SCRIPT",
+  "ASSET",
+  "TTS",
+  "RENDER",
+  "POLICY",
+  "PUBLISH",
+  "ANALYTICS"
+]);
+
+export const ProductionJobStatusSchema = z.enum([
+  "QUEUED",
+  "RUNNING",
+  "RETRY_WAIT",
+  "NEEDS_REVIEW",
+  "SUCCEEDED",
+  "FAILED",
+  "CANCEL_REQUESTED",
+  "CANCELLED"
+]);
+
+export const CreateProductionJobRequestSchema = z.object({
+  type: ProductionJobTypeSchema,
+  channelId: z.string().min(1),
+  contentItemId: z.string().min(1).optional(),
+  idempotencyKey: z.string().min(8).max(191),
+  payload: JsonObjectSchema.default({}),
+  runAfter: z.string().datetime().optional()
+});
+
+export const RecoverProductionJobRequestSchema = z.object({
+  runAfter: z.string().datetime().optional()
+});
+
+export const JobAttemptResponseSchema = z.object({
+  id: z.string().min(1),
+  attemptNumber: z.number().int().positive(),
+  status: ProductionJobStatusSchema,
+  startedAt: z.string().datetime(),
+  finishedAt: z.string().datetime().nullable(),
+  errorCode: z.string().nullable(),
+  errorMessage: z.string().nullable()
+});
+
+export const ProductionJobResponseSchema = z.object({
+  id: z.string().min(1),
+  channelId: z.string().nullable(),
+  contentItemId: z.string().nullable(),
+  type: ProductionJobTypeSchema,
+  status: ProductionJobStatusSchema,
+  queueName: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+  payload: JsonObjectSchema,
+  result: JsonObjectSchema.nullable(),
+  errorCode: z.string().nullable(),
+  errorMessage: z.string().nullable(),
+  runAfter: z.string().datetime().nullable(),
+  startedAt: z.string().datetime().nullable(),
+  finishedAt: z.string().datetime().nullable(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  attempts: z.array(JobAttemptResponseSchema),
+  duplicate: z.boolean().optional()
+});
+
+export const JobProgressEventSchema = z.object({
+  id: z.string().min(1),
+  jobId: z.string().min(1),
+  status: ProductionJobStatusSchema,
+  attemptNumber: z.number().int().positive().nullable(),
+  progress: z.number().min(0).max(100),
+  message: z.string(),
+  createdAt: z.string().datetime()
+});
+
+export type ProductionJobType = z.infer<typeof ProductionJobTypeSchema>;
+export type ProductionJobStatus = z.infer<typeof ProductionJobStatusSchema>;
+export type CreateProductionJobRequest = z.infer<typeof CreateProductionJobRequestSchema>;
+export type RecoverProductionJobRequest = z.infer<typeof RecoverProductionJobRequestSchema>;
+export type JobAttemptResponse = z.infer<typeof JobAttemptResponseSchema>;
+export type ProductionJobResponse = z.infer<typeof ProductionJobResponseSchema>;
+export type JobProgressEvent = z.infer<typeof JobProgressEventSchema>;

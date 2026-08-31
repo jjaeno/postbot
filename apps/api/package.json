@@ -20,6 +20,7 @@
     "@postbot/config": "workspace:*",
     "@postbot/contracts": "workspace:*",
     "@postbot/database": "workspace:*",
+    "@postbot/jobs": "workspace:*",
     "@postbot/logger": "workspace:*",
     "@postbot/publishers": "workspace:*",
     "cookie-parser": "^1.4.7",
