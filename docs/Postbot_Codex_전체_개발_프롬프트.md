@@ -1,6 +1,26 @@
+> [!IMPORTANT]
+> 이 문서는 Postbot v1 전체 개발 순서를 보존하는 참고용 마스터 로드맵이다.
+>
+> Codex가 개별 단계를 수행할 때 이 문서 전체를 읽지 않는다.
+>
+> 실행 기준:
+> - 공통 규칙: `/AGENTS.md`
+> - 단계 범위·완료 조건·커밋 메시지: `/docs/implementation-plan.md`
+> - 확정 기술 결정: `/docs/architecture-decisions.md`
+>
+> 본 문서와 위 실행 기준이 충돌하면 위 실행 기준을 우선한다.
+
 # Postbot 전체 개발용 Codex 프롬프트
 
 이 문서는 Postbot을 빈 저장소부터 실제 배포 가능한 v1까지 순차적으로 개발하기 위한 프롬프트 묶음이다.
+
+## 단계별 구현 프롬프트
+docs/implementation-plan.md의 ?단계를 구현해.
+
+루트 AGENTS.md를 따르고, 필요한 기존 기술 결정만
+docs/architecture-decisions.md에서 확인해.
+
+?단계 범위를 벗어나지 말고 필수 검증 후 지정된 메시지로 커밋해.
 
 ## 사용 방법
 

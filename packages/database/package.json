@@ -13,9 +13,11 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "db:reset:test": "tsx src/scripts/reset-test-db.ts",
+    "db:seed": "tsx src/scripts/seed.ts",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run src --passWithNoTests"
   },
   "devDependencies": {
     "prisma": "6.19.1",

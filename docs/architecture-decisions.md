@@ -1,147 +1,371 @@
 ﻿# Postbot 아키텍처 결정 기록
 
-기준 문서:
+이 문서는 Postbot v1의 **확정된 아키텍처 결정과 아직 해결되지 않은 기술 결정**을 기록한다.
 
-- `docs/Postbot_기능_UX_명세서_v0.2.docx`
-- `docs/Postbot_v1_기술_스택_확정서.docx`
-- `docs/Postbot_Codex_전체_개발_프롬프트.md`
+단계별 구현 범위와 완료 조건은 `docs/implementation-plan.md`를 따른다.
 
-본 문서는 v1 구현 전 확정된 기술 결정, 명세와의 관계, 미결정 사항, 외부 API 제약을 기록한다.
+상세 제품 및 기술 요구사항이 필요한 경우에만 다음 문서를 참조한다.
 
-## 1. 확정 기술 결정
+* `docs/Postbot_기능_UX_명세서_v0.2.docx`
+* `docs/Postbot_v1_기술_스택_확정서.docx`
 
-### ADR-001. TypeScript end-to-end
+`docs/Postbot_Codex_전체_개발_프롬프트.md`는 전체 로드맵 참고용이며 아키텍처 결정의 기준 문서가 아니다.
 
-- 결정: 웹, API, 워커, 렌더러, 공통 패키지를 TypeScript strict로 작성한다.
-- 근거: DTO, Zod schema, SceneDocument, Provider 계약을 한 언어로 공유해 계약 불일치를 줄인다.
-- 제약: `any`, `ts-ignore`, 임시 하드코딩을 피하고 타입 누락은 계약으로 보완한다.
+---
 
-### ADR-002. 모듈형 모놀리스와 분리된 워커 프로세스
+# 1. 확정된 ADR
 
-- 결정: v1은 마이크로서비스가 아니라 모듈형 모놀리스로 시작한다. API, worker, renderer는 같은 저장소에 두되 프로세스는 분리한다.
-- 근거: 초기 운영 복잡도를 낮추면서 수집·생성·렌더·게시 장시간 작업이 HTTP 요청을 막지 않게 한다.
-- 제약: 앱 간 직접 참조 금지, 공통 계약은 `packages`를 통해서만 공유한다.
+## ADR-001 — TypeScript end-to-end
 
-### ADR-003. React/Vite 관리 콘솔
+**결정**
 
-- 결정: `apps/web`은 React + Vite, Tailwind CSS, shadcn/ui, TanStack Query, Zustand, React Hook Form, Zod를 사용한다.
-- 근거: 채널 설정, 검수, 캘린더, 분석 UX를 빠르게 구현하고 API 계약 검증을 공유한다.
-- 제약: 서버 상태는 TanStack Query, 편집 세션 등 로컬 UI 상태만 Zustand에 둔다.
+웹, API, worker, renderer, 공통 package를 TypeScript strict로 구현한다.
 
-### ADR-004. NestJS REST API
+**제약**
 
-- 결정: `apps/api`는 Node.js + NestJS, REST + OpenAPI를 사용한다.
-- 근거: 명시적 API 계약과 SDK 생성 기반을 제공하며 관리 콘솔 요구에는 GraphQL이 필요하지 않다.
-- 제약: 수집·생성·렌더·게시 작업은 BullMQ에 등록하고 작업 ID를 반환한다.
+* `any`, `ts-ignore`, 임시 하드코딩을 피한다.
+* 공유 데이터 계약은 타입과 schema로 명시한다.
 
-### ADR-005. MySQL 8과 Prisma
+---
 
-- 결정: 영속 데이터 기준은 MySQL 8 / InnoDB / utf8mb4이며 Prisma schema와 migration으로 관리한다.
-- 근거: 사용자, 채널, 콘텐츠, 작업, 게시, 비용은 정규화된 관계형 모델에 적합하다.
-- 제약: 금액·단가·사용량은 `DECIMAL`, 시간은 UTC, 무결성은 FK/UNIQUE/CHECK와 애플리케이션 검증을 함께 사용한다.
+## ADR-002 — 모듈형 모놀리스 + 분리된 worker
 
-### ADR-006. BullMQ와 Redis
+**결정**
 
-- 결정: collect, script, asset, tts, render, publish 큐를 BullMQ + Redis로 운영한다.
-- 근거: 장시간 작업, 재시도, 진행 상태, 취소를 HTTP 요청과 분리한다.
-- 제약: 중요 상태는 MySQL에 영속화하고 진행률은 Redis와 SSE로 노출한다.
+v1은 마이크로서비스가 아닌 모듈형 모놀리스로 구성한다.
 
-### ADR-007. Remotion과 FFmpeg 렌더링
+프로세스 경계:
 
-- 결정: 생성형 영상 API 대신 Remotion + React/SVG/HTML로 장면을 조립하고 FFmpeg로 후처리한다.
-- 근거: 비용, 통제, 일관성, 재현성을 확보하기 위함이다.
-- 제약: SceneDocument는 버전이 있어야 하며 과거 영상은 당시 스키마로 재현 가능해야 한다.
+* `apps/web`
+* `apps/api`
+* `apps/worker`
+* `apps/renderer`
 
-### ADR-008. Provider와 Publisher 격리
+**제약**
 
-- 결정: LLM, 이미지, TTS, Asset, Renderer, Storage, Publisher는 인터페이스 뒤에 둔다.
-- 근거: 외부 모델명, 가격, 정책, API 제한은 바뀔 수 있으므로 도메인 코드와 분리한다.
-- 제약: 모든 외부 호출 구현에는 Fake/Mock 테스트 더블을 제공하고 토큰·개인정보를 로그에 남기지 않는다.
+앱끼리 내부 소스를 직접 참조하지 않고 공통 package를 사용한다.
 
-### ADR-009. 정책 엔진 독립화
+---
 
-- 결정: 플랫폼 정책은 프롬프트나 생성 코드에 고정하지 않고 `packages/policy-engine`에서 규칙 버전으로 관리한다.
-- 근거: 플랫폼 정책 변경 시 생성·렌더 코드 전체 수정 없이 규칙 갱신과 예약물 재검사를 수행하기 위함이다.
-- 제약: 정책 검사는 수익화 보장이 아니라 현재 규칙 기준의 위험 탐지와 승인·차단 근거다.
+## ADR-003 — React/Vite 관리 콘솔
 
-### ADR-010. 멱등성과 감사 가능성
+**결정**
 
-- 결정: 생성, 렌더, 게시 요청에는 idempotency key와 UNIQUE 제약을 적용한다.
-- 근거: 재시도 시 중복 결과와 중복 업로드를 방지해야 한다.
-- 제약: 게시 당시의 출처, 자산 라이선스, 정책 검사 결과, 정책 버전, 사용자 승인·우회 이력을 스냅샷으로 보존한다.
+`apps/web`:
 
-## 2. 패키지 경계와 의존 방향
+* React
+* Vite
+* Tailwind CSS
+* shadcn/ui
+* TanStack Query
+* Zustand
+* React Hook Form
+* Zod
 
-### 앱
+**상태 원칙**
 
-- `apps/web`: 관리 콘솔, 채널 설정, 검수, 일정, 결과·비용 확인
-- `apps/api`: 인증, 도메인 API, 작업 생성, 정책 게이트, 상태 조회
-- `apps/worker`: 소재 수집, 조사, 대본, 자산, TTS, 분석 동기화
-- `apps/renderer`: Remotion 렌더링과 FFmpeg 후처리
+* 서버 상태: TanStack Query
+* 편집 세션 등 로컬 UI 상태: Zustand
 
-### 패키지
+---
 
-- `packages/database`: Prisma schema, migrations, client
-- `packages/contracts`: DTO, Zod schema, OpenAPI types
-- `packages/scene-schema`: SceneDocument JSON 계약
-- `packages/providers`: LLM, Image, TTS, Asset, Storage, Renderer 인터페이스와 구현
-- `packages/publishers`: YouTube, Instagram, TikTok Publisher 인터페이스와 구현
-- `packages/policy-engine`: 정책 규칙과 검사 결과
-- `packages/asset-library`: 자산 검색과 라이선스 메타데이터
-- `packages/config`: 환경 설정과 검증
-- `packages/logger`: 공통 구조화 로그
+## ADR-004 — NestJS REST API
 
-### 의존 규칙
+**결정**
 
-- 앱은 패키지를 참조할 수 있다.
-- 앱은 다른 앱의 내부 구현을 참조할 수 없다.
-- `contracts`는 DB 구현에 의존하지 않는다.
-- `database`는 앱 레이어에 의존하지 않는다.
-- `providers`와 `publishers`는 도메인 계약과 표준 결과 객체를 통해서만 외부 시스템을 노출한다.
-- `policy-engine`은 독립 규칙 엔진이며 프롬프트, 렌더러, Publisher 구현에 종속되지 않는다.
+`apps/api`는 Node.js + NestJS + REST + OpenAPI를 사용한다.
 
-## 3. 명세와 기술 결정 사이의 모순·주의점
+**제약**
 
-- 기능 명세 v0.2의 "아직 결정하지 않은 세부 항목"에는 구체적인 기술 스택이 미결정으로 남아 있지만, 기술 스택 확정서 v1.0은 React/Vite, NestJS, MySQL 8, BullMQ, Remotion/FFmpeg 등을 확정한다. 구현 기준은 기술 스택 확정서 v1.0을 우선한다.
-- 기능 명세 v0.2는 콘텐츠 생성 공급자와 스톡 공급자를 미결정으로 적었지만, 기술 스택 확정서는 GPT-5 mini, Gemini 3.1 Flash Lite Image, ElevenLabs Flash v2.5를 v1 기본 Provider로 확정한다. 단, 코드에는 모델명을 고정하지 않고 설정과 Provider 구현으로 격리한다.
-- 기능 명세는 영상 길이를 약 30~90초로 정의하고 TikTok Creator Rewards 목표 시 1분 이상을 고려한다고 한다. 플랫폼 정책은 변경될 수 있으므로 정책 엔진의 duration rule과 checked_at으로 판단한다.
-- 기능 명세는 완전 자동형을 포함하지만 최신·민감·고위험 주제는 강제 검수를 요구한다. 자동형 구현은 정책 게이트가 우선하며 사용자의 자동화 설정으로 우회할 수 없다.
-- 기능 명세는 성과 최적화를 포함하지만 인과관계 확정 판정은 제외한다. 분석 결과는 패턴 또는 가설로 표시하고 자동 전략 변경은 허용 범위 안에서만 수행한다.
-- 기술 스택 확정서는 `workspaces`, `memberships` 테이블 예시를 포함하지만 기능 명세 v1 범위는 팀 기능 제외다. v1에서는 개인 사용자 중심으로 최소 구조만 두고 팀 초대·권한 UI와 정책은 구현하지 않는다.
+장시간 작업은 API 요청 안에서 처리하지 않고 BullMQ 작업을 생성한 뒤 job ID를 반환한다.
 
-## 4. 구현 전 결정이 필요한 항목
+---
 
-- 최초 수직 슬라이스 채널: 현재 권장 첫 목표는 과학 채널 1개 + YouTube Shorts + 승인형 운영이다. 1단계 착수 전에 이를 최종 확정하거나 다른 수직 슬라이스로 변경해야 한다.
-- 게시 빈도 기본값: 플랫폼별 기본 일일 게시 수, 추천 시간대, 최소 콘텐츠 재고 기본값을 정해야 한다.
-- 정책 갱신 운영: 수동 검토, 정기 확인, 관리자 승인 방식과 checked_at 갱신 책임자를 정해야 한다.
-- 스톡 공급자: 무료·유료 공급자 후보, 라이선스 저장 필드, 출처 표시 방식, 비용 처리 방식을 정해야 한다.
-- Asset Library 초기 자산: BGM, SFX, 폰트, 그래픽 템플릿, 워터마크 기본값을 정해야 한다.
-- OAuth scope: YouTube, Instagram, TikTok별 최소 권한 범위를 실제 API 문서 기준으로 확정해야 한다.
-- 토큰 암호화 방식: 애플리케이션 레벨 암호화 키 관리 방식과 로컬 개발용 키 주입 방식을 정해야 한다.
-- 사용자 시간대 기본값: v1 개인 사용자 기준 화면 시간대와 예약 시간 입력 기준을 정해야 한다.
-- 비용 단가 관리: Provider별 단가 입력, 환율, 세금, 무료 할당량 반영 방식을 정해야 한다.
-- 알림 채널: v1 기본 알림을 웹 인앱으로 할지, 이메일까지 포함할지 결정해야 한다.
-- 분석 동기화 주기: 플랫폼별 rate limit와 데이터 지연을 고려해 동기화 주기를 정해야 한다.
-- 샘플 렌더 기준: 15초 샘플 3종의 주제, 스타일, 자막 안전 영역 기준을 정해야 한다.
-- 운영 배포 대상: 초기 운영을 단일 VPS로 할지 소규모 클라우드로 할지 확정해야 한다.
+## ADR-005 — MySQL 8 + Prisma
 
-## 5. 외부 API와 플랫폼 제약
+**결정**
 
-- YouTube, Instagram, TikTok 정책과 수익화 조건은 변경될 수 있다. 정책 규칙은 platform, region, effective_at, checked_at을 포함해야 한다.
-- 플랫폼 API가 제공하지 않는 성과 지표는 추정하지 않는다. 지표별 수집 가능 여부와 기준 기간을 저장한다.
-- 플랫폼 간 조회수, 도달, 완주율 등은 동일한 의미로 단정하지 않는다.
-- OAuth 토큰은 만료, 권한 철회, scope 변경, 계정 연결 해제에 대비해야 한다.
-- 업로드 API는 rate limit, 파일 크기, 포맷, 처리 지연, 검수 지연이 있을 수 있다.
-- 게시 작업은 외부 post ID가 확인되기 전 동일 요청을 반복하면 중복 업로드가 발생할 수 있으므로 Publisher별 멱등 처리와 복구 절차가 필요하다.
-- AI Provider 모델명, 가격, 지연 시간, 출력 품질, 안전 정책은 변경될 수 있다.
-- TTS Provider는 음성 라이선스, 타이밍 정확도, 재시도 과금, 상업 이용 조건을 기록해야 한다.
-- 이미지 생성 Provider는 실제 인물·사건처럼 보이는 합성 콘텐츠 표시 필요성을 정책 엔진과 함께 판단해야 한다.
-- 스톡 공급자는 라이선스 변경, 출처 표시 의무, 다운로드 시점 증빙, 계정 귀속 제한을 추적해야 한다.
-- S3 호환 스토리지는 서명 URL 만료, 공개 범위, 원본·중간·완성본 보존 정책을 분리해야 한다.
+영속 데이터:
 
-## 6. 변경 관리 원칙
+* MySQL 8
+* InnoDB
+* utf8mb4
+* Prisma schema/migration
 
-- DB 교체, AI 모델 교체, 플랫폼 정책 변경, 렌더 컴포넌트 계약 변경은 별도 ADR 또는 본 문서 갱신 후 구현한다.
-- 채널-계정 관계, 자동화 모드, 콘텐츠 상태 흐름, 플랫폼 정책 처리, 수익화 관련 표현을 바꾸는 경우 기능 명세와 코드 계약을 함께 갱신한다.
-- API, 환경 변수, 상태 전이, 운영 방법이 바뀌면 같은 단계에서 docs를 갱신한다.
-- 모든 검증이 성공했을 때만 커밋하고, 커밋 메시지는 한국어로 작성한다.
+**데이터 원칙**
+
+* 금액·단가·사용량: DECIMAL
+* 시간: UTC
+* 무결성: FK / UNIQUE / 필요한 CHECK + application validation
+* JSON: SceneDocument, Provider raw response 등 구조 변화가 필요한 데이터에 제한 사용
+
+---
+
+## ADR-006 — BullMQ + Redis
+
+**결정**
+
+장시간 작업과 재시도를 BullMQ + Redis로 처리한다.
+
+대표 queue:
+
+* collect
+* script
+* asset
+* tts
+* render
+* policy
+* publish
+* analytics
+
+**제약**
+
+업무적으로 중요한 상태는 MySQL에 영속화하고 Redis는 queue와 일시적 진행 상태에 사용한다.
+
+---
+
+## ADR-007 — Remotion + FFmpeg
+
+**결정**
+
+생성형 비디오 API 대신 Remotion으로 SceneDocument를 영상으로 구성하고 FFmpeg로 후처리한다.
+
+**제약**
+
+* SceneDocument는 버전을 가진다.
+* renderer version을 결과물과 함께 기록한다.
+* 동일 입력에 대한 재실행은 멱등성을 가져야 한다.
+
+---
+
+## ADR-008 — 외부 Provider 격리
+
+**결정**
+
+다음 외부 기능은 interface 뒤에 격리한다.
+
+* LLM
+* Image
+* TTS
+* Asset source
+* Storage
+* Publisher
+* Analytics
+
+**제약**
+
+* Fake/Mock 구현을 제공한다.
+* 외부 모델명이나 가격을 도메인 코드에 하드코딩하지 않는다.
+* API 키와 토큰을 로그에 기록하지 않는다.
+
+---
+
+## ADR-009 — 정책 엔진 독립화
+
+**결정**
+
+플랫폼 정책은 `packages/policy-engine`의 versioned rule로 관리한다.
+
+**정책 데이터**
+
+필요한 경우 다음 정보를 포함한다.
+
+* platform
+* region
+* effective_at
+* checked_at
+* rule version
+
+**제약**
+
+정책 검사는 수익화 또는 플랫폼 승인을 보장하지 않는다.
+
+---
+
+## ADR-010 — 멱등성과 게시 시점 스냅샷
+
+**결정**
+
+생성·렌더·게시 작업은 idempotency key와 필요한 UNIQUE 제약을 사용한다.
+
+게시 당시 다음 정보를 보존한다.
+
+* 출처
+* asset license
+* policy result
+* policy version
+* 사용자 승인 또는 override 이력
+
+외부 post ID 확인 여부가 불명확한 업로드는 플랫폼 상태 확인 없이 무조건 재시도하지 않는다.
+
+---
+
+## ADR-011 — 인증 및 플랫폼 자격 증명
+
+**결정**
+
+사용자 인증은 JWT + HttpOnly Cookie를 사용한다.
+
+플랫폼 연결은 OAuth 2.0을 사용한다.
+
+OAuth access/refresh token은 애플리케이션 레벨에서 암호화해 저장한다.
+
+**제약**
+
+암호화 키 버전을 기록하고 향후 key rotation이 가능한 구조를 유지한다.
+
+---
+
+## ADR-012 — SNS 계정과 Channel 귀속
+
+**결정**
+
+하나의 SNS 플랫폼 계정은 동시에 최대 하나의 Postbot Channel에만 연결할 수 있다.
+
+한 Channel에는 플랫폼별 최대 한 계정을 연결한다.
+
+DB UNIQUE 제약과 application validation을 함께 적용한다.
+
+---
+
+# 2. 패키지 경계
+
+## Applications
+
+`apps/web`
+
+관리 콘솔과 사용자 인터페이스.
+
+`apps/api`
+
+인증, 도메인 API, job 생성, 정책 gate, 상태 조회.
+
+`apps/worker`
+
+수집, 조사, 대본, 자산, TTS, 분석 동기화.
+
+`apps/renderer`
+
+Remotion 렌더링과 FFmpeg 후처리.
+
+## Packages
+
+* `packages/database`: Prisma schema, migration, client
+* `packages/contracts`: DTO, Zod schema, 공유 API 계약
+* `packages/scene-schema`: SceneDocument 계약
+* `packages/providers`: 외부 생성·자산·스토리지 Provider
+* `packages/publishers`: SNS Publisher
+* `packages/policy-engine`: 정책 규칙과 검사
+* `packages/asset-library`: 자산과 라이선스 메타데이터
+* `packages/config`: 환경 설정과 검증
+* `packages/logger`: 구조화 로그
+
+## Dependency rules
+
+* application → package 허용
+* application → application 직접 참조 금지
+* `contracts` → database 의존 금지
+* `database` → application 의존 금지
+* 외부 시스템의 SDK 타입을 도메인 계약으로 직접 노출하지 않는다.
+
+---
+
+# 3. 제품과 기술 결정 사이의 해석
+
+## 기술 스택 우선순위
+
+기능 명세에서 기술 스택이 미결정으로 남아 있고 기술 스택 확정서에서 결정된 경우 기술 스택 확정서를 따른다.
+
+## Provider
+
+v1 기본 Provider가 기술 확정서에서 지정되어 있더라도 모델명은 설정으로 주입하고 Provider interface 뒤에 둔다.
+
+## 영상 길이
+
+기능 명세의 약 30~90초는 제품 방향이다.
+
+실제 플랫폼별 허용 길이 또는 수익화 관련 조건은 versioned policy rule을 기준으로 판단한다.
+
+## 완전 자동 운영
+
+완전 자동형에서도 정책·사실·권리 gate를 우회하지 않는다.
+
+고위험 또는 확인 불가 콘텐츠는 자동 게시하지 않는다.
+
+## 성과 최적화
+
+관찰된 상관관계를 인과관계로 단정하지 않는다.
+
+표본이 부족한 경우 결과를 확정 패턴이 아니라 가설로 취급한다.
+
+## Workspace
+
+v1 제품은 개인 사용자를 대상으로 한다.
+
+Workspace와 Membership은 향후 확장을 위한 최소 데이터 경계만 제공하며 팀 초대·역할 관리 UX는 v1에서 구현하지 않는다.
+
+---
+
+# 4. 미결정 사항
+
+미결정 사항은 구현 단계에서 실제 결정이 필요한 시점에 해결하고, 확정되면 새로운 ADR로 이동한다.
+
+* 플랫폼별 기본 게시 빈도와 추천 시간대
+* 최소 콘텐츠 재고 기본값
+* policy checked_at 갱신 책임과 주기
+* stock asset 공급자
+* 초기 BGM/SFX/font/graphic asset 구성
+* YouTube/Instagram/TikTok 최소 OAuth scope
+* production OAuth encryption key 관리 방식
+* 사용자 기본 timezone
+* Provider 비용 단가·환율·세금 관리 방식
+* 기본 알림 채널
+* analytics sync 주기
+* production 배포 대상
+
+이미 완료된 단계 이전에 결정했어야 하는 항목은 실제 구현 상태를 확인하고 ADR 또는 구현 문서에 반영한다.
+
+---
+
+# 5. 변경 가능한 외부 조건
+
+다음 정보는 코드에 고정된 사실로 취급하지 않는다.
+
+* SNS 플랫폼 정책
+* OAuth scope 및 API 기능
+* API rate limit
+* 업로드 파일 제한
+* 플랫폼 metric 제공 범위
+* AI Provider 모델명
+* AI Provider 가격
+* AI Provider 라이선스·안전 정책
+* TTS voice 사용 조건
+* stock asset license
+* 수익화 프로그램 조건
+
+관련 기능을 구현하거나 갱신할 때 공식 문서를 확인하고 필요한 경우 다음을 기록한다.
+
+* 확인일
+* 적용 대상
+* 정책/버전
+* 다음 검토 책임 또는 갱신 기준
+
+플랫폼 API가 제공하지 않는 지표는 추정하여 플랫폼 원본 지표처럼 저장하지 않는다.
+
+---
+
+# 6. ADR 변경 규칙
+
+다음 변경은 기존 ADR 수정 또는 새로운 ADR 작성을 요구한다.
+
+* DB 기술 또는 데이터 저장 원칙 변경
+* 인증 방식 변경
+* AI Provider 전략 변경
+* queue/worker 구조 변경
+* renderer 계약 변경
+* SceneDocument 호환성 변경
+* Channel과 SNS account 관계 변경
+* 자동화 safety gate 변경
+* 플랫폼 정책 처리 방식 변경
+
+API, 환경 변수, 상태 전이 또는 운영 방법만 변경되고 아키텍처 결정 자체가 바뀌지 않는 경우 해당 운영 문서만 갱신한다.

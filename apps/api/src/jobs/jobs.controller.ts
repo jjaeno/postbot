@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Req, Res, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Inject, Param, Post, Req, Res, UseGuards } from "@nestjs/common";
 import type { Response } from "express";
 import { AccessTokenGuard } from "../auth/access-token.guard.js";
 import type { AuthenticatedRequest } from "../auth/request-types.js";
@@ -12,7 +12,7 @@ const writeSse = (response: Response, event: { id: string; data: unknown }): voi
 @Controller("jobs")
 @UseGuards(AccessTokenGuard)
 export class JobsController {
-  constructor(private readonly jobs: JobsService) {}
+  constructor(@Inject(JobsService) private readonly jobs: JobsService) {}
 
   @Post()
   create(@Req() req: AuthenticatedRequest, @Body() body: unknown) {

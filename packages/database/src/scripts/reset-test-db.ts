@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 import { PrismaClient } from "@prisma/client";
 
@@ -29,14 +30,19 @@ const result = spawnSync(
     "--skip-seed"
   ],
   {
-    cwd: new URL("../../", import.meta.url),
+    cwd: fileURLToPath(new URL("../../", import.meta.url)),
     env: {
       ...process.env,
       DATABASE_URL: getTestDatabaseUrl()
     },
+    shell: process.platform === "win32",
     stdio: "inherit"
   }
 );
+
+if (result.error) {
+  throw result.error;
+}
 
 if (result.status !== 0) {
   throw new Error(`Test database reset failed with exit code ${result.status ?? "unknown"}.`);
