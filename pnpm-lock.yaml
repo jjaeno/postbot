@@ -71,6 +71,9 @@ importers:
       '@postbot/publishers':
         specifier: workspace:*
         version: link:../../packages/publishers
+      '@postbot/scene-schema':
+        specifier: workspace:*
+        version: link:../../packages/scene-schema
       cookie-parser:
         specifier: ^1.4.7
         version: 1.4.7

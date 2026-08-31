@@ -430,3 +430,54 @@ export type UpdateIdeaStatusRequest = z.infer<typeof UpdateIdeaStatusRequestSche
 export type ContentIdea = z.infer<typeof ContentIdeaSchema>;
 export type CollectIdeasResponse = z.infer<typeof CollectIdeasResponseSchema>;
 export type ContentIdeaListResponse = z.infer<typeof ContentIdeaListResponseSchema>;
+
+export const GenerateScriptSceneRequestSchema = z.object({
+  ideaId: z.string().min(1),
+  platform: PlatformSchema.nullable().default(null),
+  idempotencyKey: z.string().min(8).max(191),
+  partial: z.enum(["full", "hook", "body", "metadata", "scene"]).default("full")
+});
+
+export const FactSourceLinkSchema = z.object({
+  claim: z.string().min(1).max(1000),
+  sourceUrl: z.string().url()
+});
+
+export const GeneratedMetadataSchema = z.object({
+  description: z.string().min(1).max(2000),
+  hashtags: z.array(z.string().min(1).max(80)).max(20)
+});
+
+export const GeneratedScriptSchema = z.object({
+  hook: z.string().min(1).max(280),
+  body: z.string().min(1).max(2000),
+  callToAction: z.string().min(1).max(280),
+  language: z.string().min(2).max(16),
+  durationSeconds: z.number().positive().max(180)
+});
+
+export const ScriptSceneGenerationResponseSchema = z.object({
+  contentItemId: z.string().min(1),
+  scriptVersionId: z.string().min(1),
+  sceneVersionId: z.string().min(1),
+  version: z.number().int().positive(),
+  promptVersion: z.string().min(1),
+  model: z.string().min(1),
+  metadata: GeneratedMetadataSchema,
+  script: GeneratedScriptSchema,
+  facts: z.array(FactSourceLinkSchema).min(1),
+  sceneDocument: JsonObjectSchema,
+  usage: z.object({
+    promptTokens: z.number().int().nonnegative(),
+    completionTokens: z.number().int().nonnegative(),
+    totalTokens: z.number().int().nonnegative(),
+    estimatedCostUsd: z.string().min(1)
+  }),
+  duplicate: z.boolean().optional()
+});
+
+export type GenerateScriptSceneRequest = z.infer<typeof GenerateScriptSceneRequestSchema>;
+export type FactSourceLink = z.infer<typeof FactSourceLinkSchema>;
+export type GeneratedMetadata = z.infer<typeof GeneratedMetadataSchema>;
+export type GeneratedScript = z.infer<typeof GeneratedScriptSchema>;
+export type ScriptSceneGenerationResponse = z.infer<typeof ScriptSceneGenerationResponseSchema>;

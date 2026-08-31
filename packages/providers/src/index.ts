@@ -100,3 +100,146 @@ export class FixtureTopicSourceProvider implements TopicSourceProvider {
     });
   }
 }
+
+export type LlmGenerationSource = {
+  readonly title: string;
+  readonly url: string;
+  readonly summary: string;
+};
+
+export type LlmGenerationRequest = {
+  readonly model: string;
+  readonly promptVersion: string;
+  readonly idempotencyKey: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly topic: string;
+  readonly platform: "YOUTUBE" | "INSTAGRAM" | "TIKTOK" | null;
+  readonly sources: readonly LlmGenerationSource[];
+  readonly partial: "full" | "hook" | "body" | "metadata" | "scene";
+};
+
+export type LlmTokenUsage = {
+  readonly promptTokens: number;
+  readonly completionTokens: number;
+  readonly totalTokens: number;
+};
+
+export type LlmGenerationResult = ProviderResult & {
+  readonly model: string;
+  readonly promptVersion: string;
+  readonly structuredOutput: unknown;
+  readonly usage: LlmTokenUsage;
+  readonly estimatedCostUsd: string;
+};
+
+export interface LlmProvider {
+  generateScriptAndScene(request: LlmGenerationRequest): Promise<LlmGenerationResult>;
+}
+
+const fakeStructuredOutput = (request: LlmGenerationRequest): Record<string, unknown> => {
+  const source = request.sources[0];
+  if (!source) {
+    return { error: "missing source" };
+  }
+  return {
+    planning: {
+      title: request.title,
+      summary: request.summary,
+      metadata: {
+        description: `${request.summary}\n\nSource: ${source.url}`,
+        hashtags: ["postbot", "shorts", request.topic.toLowerCase().replaceAll(" ", "-").slice(0, 40)]
+      }
+    },
+    script: {
+      hook: `What changed in ${request.title}?`,
+      body: `A verified source reports: ${request.summary}`,
+      callToAction: "Check the source before sharing.",
+      language: "en",
+      durationSeconds: 45
+    },
+    facts: [
+      {
+        claim: request.summary,
+        sourceUrl: source.url
+      }
+    ],
+    sceneDocument: {
+      schemaVersion: "1.0.0",
+      title: request.title,
+      width: 1080,
+      height: 1920,
+      fps: 30,
+      durationInFrames: 1350,
+      scenes: [
+        {
+          id: "scene-1",
+          startFrame: 0,
+          durationInFrames: 1350,
+          visualPrompt: `Vertical short explainer about ${request.title}`,
+          narration: {
+            text: request.summary,
+            sourceUrl: source.url
+          },
+          overlays: [
+            {
+              kind: "title",
+              text: request.title.slice(0, 120)
+            },
+            {
+              kind: "fact",
+              text: "Source checked"
+            }
+          ]
+        }
+      ]
+    }
+  };
+};
+
+export class FakeLlmProvider implements LlmProvider {
+  private attempts = 0;
+
+  generateScriptAndScene(request: LlmGenerationRequest): Promise<LlmGenerationResult> {
+    this.attempts += 1;
+    const behavior = request.title.toLowerCase();
+    const structuredOutput =
+      behavior.includes("bad-json") && this.attempts === 1
+        ? { invalid: true }
+        : behavior.includes("missing-source")
+          ? { ...fakeStructuredOutput(request), facts: [] }
+          : behavior.includes("too-long")
+            ? {
+                ...fakeStructuredOutput(request),
+                script: {
+                  hook: "Too long",
+                  body: "x".repeat(2_001),
+                  callToAction: "Done",
+                  language: "en",
+                  durationSeconds: 181
+                }
+              }
+            : fakeStructuredOutput(request);
+
+    return Promise.resolve({
+      provider: "fake-llm",
+      idempotencyKey: request.idempotencyKey,
+      createdAt: new Date("2026-08-31T00:00:00.000Z").toISOString(),
+      model: request.model,
+      promptVersion: request.promptVersion,
+      structuredOutput,
+      usage: {
+        promptTokens: 120,
+        completionTokens: 240,
+        totalTokens: 360
+      },
+      estimatedCostUsd: "0.000360"
+    });
+  }
+}
+
+export class OpenAiLlmProvider implements LlmProvider {
+  generateScriptAndScene(): Promise<LlmGenerationResult> {
+    return Promise.reject(new Error("OpenAI LLM provider is not configured in this stage."));
+  }
+}

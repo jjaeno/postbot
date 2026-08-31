@@ -8,6 +8,7 @@ import { CsrfGuard } from "./auth/csrf.guard.js";
 import { DatabaseModule } from "./database/database.module.js";
 import { JobsModule } from "./jobs/jobs.module.js";
 import { IdeasModule } from "./ideas/ideas.module.js";
+import { GenerationModule } from "./generation/generation.module.js";
 import { PlatformAccountsModule } from "./platform-accounts/platform-accounts.module.js";
 
 @Module({
@@ -21,6 +22,7 @@ import { PlatformAccountsModule } from "./platform-accounts/platform-accounts.mo
     DatabaseModule,
     AuthModule,
     ChannelsModule,
+    GenerationModule,
     IdeasModule,
     JobsModule,
     PlatformAccountsModule
