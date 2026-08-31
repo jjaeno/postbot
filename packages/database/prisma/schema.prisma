@@ -49,6 +49,14 @@ enum ContentStatus {
   HELD
 }
 
+enum IdeaStatus {
+  CANDIDATE
+  SHORTLISTED
+  REJECTED
+  USED
+  EXPIRED
+}
+
 enum SourceKind {
   NEWS
   OFFICIAL
@@ -271,6 +279,7 @@ model Channel {
   outputProfiles          PlatformOutputProfile[]
   scheduleRules           ScheduleRule[]
   contentItems            ContentItem[]
+  contentIdeas            ContentIdea[]
   assets                  Asset[]
   productionJobs          ProductionJob[]
   policySnapshots         PolicySnapshot[]
@@ -282,6 +291,39 @@ model Channel {
   @@unique([workspaceId, slug])
   @@index([workspaceId, status])
   @@map("channels")
+}
+
+model ContentIdea {
+  id                 String     @id @default(cuid())
+  channelId          String
+  status             IdeaStatus @default(CANDIDATE)
+  title              String     @db.VarChar(255)
+  summary            String?    @db.Text
+  canonicalUrl       String     @db.Text
+  urlHash            String     @db.VarChar(128)
+  contentHash        String     @db.VarChar(128)
+  sourceName         String     @db.VarChar(191)
+  sourceKind         SourceKind
+  provider           String     @db.VarChar(80)
+  publishedAt        DateTime?  @db.DateTime(3)
+  collectedAt        DateTime   @default(now()) @db.DateTime(3)
+  suitabilityScore   Decimal    @db.Decimal(7, 6)
+  freshnessScore     Decimal    @db.Decimal(7, 6)
+  reliabilityScore   Decimal    @db.Decimal(7, 6)
+  expectedValueScore Decimal    @db.Decimal(7, 6)
+  rejectionReason    String?    @db.Text
+  rawSnapshot        Json?
+  usedContentItemId  String?    @unique
+  createdAt          DateTime   @default(now()) @db.DateTime(3)
+  updatedAt          DateTime   @updatedAt @db.DateTime(3)
+  channel            Channel    @relation(fields: [channelId], references: [id], onDelete: Restrict)
+  usedContentItem    ContentItem? @relation(fields: [usedContentItemId], references: [id], onDelete: SetNull)
+
+  @@unique([channelId, urlHash])
+  @@unique([channelId, contentHash])
+  @@index([channelId, status, collectedAt])
+  @@index([sourceKind, publishedAt])
+  @@map("content_ideas")
 }
 
 model CollectionRule {
@@ -425,6 +467,7 @@ model ContentItem {
   updatedAt               DateTime                 @updatedAt @db.DateTime(3)
   channel                 Channel                  @relation(fields: [channelId], references: [id], onDelete: Restrict)
   sourceReferences        SourceReference[]
+  contentIdeas            ContentIdea[]
   scriptVersions          ScriptVersion[]
   sceneVersions           SceneVersion[]
   assetUsages             AssetUsage[]

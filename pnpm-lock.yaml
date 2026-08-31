@@ -65,6 +65,9 @@ importers:
       '@postbot/logger':
         specifier: workspace:*
         version: link:../../packages/logger
+      '@postbot/providers':
+        specifier: workspace:*
+        version: link:../../packages/providers
       '@postbot/publishers':
         specifier: workspace:*
         version: link:../../packages/publishers

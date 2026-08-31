@@ -22,6 +22,7 @@
     "@postbot/database": "workspace:*",
     "@postbot/jobs": "workspace:*",
     "@postbot/logger": "workspace:*",
+    "@postbot/providers": "workspace:*",
     "@postbot/publishers": "workspace:*",
     "cookie-parser": "^1.4.7",
     "dotenv": "^17.2.3",

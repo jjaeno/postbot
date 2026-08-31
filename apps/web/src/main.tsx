@@ -7,11 +7,13 @@ import {
   ChevronRight,
   CirclePause,
   CirclePlay,
+  Lightbulb,
   LogIn,
   LogOut,
   Pencil,
   Plus,
   RefreshCw,
+  Search,
   ShieldCheck,
   Unplug,
   UserPlus
@@ -25,6 +27,9 @@ import {
   AuthSessionSchema,
   ChannelListResponseSchema,
   ChannelResponseSchema,
+  CollectIdeasResponseSchema,
+  ContentIdeaListResponseSchema,
+  ContentIdeaSchema,
   CreateChannelRequestSchema,
   OAuthCallbackResultSchema,
   PlatformAccountListResponseSchema,
@@ -32,7 +37,9 @@ import {
   type AuthResponse,
   type AuthSession,
   type ChannelResponse,
+  type ContentIdea,
   type CreateChannelRequest,
+  type IdeaStatus,
   type PlatformAccountResponse,
   type Platform
 } from "@postbot/contracts";
@@ -84,6 +91,10 @@ const fetchChannels = (): Promise<ChannelResponse[]> =>
   request("/channels", { method: "GET" }, ChannelListResponseSchema).then((data) => data.channels);
 const fetchPlatformAccounts = (): Promise<PlatformAccountResponse[]> =>
   request("/platform-accounts", { method: "GET" }, PlatformAccountListResponseSchema).then((data) => data.accounts);
+const fetchIdeas = (channelId: string, status: IdeaStatus | "ALL"): Promise<ContentIdea[]> => {
+  const query = status === "ALL" ? "" : `?status=${status}`;
+  return request(`/ideas/channels/${channelId}${query}`, { method: "GET" }, ContentIdeaListResponseSchema).then((data) => data.ideas);
+};
 
 const requestAbsolute = async <Result,>(
   url: string,
@@ -434,9 +445,151 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
           />
           <EditPanel channel={editing} onClose={() => setEditing(null)} onError={setError} />
         </div>
+        <IdeasPanel channels={channels.data ?? []} onError={setError} />
       </section>
       {wizardOpen ? <ChannelWizard onClose={() => setWizardOpen(false)} onError={setError} /> : null}
     </main>
+  );
+};
+
+const ideaStatuses: Array<IdeaStatus | "ALL"> = ["ALL", "CANDIDATE", "SHORTLISTED", "REJECTED", "USED", "EXPIRED"];
+
+const IdeasPanel = ({
+  channels,
+  onError
+}: {
+  channels: ChannelResponse[];
+  onError: (error: string) => void;
+}): ReactElement => {
+  const queryClient = useQueryClient();
+  const [channelId, setChannelId] = useState("");
+  const [status, setStatus] = useState<IdeaStatus | "ALL">("ALL");
+
+  useEffect(() => {
+    if (!channelId && channels[0]) {
+      setChannelId(channels[0].id);
+    }
+  }, [channelId, channels]);
+
+  const ideas = useQuery({
+    queryKey: ["ideas", channelId, status],
+    queryFn: () => fetchIdeas(channelId, status),
+    enabled: channelId.length > 0
+  });
+
+  const collectMutation = useMutation({
+    mutationFn: () =>
+      request(
+        "/ideas/collect",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            channelId,
+            idempotencyKey: `manual-${channelId}-${Date.now()}`,
+            source: "auto"
+          })
+        },
+        CollectIdeasResponseSchema
+      ),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["ideas"] });
+    },
+    onError: (error) => onError(error instanceof Error ? error.message : "Idea collection failed.")
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: ({ ideaId, nextStatus }: { ideaId: string; nextStatus: IdeaStatus }) =>
+      request(
+        `/ideas/${ideaId}/status`,
+        { method: "PATCH", body: JSON.stringify({ status: nextStatus }) },
+        ContentIdeaSchema
+      ),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["ideas"] });
+    },
+    onError: (error) => onError(error instanceof Error ? error.message : "Idea status update failed.")
+  });
+
+  if (channels.length === 0) {
+    return <section className="rounded-md border border-border p-5 text-sm text-muted-foreground">Create a channel before collecting ideas.</section>;
+  }
+
+  return (
+    <section className="rounded-md border border-border bg-white p-5 shadow-sm">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-2">
+          <Lightbulb aria-hidden="true" className="h-5 w-5 text-primary" />
+          <h2 className="text-lg font-semibold">Ideas</h2>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <select
+            className="h-10 rounded-md border border-border px-3 text-sm"
+            onChange={(event) => setChannelId(event.target.value)}
+            value={channelId}
+          >
+            {channels.map((channel) => (
+              <option key={channel.id} value={channel.id}>
+                {channel.name}
+              </option>
+            ))}
+          </select>
+          <select
+            className="h-10 rounded-md border border-border px-3 text-sm"
+            onChange={(event) => setStatus(event.target.value as IdeaStatus | "ALL")}
+            value={status}
+          >
+            {ideaStatuses.map((item) => (
+              <option key={item} value={item}>
+                {item}
+              </option>
+            ))}
+          </select>
+          <Button className="gap-2" disabled={!channelId || collectMutation.isPending} onClick={() => collectMutation.mutate()}>
+            <Search aria-hidden="true" className="h-4 w-4" />
+            Collect
+          </Button>
+        </div>
+      </div>
+      <div className="mt-4 grid gap-3">
+        {ideas.isLoading ? <p className="text-sm text-muted-foreground">Loading ideas.</p> : null}
+        {!ideas.isLoading && (ideas.data ?? []).length === 0 ? (
+          <p className="rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">No ideas for this filter.</p>
+        ) : null}
+        {(ideas.data ?? []).map((idea) => (
+          <article className="rounded-md border border-border p-4" key={idea.id}>
+            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="font-medium">{idea.title}</h3>
+                  <span className="rounded bg-muted px-2 py-1 text-xs text-muted-foreground">{idea.status}</span>
+                </div>
+                <p className="mt-1 text-sm text-muted-foreground">{idea.summary}</p>
+                <a className="mt-2 block break-all text-sm text-primary" href={idea.canonicalUrl} rel="noreferrer" target="_blank">
+                  {idea.sourceName}
+                </a>
+              </div>
+              <div className="grid min-w-48 gap-2 text-sm">
+                <span>Value {(idea.expectedValueScore * 100).toFixed(0)}%</span>
+                <select
+                  className="h-9 rounded-md border border-border px-2 text-sm"
+                  disabled={updateMutation.isPending}
+                  onChange={(event) => updateMutation.mutate({ ideaId: idea.id, nextStatus: event.target.value as IdeaStatus })}
+                  value={idea.status}
+                >
+                  {ideaStatuses
+                    .filter((item): item is IdeaStatus => item !== "ALL")
+                    .map((item) => (
+                      <option key={item} value={item}>
+                        {item}
+                      </option>
+                    ))}
+                </select>
+              </div>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
   );
 };
 

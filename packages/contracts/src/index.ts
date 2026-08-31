@@ -362,3 +362,71 @@ export type RecoverProductionJobRequest = z.infer<typeof RecoverProductionJobReq
 export type JobAttemptResponse = z.infer<typeof JobAttemptResponseSchema>;
 export type ProductionJobResponse = z.infer<typeof ProductionJobResponseSchema>;
 export type JobProgressEvent = z.infer<typeof JobProgressEventSchema>;
+
+export const IdeaStatusSchema = z.enum(["CANDIDATE", "SHORTLISTED", "REJECTED", "USED", "EXPIRED"]);
+
+export const CollectIdeasRequestSchema = z.object({
+  channelId: z.string().min(1),
+  idempotencyKey: z.string().min(8).max(191),
+  source: z.enum(["auto", "manual"]).default("auto"),
+  manualCandidates: z
+    .array(
+      z.object({
+        title: z.string().min(1).max(255),
+        summary: z.string().max(2000).default(""),
+        url: z.string().url(),
+        sourceName: z.string().min(1).max(191),
+        sourceKind: z.enum(["NEWS", "OFFICIAL", "PAPER", "RSS", "PUBLIC_DATA", "MANUAL"]).default("MANUAL"),
+        publishedAt: z.string().datetime().nullable().default(null),
+        body: z.string().max(10000).default(""),
+        reliabilityScore: z.number().min(0).max(1).default(0.7)
+      })
+    )
+    .max(20)
+    .default([])
+});
+
+export const UpdateIdeaStatusRequestSchema = z.object({
+  status: IdeaStatusSchema,
+  rejectionReason: z.string().max(1000).optional()
+});
+
+export const ContentIdeaSchema = z.object({
+  id: z.string().min(1),
+  channelId: z.string().min(1),
+  status: IdeaStatusSchema,
+  title: z.string(),
+  summary: z.string(),
+  canonicalUrl: z.string().url(),
+  sourceName: z.string(),
+  sourceKind: z.enum(["NEWS", "OFFICIAL", "PAPER", "RSS", "PUBLIC_DATA", "MANUAL"]),
+  provider: z.string(),
+  publishedAt: z.string().datetime().nullable(),
+  collectedAt: z.string().datetime(),
+  suitabilityScore: z.number().min(0).max(1),
+  freshnessScore: z.number().min(0).max(1),
+  reliabilityScore: z.number().min(0).max(1),
+  expectedValueScore: z.number().min(0).max(1),
+  rejectionReason: z.string().nullable(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime()
+});
+
+export const CollectIdeasResponseSchema = z.object({
+  channelId: z.string().min(1),
+  created: z.number().int().nonnegative(),
+  duplicates: z.number().int().nonnegative(),
+  rejected: z.number().int().nonnegative(),
+  ideas: z.array(ContentIdeaSchema)
+});
+
+export const ContentIdeaListResponseSchema = z.object({
+  ideas: z.array(ContentIdeaSchema)
+});
+
+export type IdeaStatus = z.infer<typeof IdeaStatusSchema>;
+export type CollectIdeasRequest = z.infer<typeof CollectIdeasRequestSchema>;
+export type UpdateIdeaStatusRequest = z.infer<typeof UpdateIdeaStatusRequestSchema>;
+export type ContentIdea = z.infer<typeof ContentIdeaSchema>;
+export type CollectIdeasResponse = z.infer<typeof CollectIdeasResponseSchema>;
+export type ContentIdeaListResponse = z.infer<typeof ContentIdeaListResponseSchema>;
