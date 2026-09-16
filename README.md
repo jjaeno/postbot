@@ -2,7 +2,7 @@
 
 Postbot is an AI-assisted short-form content automation product for YouTube Shorts, Instagram Reels, and TikTok.
 
-This repository is currently at **5단계: SNS OAuth 기반과 YouTube 연결**. The codebase contains the monorepo foundation, Prisma data model, secure email/password authentication, channel configuration workflow, and YouTube account connection through OAuth/Fake OAuth providers.
+This repository has completed stages 0–7 and is currently at **8단계 부분 완료**. Fake LLM structured generation, SceneDocument validation, versioning, usage, and cost persistence are implemented. Before stage 9, stage 8.5 will move generation to the BullMQ SCRIPT worker, add the real OpenAI provider, complete partial regeneration, and harden concurrency and idempotency.
 
 ## Requirements
 
@@ -135,7 +135,7 @@ pnpm --filter @postbot/web e2e
 pnpm build
 ```
 
-For stage 5, the focused validation set is:
+Example focused validation set:
 
 ```bash
 pnpm --filter @postbot/publishers lint
