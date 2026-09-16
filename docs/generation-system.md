@@ -11,6 +11,8 @@ LLM 호출은 `LlmProvider` 인터페이스 뒤에 둔다.
 
 모델명은 `LLM_MODEL` 환경 변수로 주입한다. 기본값은 `gpt-5-mini`이며 도메인 코드에 모델명을 고정하지 않는다.
 
+`LLM_PROVIDER=openai`를 선택하면 `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `LLM_TIMEOUT_MS`, `LLM_MAX_RETRIES`로 실제 Provider를 설정한다. Provider는 Responses API의 JSON Schema Structured Output을 요청하고, 응답은 저장 전에 기존 Zod/SceneDocument 검증을 통과해야 한다. API 키는 로그 또는 DB snapshot에 저장하지 않는다.
+
 ## API
 
 - `POST /generation/script-scene`
@@ -21,6 +23,18 @@ LLM 호출은 `LlmProvider` 인터페이스 뒤에 둔다.
 - `platform`
 - `idempotencyKey`
 - `partial`: `full`, `hook`, `body`, `metadata`, `scene`
+
+The endpoint validates CSRF and workspace-scoped idea ownership, then returns a `SCRIPT` `ProductionJob` immediately. The worker executes the Provider request, validation, version persistence, usage, and cost-ledger write. Job state is available at `GET /jobs/:jobId` and `GET /jobs/:jobId/events`.
+
+Partial regeneration preserves the latest version's unselected script, metadata, facts, and SceneDocument fields. First-time partial generation uses the provider result as a complete initial version.
+
+The worker records retry attempts through `ProductionJob`/`JobAttempt`. A cancellation requested while a job is running is checked before generation persistence; it ends as `CANCELLED` without creating ProviderUsage, CostLedger, or generated versions.
+
+## Verification status
+
+The Fake Provider integration path is verified against local MySQL and Redis: `SCRIPT` work is enqueued through BullMQ, completed by the worker, and persists one script/scene version, ProviderUsage, and CostLedger record. The cancellation path is also verified without creating generation records.
+
+Real OpenAI Provider verification is pending because this environment does not have `OPENAI_API_KEY`. To run it, set `LLM_PROVIDER=openai`, a valid `OPENAI_API_KEY`, and optionally `OPENAI_BASE_URL`, `LLM_TIMEOUT_MS`, and `LLM_MAX_RETRIES`; do not add the key to a tracked `.env` file.
 
 중복 요청은 `ProviderUsage.idempotencyKey`로 감지하고 기존 결과 snapshot을 반환한다.
 

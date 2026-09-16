@@ -5,6 +5,13 @@ import { FakeLlmProvider, OpenAiLlmProvider, type LlmProvider } from "@postbot/p
 @Injectable()
 export class LlmProviderFactory {
   create(): LlmProvider {
-    return loadConfig().LLM_PROVIDER === "openai" ? new OpenAiLlmProvider() : new FakeLlmProvider();
+    const config = loadConfig();
+    return config.LLM_PROVIDER === "openai"
+      ? new OpenAiLlmProvider({
+          apiKey: config.OPENAI_API_KEY,
+          baseUrl: config.OPENAI_BASE_URL,
+          timeoutMs: config.LLM_TIMEOUT_MS
+        })
+      : new FakeLlmProvider();
   }
 }

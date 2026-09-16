@@ -2,10 +2,11 @@ import { BadRequestException } from "@nestjs/common";
 import type { ScriptSceneGenerationResponse } from "@postbot/contracts";
 import type { LlmGenerationRequest, LlmGenerationResult, LlmProvider } from "@postbot/providers";
 import type { SceneDocument } from "@postbot/scene-schema";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GenerationIdea, GenerationRepository, SaveGenerationInput } from "./generation.repository.js";
 import { GenerationService } from "./generation.service.js";
 import { LlmProviderFactory } from "./llm-provider.factory.js";
+import type { JobsService } from "../jobs/jobs.service.js";
 
 const sceneDocument = (sourceUrl: string): SceneDocument => ({
   schemaVersion: "1.0.0",
@@ -136,9 +137,9 @@ class MemoryGenerationRepository implements GenerationRepository {
   }
 }
 
-const createService = (provider: StaticLlmProvider) => {
+const createService = (provider: StaticLlmProvider, jobs?: Pick<JobsService, "create">) => {
   const repository = new MemoryGenerationRepository();
-  const service = new GenerationService(repository, new TestLlmProviderFactory(provider));
+  const service = new GenerationService(repository, new TestLlmProviderFactory(provider), jobs);
   return { provider, repository, service };
 };
 
@@ -298,5 +299,15 @@ describe("GenerationService", () => {
     expect(first.scriptVersionId).toBe(second.scriptVersionId);
     expect(second.duplicate).toBe(true);
     expect(provider.calls).toBe(1);
+  });
+
+  it("enqueues a SCRIPT job without invoking the LLM provider", async () => {
+    const provider = new StaticLlmProvider([structuredOutput("https://example.org/science/rocket")]);
+    const create = vi.fn().mockResolvedValue({ id: "job-1", type: "SCRIPT", status: "QUEUED" });
+    const { service } = createService(provider, { create });
+
+    await expect(service.enqueue("workspace-1", { ideaId: "idea-1", idempotencyKey: "generation-queued" })).resolves.toMatchObject({ id: "job-1" });
+    expect(create).toHaveBeenCalledWith("workspace-1", expect.objectContaining({ type: "SCRIPT", channelId: "channel-1" }));
+    expect(provider.calls).toBe(0);
   });
 });

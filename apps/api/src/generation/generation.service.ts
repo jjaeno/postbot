@@ -13,9 +13,9 @@ import { SceneDocumentSchema } from "@postbot/scene-schema";
 import { z } from "zod";
 import { GENERATION_REPOSITORY, type GenerationIdea, type GenerationRepository } from "./generation.repository.js";
 import { LlmProviderFactory } from "./llm-provider.factory.js";
+import { JobsService } from "../jobs/jobs.service.js";
 
 const promptVersion = "script-scene-v1";
-const maxAttempts = 2;
 
 const StructuredGenerationSchema = z.object({
   planning: z.object({
@@ -34,7 +34,8 @@ type StructuredGeneration = z.infer<typeof StructuredGenerationSchema>;
 export class GenerationService {
   constructor(
     @Inject(GENERATION_REPOSITORY) private readonly repository: GenerationRepository,
-    private readonly llmProviderFactory: LlmProviderFactory
+    private readonly llmProviderFactory: LlmProviderFactory,
+    @Inject(JobsService) private readonly jobs?: Pick<JobsService, "create">
   ) {}
 
   async generate(workspaceId: string, rawInput: unknown): Promise<ScriptSceneGenerationResponse> {
@@ -49,7 +50,7 @@ export class GenerationService {
     }
     const config = loadConfig();
     const provider = this.llmProviderFactory.create();
-    const llmResult = await this.generateWithRetry(provider, idea, input, config.LLM_MODEL);
+    const llmResult = await this.generateWithRetry(provider, idea, input, config.LLM_MODEL, config.LLM_MAX_RETRIES + 1);
     const structured = this.parseStructuredOutput(llmResult.structuredOutput, idea);
 
     return this.repository.save({
@@ -69,11 +70,29 @@ export class GenerationService {
     });
   }
 
+  async enqueue(workspaceId: string, rawInput: unknown) {
+    const input = this.parseInput(rawInput);
+    const idea = await this.repository.findIdea(workspaceId, input.ideaId);
+    if (!idea) {
+      throw new NotFoundException({ code: "IDEA_NOT_FOUND", message: "Idea was not found." });
+    }
+    if (!this.jobs) {
+      throw new Error("JobsService is required to enqueue generation.");
+    }
+    return this.jobs.create(workspaceId, {
+      type: "SCRIPT",
+      channelId: idea.channelId,
+      idempotencyKey: input.idempotencyKey,
+      payload: { generation: { request: input, idea } }
+    });
+  }
+
   private async generateWithRetry(
     provider: LlmProvider,
     idea: GenerationIdea,
     input: GenerateScriptSceneRequest,
-    model: string
+    model: string,
+    maxAttempts: number
   ): Promise<LlmGenerationResult> {
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {

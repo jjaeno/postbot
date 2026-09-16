@@ -438,6 +438,26 @@ export const GenerateScriptSceneRequestSchema = z.object({
   partial: z.enum(["full", "hook", "body", "metadata", "scene"]).default("full")
 });
 
+export const GenerationIdeaSnapshotSchema = z.object({
+  id: z.string().min(1),
+  channelId: z.string().min(1),
+  title: z.string().min(1).max(255),
+  summary: z.string().max(2000),
+  canonicalUrl: z.string().url(),
+  sourceName: z.string().min(1),
+  sourceKind: z.enum(["NEWS", "OFFICIAL", "PAPER", "RSS", "PUBLIC_DATA", "MANUAL"]),
+  publishedAt: z.string().datetime().nullable(),
+  topic: z.string().min(1),
+  language: z.string().min(2).max(16)
+});
+
+export const ScriptGenerationJobPayloadSchema = z.object({
+  generation: z.object({
+    request: GenerateScriptSceneRequestSchema,
+    idea: GenerationIdeaSnapshotSchema
+  })
+});
+
 export const FactSourceLinkSchema = z.object({
   claim: z.string().min(1).max(1000),
   sourceUrl: z.string().url()
@@ -477,6 +497,8 @@ export const ScriptSceneGenerationResponseSchema = z.object({
 });
 
 export type GenerateScriptSceneRequest = z.infer<typeof GenerateScriptSceneRequestSchema>;
+export type GenerationIdeaSnapshot = z.infer<typeof GenerationIdeaSnapshotSchema>;
+export type ScriptGenerationJobPayload = z.infer<typeof ScriptGenerationJobPayloadSchema>;
 export type FactSourceLink = z.infer<typeof FactSourceLinkSchema>;
 export type GeneratedMetadata = z.infer<typeof GeneratedMetadataSchema>;
 export type GeneratedScript = z.infer<typeof GeneratedScriptSchema>;

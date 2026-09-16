@@ -221,6 +221,9 @@ importers:
       '@postbot/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@postbot/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@postbot/database':
         specifier: workspace:*
         version: link:../../packages/database
@@ -230,6 +233,12 @@ importers:
       '@postbot/logger':
         specifier: workspace:*
         version: link:../../packages/logger
+      '@postbot/providers':
+        specifier: workspace:*
+        version: link:../../packages/providers
+      '@postbot/scene-schema':
+        specifier: workspace:*
+        version: link:../../packages/scene-schema
       dotenv:
         specifier: ^17.2.3
         version: 17.4.2
@@ -239,6 +248,9 @@ importers:
       rxjs:
         specifier: ^7.8.2
         version: 7.8.2
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
     devDependencies:
       tsx:
         specifier: ^4.21.0

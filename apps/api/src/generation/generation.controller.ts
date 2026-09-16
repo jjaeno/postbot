@@ -10,6 +10,6 @@ export class GenerationController {
 
   @Post("script-scene")
   generate(@Req() req: AuthenticatedRequest, @Body() body: unknown) {
-    return this.generation.generate(req.auth.workspaceId, body);
+    return this.generation.enqueue(req.auth.workspaceId, body);
   }
 }

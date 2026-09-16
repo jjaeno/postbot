@@ -1,5 +1,7 @@
 import type { Prisma, PrismaClient } from "@postbot/database";
 import type { EnqueueJobInput } from "@postbot/jobs";
+import { ScriptGenerationJobPayloadSchema } from "@postbot/contracts";
+import { ScriptGenerationProcessor } from "./script-generation-processor.js";
 
 type ProductionJobStatus =
   | "QUEUED"
@@ -50,7 +52,11 @@ const sleep = async (timeoutMs: number): Promise<void> => {
 };
 
 export class DeterministicJobProcessor {
-  constructor(private readonly prisma: PrismaClient) {}
+  private readonly scriptGeneration: ScriptGenerationProcessor;
+
+  constructor(private readonly prisma: PrismaClient) {
+    this.scriptGeneration = new ScriptGenerationProcessor(prisma);
+  }
 
   async process(input: EnqueueJobInput): Promise<void> {
     const attemptNumber = await this.start(input.id);
@@ -77,6 +83,18 @@ export class DeterministicJobProcessor {
     if (behavior.mode === "retry-then-success" && attemptNumber <= behavior.failAttempts) {
       await this.retry(input.id, attemptNumber, "RETRY_REQUESTED", "Deterministic retry requested.");
       throw new Error("Deterministic retry requested.");
+    }
+
+    if (input.type === "SCRIPT" && ScriptGenerationJobPayloadSchema.safeParse(input.payload).success) {
+      try {
+        const result = await this.scriptGeneration.process(input.id, input.payload);
+        await this.succeed(input.id, attemptNumber, result);
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "SCRIPT_GENERATION_FAILED";
+        await this.fail(input.id, attemptNumber, "SCRIPT_GENERATION_FAILED", message);
+        throw error;
+      }
     }
 
     await this.succeed(input.id, attemptNumber, {

@@ -17,10 +17,14 @@
     "@postbot/config": "workspace:*",
     "@postbot/database": "workspace:*",
     "@postbot/jobs": "workspace:*",
+    "@postbot/contracts": "workspace:*",
     "@postbot/logger": "workspace:*",
+    "@postbot/providers": "workspace:*",
+    "@postbot/scene-schema": "workspace:*",
     "dotenv": "^17.2.3",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.2"
+    "rxjs": "^7.8.2",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "tsx": "^4.21.0",

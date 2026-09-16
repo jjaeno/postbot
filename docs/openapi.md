@@ -28,6 +28,9 @@ Current stage 5 endpoints:
 | POST | `/platform-accounts/youtube/connect` | Access cookie + CSRF | Create a YouTube OAuth state with PKCE and return the provider authorization URL |
 | GET | `/platform-accounts/youtube/callback` | OAuth state | Consume a YouTube OAuth callback and connect the platform account |
 | POST | `/platform-accounts/:platformAccountId/disconnect` | Access cookie + CSRF | Revoke provider tokens when possible and disconnect the account |
+| POST | `/generation/script-scene` | Access cookie + CSRF | Validate an owned idea and enqueue a `SCRIPT` generation job; returns the job immediately |
+| GET | `/jobs/:jobId` | Access cookie | Read current generation job state and result |
+| GET | `/jobs/:jobId/events` | Access cookie | Subscribe to generation progress via SSE |
 
 Authenticated mutating requests must include:
 
@@ -72,3 +75,7 @@ Selected platforms without OAuth credentials are returned in `platformConnection
 The callback validates OAuth `state`, consumes it once, uses the stored PKCE verifier, validates required YouTube scopes, encrypts access/refresh tokens at application level, records the encryption key version, and links the external account to at most one workspace/channel.
 
 The stage 5 API does not upload videos and does not fake successful Google behavior when real credentials or scopes are missing.
+
+## Generation Contract
+
+`POST /generation/script-scene` accepts `ideaId`, optional `platform`, `idempotencyKey`, and `partial` (`full`, `hook`, `body`, `metadata`, or `scene`). It verifies CSRF, workspace ownership, and idea ownership, then creates or returns the idempotent `SCRIPT` job. The API does not call an LLM in this request; completion is available through the job REST and SSE endpoints.

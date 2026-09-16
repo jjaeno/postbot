@@ -238,8 +238,164 @@ export class FakeLlmProvider implements LlmProvider {
   }
 }
 
+type OpenAiLlmProviderOptions = {
+  readonly apiKey: string;
+  readonly baseUrl: string;
+  readonly timeoutMs: number;
+};
+
+type OpenAiResponse = {
+  readonly id?: string;
+  readonly created_at?: number;
+  readonly output_text?: string;
+  readonly usage?: {
+    readonly input_tokens?: number;
+    readonly output_tokens?: number;
+    readonly total_tokens?: number;
+  };
+};
+
+const scriptSceneJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["planning", "script", "facts", "sceneDocument"],
+  properties: {
+    planning: {
+      type: "object",
+      additionalProperties: false,
+      required: ["title", "summary", "metadata"],
+      properties: {
+        title: { type: "string" },
+        summary: { type: "string" },
+        metadata: {
+          type: "object",
+          additionalProperties: false,
+          required: ["description", "hashtags"],
+          properties: { description: { type: "string" }, hashtags: { type: "array", items: { type: "string" } } }
+        }
+      }
+    },
+    script: {
+      type: "object",
+      additionalProperties: false,
+      required: ["hook", "body", "callToAction", "language", "durationSeconds"],
+      properties: {
+        hook: { type: "string" }, body: { type: "string" }, callToAction: { type: "string" },
+        language: { type: "string" }, durationSeconds: { type: "number" }
+      }
+    },
+    facts: {
+      type: "array",
+      items: {
+        type: "object", additionalProperties: false, required: ["claim", "sourceUrl"],
+        properties: { claim: { type: "string" }, sourceUrl: { type: "string" } }
+      }
+    },
+    sceneDocument: {
+      type: "object",
+      additionalProperties: false,
+      required: ["schemaVersion", "title", "width", "height", "fps", "durationInFrames", "scenes"],
+      properties: {
+        schemaVersion: { type: "string" }, title: { type: "string" }, width: { type: "integer" }, height: { type: "integer" },
+        fps: { type: "integer" }, durationInFrames: { type: "integer" },
+        scenes: {
+          type: "array",
+          items: {
+            type: "object", additionalProperties: false,
+            required: ["id", "startFrame", "durationInFrames", "visualPrompt", "narration", "overlays"],
+            properties: {
+              id: { type: "string" }, startFrame: { type: "integer" }, durationInFrames: { type: "integer" }, visualPrompt: { type: "string" },
+              narration: {
+                type: "object", additionalProperties: false, required: ["text", "sourceUrl"],
+                properties: { text: { type: "string" }, sourceUrl: { type: "string" } }
+              },
+              overlays: {
+                type: "array",
+                items: {
+                  type: "object", additionalProperties: false, required: ["text", "kind"],
+                  properties: { text: { type: "string" }, kind: { type: "string", enum: ["title", "fact", "cta"] } }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+} as const;
+
+const readResponseText = (response: OpenAiResponse): string => {
+  if (!response.output_text) {
+    throw new Error("OpenAI response did not include structured output text.");
+  }
+  return response.output_text;
+};
+
 export class OpenAiLlmProvider implements LlmProvider {
-  generateScriptAndScene(): Promise<LlmGenerationResult> {
-    return Promise.reject(new Error("OpenAI LLM provider is not configured in this stage."));
+  constructor(private readonly options: OpenAiLlmProviderOptions) {}
+
+  async generateScriptAndScene(request: LlmGenerationRequest): Promise<LlmGenerationResult> {
+    if (!this.options.apiKey) {
+      throw new Error("OPENAI_API_KEY is required when LLM_PROVIDER=openai.");
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
+    try {
+      const response = await fetch(`${this.options.baseUrl.replace(/\/$/, "")}/responses`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.options.apiKey}`,
+          "Content-Type": "application/json",
+          "Idempotency-Key": request.idempotencyKey
+        },
+        body: JSON.stringify({
+          model: request.model,
+          store: false,
+          instructions:
+            "Generate a factual short-form script and scene document. Return only data that conforms to the supplied JSON Schema and cite only the supplied source URLs.",
+          input: JSON.stringify({
+            title: request.title,
+            summary: request.summary,
+            topic: request.topic,
+            platform: request.platform,
+            partial: request.partial,
+            sources: request.sources
+          }),
+          text: {
+            format: {
+              type: "json_schema",
+              name: "script_scene_generation",
+              strict: true,
+              schema: scriptSceneJsonSchema
+            }
+          }
+        }),
+        signal: controller.signal
+      });
+      if (!response.ok) {
+        throw new Error(`OpenAI Responses API failed with status ${response.status}.`);
+      }
+      const payload = (await response.json()) as OpenAiResponse;
+      const usage = payload.usage;
+      const promptTokens = usage?.input_tokens ?? 0;
+      const completionTokens = usage?.output_tokens ?? 0;
+      return {
+        provider: "openai",
+        idempotencyKey: request.idempotencyKey,
+        createdAt: payload.created_at ? new Date(payload.created_at * 1_000).toISOString() : new Date().toISOString(),
+        model: request.model,
+        promptVersion: request.promptVersion,
+        structuredOutput: JSON.parse(readResponseText(payload)) as unknown,
+        usage: {
+          promptTokens,
+          completionTokens,
+          totalTokens: usage?.total_tokens ?? promptTokens + completionTokens
+        },
+        estimatedCostUsd: "0.000000"
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 }
