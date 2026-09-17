@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OpenAiLlmProvider } from "./index.js";
+import { FakeStorageProvider } from "./index.js";
 
 const responseBody = {
   created_at: 1_788_480_000,
@@ -58,5 +59,17 @@ describe("OpenAiLlmProvider", () => {
         topic: "Topic", platform: null, partial: "full", sources: []
       })
     ).rejects.toThrow("Aborted");
+  });
+});
+
+describe("FakeStorageProvider", () => {
+  it("uploads, downloads, presigns, and deletes objects", async () => {
+    const storage = new FakeStorageProvider();
+    const body = new TextEncoder().encode("asset");
+    const stored = await storage.upload({ key: "assets/test", body, mimeType: "text/plain" });
+    await expect(storage.download(stored.key)).resolves.toEqual(body);
+    await expect(storage.presignedUrl(stored.key, 60)).resolves.toContain("expiresIn=60");
+    await storage.delete(stored.key);
+    await expect(Promise.resolve().then(() => storage.download(stored.key))).rejects.toThrow("STORAGE_OBJECT_NOT_FOUND");
   });
 });

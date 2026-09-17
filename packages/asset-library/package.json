@@ -19,5 +19,10 @@
   },
   "devDependencies": {
     "vitest": "^4.0.14"
+  },
+  "dependencies": {
+    "@types/node": "^20.19.25",
+    "@postbot/database": "workspace:*",
+    "@postbot/providers": "workspace:*"
   }
 }

@@ -1,7 +1,8 @@
 import type { Prisma, PrismaClient } from "@postbot/database";
 import type { EnqueueJobInput } from "@postbot/jobs";
-import { ScriptGenerationJobPayloadSchema } from "@postbot/contracts";
+import { AssetPreparationJobPayloadSchema, ScriptGenerationJobPayloadSchema, TtsPreparationJobPayloadSchema } from "@postbot/contracts";
 import { ScriptGenerationProcessor } from "./script-generation-processor.js";
+import { AssetPreparationProcessor } from "./asset-preparation-processor.js";
 
 type ProductionJobStatus =
   | "QUEUED"
@@ -53,9 +54,11 @@ const sleep = async (timeoutMs: number): Promise<void> => {
 
 export class DeterministicJobProcessor {
   private readonly scriptGeneration: ScriptGenerationProcessor;
+  private readonly assetPreparation: AssetPreparationProcessor;
 
   constructor(private readonly prisma: PrismaClient) {
     this.scriptGeneration = new ScriptGenerationProcessor(prisma);
+    this.assetPreparation = new AssetPreparationProcessor(prisma);
   }
 
   async process(input: EnqueueJobInput): Promise<void> {
@@ -93,6 +96,33 @@ export class DeterministicJobProcessor {
       } catch (error) {
         const message = error instanceof Error ? error.message : "SCRIPT_GENERATION_FAILED";
         await this.fail(input.id, attemptNumber, "SCRIPT_GENERATION_FAILED", message);
+        throw error;
+      }
+    }
+
+    if (input.type === "ASSET" && AssetPreparationJobPayloadSchema.safeParse(input.payload).success) {
+      try {
+        const result = await this.assetPreparation.processAsset(input.payload, input.id);
+        if (result.needsReview === true) {
+          await this.needsReview(input.id, attemptNumber, result);
+          return;
+        }
+        await this.succeed(input.id, attemptNumber, result);
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "ASSET_PREPARATION_FAILED";
+        await this.fail(input.id, attemptNumber, "ASSET_PREPARATION_FAILED", message);
+        throw error;
+      }
+    }
+
+    if (input.type === "TTS" && TtsPreparationJobPayloadSchema.safeParse(input.payload).success) {
+      try {
+        await this.succeed(input.id, attemptNumber, await this.assetPreparation.processTts(input.payload, input.id));
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "TTS_PREPARATION_FAILED";
+        await this.fail(input.id, attemptNumber, "TTS_PREPARATION_FAILED", message);
         throw error;
       }
     }
@@ -159,6 +189,16 @@ export class DeterministicJobProcessor {
       finishedAt: new Date(),
       errorCode,
       errorMessage
+    });
+  }
+
+  private async needsReview(jobId: string, attemptNumber: number, result: Record<string, unknown>): Promise<void> {
+    await this.finish(jobId, attemptNumber, "NEEDS_REVIEW", {
+      status: "NEEDS_REVIEW",
+      result: result as Prisma.InputJsonObject,
+      finishedAt: new Date(),
+      errorCode: "ASSET_LICENSE_REVIEW_REQUIRED",
+      errorMessage: "Asset license requires manual review."
     });
   }
 

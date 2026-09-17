@@ -399,3 +399,96 @@ export class OpenAiLlmProvider implements LlmProvider {
     }
   }
 }
+
+export type StorageObject = { key: string; checksumSha256: string; mimeType: string; sizeBytes: number };
+export interface StorageProvider {
+  upload(input: { key: string; body: Uint8Array; mimeType: string }): Promise<StorageObject>;
+  download(key: string): Promise<Uint8Array>;
+  delete(key: string): Promise<void>;
+  presignedUrl(key: string, expiresInSeconds: number): Promise<string>;
+}
+
+export class FakeStorageProvider implements StorageProvider {
+  private readonly objects = new Map<string, { body: Uint8Array; mimeType: string }>();
+
+  upload(input: { key: string; body: Uint8Array; mimeType: string }): Promise<StorageObject> {
+    const body = new Uint8Array(input.body);
+    this.objects.set(input.key, { body, mimeType: input.mimeType });
+    return Promise.resolve({ key: input.key, checksumSha256: createHash("sha256").update(body).digest("hex"), mimeType: input.mimeType, sizeBytes: body.byteLength });
+  }
+  download(key: string): Promise<Uint8Array> {
+    const object = this.objects.get(key);
+    if (!object) throw new Error("STORAGE_OBJECT_NOT_FOUND");
+    return Promise.resolve(new Uint8Array(object.body));
+  }
+  delete(key: string): Promise<void> { this.objects.delete(key); return Promise.resolve(); }
+  presignedUrl(key: string, expiresInSeconds: number): Promise<string> {
+    if (!this.objects.has(key)) throw new Error("STORAGE_OBJECT_NOT_FOUND");
+    return Promise.resolve(`fake-storage://${encodeURIComponent(key)}?expiresIn=${expiresInSeconds}`);
+  }
+}
+
+export class S3StorageProvider implements StorageProvider {
+  private readonly client: S3Client;
+  constructor(private readonly options: { endpoint: string; region: string; bucket: string; accessKeyId: string; secretAccessKey: string }) { this.client = new S3Client({ endpoint: options.endpoint, region: options.region, forcePathStyle: true, credentials: { accessKeyId: options.accessKeyId, secretAccessKey: options.secretAccessKey } }); }
+  async upload(input: { key: string; body: Uint8Array; mimeType: string }): Promise<StorageObject> { await this.client.send(new PutObjectCommand({ Bucket: this.options.bucket, Key: input.key, Body: input.body, ContentType: input.mimeType })); return { key: input.key, checksumSha256: createHash("sha256").update(input.body).digest("hex"), mimeType: input.mimeType, sizeBytes: input.body.byteLength }; }
+  async download(key: string): Promise<Uint8Array> { const result = await this.client.send(new GetObjectCommand({ Bucket: this.options.bucket, Key: key })); if (!result.Body) throw new Error("STORAGE_OBJECT_NOT_FOUND"); return new Uint8Array(await result.Body.transformToByteArray()); }
+  async delete(key: string): Promise<void> { await this.client.send(new DeleteObjectCommand({ Bucket: this.options.bucket, Key: key })); }
+  presignedUrl(key: string, expiresInSeconds: number): Promise<string> { return getSignedUrl(this.client, new GetObjectCommand({ Bucket: this.options.bucket, Key: key }), { expiresIn: expiresInSeconds }); }
+}
+
+export type ImageGenerationRequest = { model: string; prompt: string; idempotencyKey: string; width: number; height: number };
+export type ImageGenerationResult = ProviderResult & { model: string; mimeType: string; bytes: Uint8Array; width: number; height: number; estimatedCostUsd: string };
+export interface ImageProvider { generate(request: ImageGenerationRequest): Promise<ImageGenerationResult>; }
+export class FakeImageProvider implements ImageProvider {
+  generate(request: ImageGenerationRequest): Promise<ImageGenerationResult> {
+    if (request.prompt.includes("provider-failure")) throw new Error("IMAGE_PROVIDER_FAILED");
+    return Promise.resolve({ provider: "fake-image", idempotencyKey: request.idempotencyKey, createdAt: new Date().toISOString(), model: request.model, mimeType: "image/svg+xml", bytes: new TextEncoder().encode(`<svg xmlns="http://www.w3.org/2000/svg" width="${request.width}" height="${request.height}"><text x="20" y="40">${request.prompt.slice(0, 80)}</text></svg>`), width: request.width, height: request.height, estimatedCostUsd: "0.000000" });
+  }
+}
+
+export class GoogleImageProvider implements ImageProvider {
+  constructor(private readonly options: { apiKey: string; timeoutMs: number }) {}
+  async generate(request: ImageGenerationRequest): Promise<ImageGenerationResult> {
+    if (!this.options.apiKey) throw new Error("GOOGLE_API_KEY is required when IMAGE_PROVIDER=google.");
+    const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
+    try {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(request.model)}:generateContent`, { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": this.options.apiKey }, body: JSON.stringify({ contents: [{ parts: [{ text: request.prompt }] }] }), signal: controller.signal });
+      if (!response.ok) throw new Error(`Google image API failed with status ${response.status}.`);
+      const payload = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ inlineData?: { mimeType?: string; data?: string } }> } }> };
+      const image = payload.candidates?.flatMap((candidate) => candidate.content?.parts ?? []).find((part) => part.inlineData?.data)?.inlineData;
+      if (!image?.data || !image.mimeType) throw new Error("Google image API did not return inline image data.");
+      return { provider: "google", idempotencyKey: request.idempotencyKey, createdAt: new Date().toISOString(), model: request.model, mimeType: image.mimeType, bytes: Uint8Array.from(Buffer.from(image.data, "base64")), width: request.width, height: request.height, estimatedCostUsd: "0.000000" };
+    } finally { clearTimeout(timer); }
+  }
+}
+
+export type TtsRequest = { model: string; voice: string; text: string; idempotencyKey: string };
+export type TtsTiming = { text: string; startSeconds: number; endSeconds: number };
+export type TtsResult = ProviderResult & { model: string; mimeType: string; bytes: Uint8Array; durationSeconds: number; timings: TtsTiming[]; estimatedCostUsd: string };
+export interface TtsProvider { synthesize(request: TtsRequest): Promise<TtsResult>; }
+export class FakeTtsProvider implements TtsProvider {
+  synthesize(request: TtsRequest): Promise<TtsResult> {
+    if (request.text.includes("provider-failure")) throw new Error("TTS_PROVIDER_FAILED");
+    const words = request.text.trim().split(/\s+/).filter(Boolean);
+    const timings = words.map((text, index) => ({ text, startSeconds: index * 0.3, endSeconds: (index + 1) * 0.3 }));
+    return Promise.resolve({ provider: "fake-tts", idempotencyKey: request.idempotencyKey, createdAt: new Date().toISOString(), model: request.model, mimeType: "audio/wav", bytes: new TextEncoder().encode(`fake-audio:${request.voice}:${request.text}`), durationSeconds: timings.length * 0.3, timings, estimatedCostUsd: "0.000000" });
+  }
+}
+
+export class ElevenLabsTtsProvider implements TtsProvider {
+  constructor(private readonly options: { apiKey: string; timeoutMs: number }) {}
+  async synthesize(request: TtsRequest): Promise<TtsResult> {
+    if (!this.options.apiKey) throw new Error("ELEVENLABS_API_KEY is required when TTS_PROVIDER=elevenlabs.");
+    const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
+    try {
+      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(request.voice)}`, { method: "POST", headers: { "xi-api-key": this.options.apiKey, "Content-Type": "application/json" }, body: JSON.stringify({ text: request.text, model_id: request.model }), signal: controller.signal });
+      if (!response.ok) throw new Error(`ElevenLabs TTS API failed with status ${response.status}.`);
+      const bytes = new Uint8Array(await response.arrayBuffer()); const words = request.text.trim().split(/\s+/).filter(Boolean); const timings = words.map((text, index) => ({ text, startSeconds: index * 0.3, endSeconds: (index + 1) * 0.3 }));
+      return { provider: "elevenlabs", idempotencyKey: request.idempotencyKey, createdAt: new Date().toISOString(), model: request.model, mimeType: response.headers.get("content-type") ?? "audio/mpeg", bytes, durationSeconds: timings.length * 0.3, timings, estimatedCostUsd: "0.000000" };
+    } finally { clearTimeout(timer); }
+  }
+}
+import { createHash } from "node:crypto";
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";

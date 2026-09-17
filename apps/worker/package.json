@@ -15,6 +15,7 @@
     "@nestjs/common": "^11.1.9",
     "@nestjs/core": "^11.1.9",
     "@postbot/config": "workspace:*",
+    "@postbot/asset-library": "workspace:*",
     "@postbot/database": "workspace:*",
     "@postbot/jobs": "workspace:*",
     "@postbot/contracts": "workspace:*",

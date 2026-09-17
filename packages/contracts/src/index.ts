@@ -499,6 +499,28 @@ export const ScriptSceneGenerationResponseSchema = z.object({
 export type GenerateScriptSceneRequest = z.infer<typeof GenerateScriptSceneRequestSchema>;
 export type GenerationIdeaSnapshot = z.infer<typeof GenerationIdeaSnapshotSchema>;
 export type ScriptGenerationJobPayload = z.infer<typeof ScriptGenerationJobPayloadSchema>;
+
+export const AssetPreparationJobPayloadSchema = z.object({
+  assetPreparation: z.object({
+    channelId: z.string().min(1),
+    contentItemId: z.string().min(1).nullable().default(null),
+    prompt: z.string().min(1).max(2_000),
+    idempotencyKey: z.string().min(8).max(191)
+  })
+});
+
+export const TtsPreparationJobPayloadSchema = z.object({
+  ttsPreparation: z.object({
+    channelId: z.string().min(1),
+    contentItemId: z.string().min(1),
+    text: z.string().min(1).max(10_000),
+    voice: z.string().min(1).max(191),
+    idempotencyKey: z.string().min(8).max(191)
+  })
+});
+
+export type AssetPreparationJobPayload = z.infer<typeof AssetPreparationJobPayloadSchema>;
+export type TtsPreparationJobPayload = z.infer<typeof TtsPreparationJobPayloadSchema>;
 export type FactSourceLink = z.infer<typeof FactSourceLinkSchema>;
 export type GeneratedMetadata = z.infer<typeof GeneratedMetadataSchema>;
 export type GeneratedScript = z.infer<typeof GeneratedScriptSchema>;

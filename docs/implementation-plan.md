@@ -423,7 +423,7 @@ deterministic Fake snapshot, 잘못된 JSON, 누락 출처, 길이 초과, retry
 ---
 # 9단계. Asset Library·이미지·TTS 파이프라인
 
-**상태:** 미완료
+**상태:** 완료 (실제 Image/TTS Provider 키 검증 대기)
 
 ### 구현 순서
 

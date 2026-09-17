@@ -17,6 +17,7 @@ const EnvSchema = z.object({
   S3_BUCKET: z.string().min(1).default("postbot-local"),
   S3_ACCESS_KEY_ID: z.string().min(1).default("postbot"),
   S3_SECRET_ACCESS_KEY: z.string().min(1).default("postbot-password"),
+  STORAGE_PROVIDER: z.enum(["fake", "s3"]).default("s3"),
   JWT_ACCESS_SECRET: z.string().min(16).default("local-access-secret-change-me"),
   JWT_REFRESH_SECRET: z.string().min(16).default("local-refresh-secret-change-me"),
   OAUTH_ENCRYPTION_KEY: z.string().min(16).default("local-oauth-encryption-key-change-me"),
@@ -33,8 +34,13 @@ const EnvSchema = z.object({
   LLM_MAX_RETRIES: z.coerce.number().int().min(0).max(5).default(1),
   IMAGE_PROVIDER: z.enum(["fake", "google"]).default("fake"),
   IMAGE_MODEL: z.string().min(1).default("gemini-3.1-flash-lite-image"),
+  GOOGLE_API_KEY: z.string().default(""),
+  IMAGE_TIMEOUT_MS: z.coerce.number().int().positive().max(300_000).default(60_000),
   TTS_PROVIDER: z.enum(["fake", "elevenlabs"]).default("fake"),
-  TTS_MODEL: z.string().min(1).default("eleven_flash_v2_5")
+  TTS_MODEL: z.string().min(1).default("eleven_flash_v2_5"),
+  ELEVENLABS_API_KEY: z.string().default(""),
+  ELEVENLABS_VOICE_ID: z.string().default(""),
+  TTS_TIMEOUT_MS: z.coerce.number().int().positive().max(300_000).default(60_000)
 });
 
 export type AppConfig = z.infer<typeof EnvSchema>;
