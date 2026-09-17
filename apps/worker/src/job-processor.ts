@@ -1,8 +1,9 @@
 import type { Prisma, PrismaClient } from "@postbot/database";
 import type { EnqueueJobInput } from "@postbot/jobs";
-import { AssetPreparationJobPayloadSchema, ScriptGenerationJobPayloadSchema, TtsPreparationJobPayloadSchema } from "@postbot/contracts";
+import { AssetPreparationJobPayloadSchema, RenderJobPayloadSchema, ScriptGenerationJobPayloadSchema, TtsPreparationJobPayloadSchema } from "@postbot/contracts";
 import { ScriptGenerationProcessor } from "./script-generation-processor.js";
 import { AssetPreparationProcessor } from "./asset-preparation-processor.js";
+import { RenderProcessor } from "./render-processor.js";
 
 type ProductionJobStatus =
   | "QUEUED"
@@ -55,10 +56,12 @@ const sleep = async (timeoutMs: number): Promise<void> => {
 export class DeterministicJobProcessor {
   private readonly scriptGeneration: ScriptGenerationProcessor;
   private readonly assetPreparation: AssetPreparationProcessor;
+  private readonly render: RenderProcessor;
 
   constructor(private readonly prisma: PrismaClient) {
     this.scriptGeneration = new ScriptGenerationProcessor(prisma);
     this.assetPreparation = new AssetPreparationProcessor(prisma);
+    this.render = new RenderProcessor(prisma);
   }
 
   async process(input: EnqueueJobInput): Promise<void> {
@@ -123,6 +126,17 @@ export class DeterministicJobProcessor {
       } catch (error) {
         const message = error instanceof Error ? error.message : "TTS_PREPARATION_FAILED";
         await this.fail(input.id, attemptNumber, "TTS_PREPARATION_FAILED", message);
+        throw error;
+      }
+    }
+
+    if (input.type === "RENDER" && RenderJobPayloadSchema.safeParse(input.payload).success) {
+      try {
+        await this.succeed(input.id, attemptNumber, await this.render.process(input.payload, input.id));
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "RENDER_FAILED";
+        await this.fail(input.id, attemptNumber, "RENDER_FAILED", message);
         throw error;
       }
     }

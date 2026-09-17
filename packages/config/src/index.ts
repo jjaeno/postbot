@@ -40,7 +40,8 @@ const EnvSchema = z.object({
   TTS_MODEL: z.string().min(1).default("eleven_flash_v2_5"),
   ELEVENLABS_API_KEY: z.string().default(""),
   ELEVENLABS_VOICE_ID: z.string().default(""),
-  TTS_TIMEOUT_MS: z.coerce.number().int().positive().max(300_000).default(60_000)
+  TTS_TIMEOUT_MS: z.coerce.number().int().positive().max(300_000).default(60_000),
+  RENDER_TIMEOUT_MS: z.coerce.number().int().positive().max(1_800_000).default(900_000)
 });
 
 export type AppConfig = z.infer<typeof EnvSchema>;

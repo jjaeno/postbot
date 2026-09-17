@@ -519,8 +519,18 @@ export const TtsPreparationJobPayloadSchema = z.object({
   })
 });
 
+export const RenderJobPayloadSchema = z.object({
+  render: z.object({
+    channelId: z.string().min(1),
+    contentItemId: z.string().min(1),
+    sceneVersionId: z.string().min(1),
+    idempotencyKey: z.string().min(8).max(191)
+  })
+});
+
 export type AssetPreparationJobPayload = z.infer<typeof AssetPreparationJobPayloadSchema>;
 export type TtsPreparationJobPayload = z.infer<typeof TtsPreparationJobPayloadSchema>;
+export type RenderJobPayload = z.infer<typeof RenderJobPayloadSchema>;
 export type FactSourceLink = z.infer<typeof FactSourceLinkSchema>;
 export type GeneratedMetadata = z.infer<typeof GeneratedMetadataSchema>;
 export type GeneratedScript = z.infer<typeof GeneratedScriptSchema>;

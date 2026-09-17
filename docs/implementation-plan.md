@@ -463,7 +463,7 @@ storage contract, fallback, checksum 동시 중복, 라이선스 차단, TTS tim
 
 # 10단계. Remotion·FFmpeg 영상 렌더러
 
-**상태:** 미완료
+**상태:** 완료 (로컬 FFmpeg/ffprobe smoke 환경 대기)
 
 ### 구현 순서
 
