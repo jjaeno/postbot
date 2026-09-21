@@ -2,7 +2,7 @@
 
 Postbot is an AI-assisted short-form content automation product for YouTube Shorts, Instagram Reels, and TikTok.
 
-This repository has completed stages 0–7 and is currently at **8단계 부분 완료**. Fake LLM structured generation, SceneDocument validation, versioning, usage, and cost persistence are implemented. Before stage 9, stage 8.5 will move generation to the BullMQ SCRIPT worker, add the real OpenAI provider, complete partial regeneration, and harden concurrency and idempotency.
+This repository has completed stages 0–10 and is currently preparing **11단계 정책 검사·검수·승인 UX**. Real-provider validation remains pending for OpenAI, image/TTS providers, and the local FFmpeg/ffprobe smoke render because the required credentials or binaries are not available in this environment.
 
 ## Requirements
 

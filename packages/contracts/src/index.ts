@@ -531,6 +531,22 @@ export const RenderJobPayloadSchema = z.object({
 export type AssetPreparationJobPayload = z.infer<typeof AssetPreparationJobPayloadSchema>;
 export type TtsPreparationJobPayload = z.infer<typeof TtsPreparationJobPayloadSchema>;
 export type RenderJobPayload = z.infer<typeof RenderJobPayloadSchema>;
+
+export const PolicyVerdictSchema = z.enum(["pass", "warning", "review", "block"]);
+export const ReviewActionSchema = z.enum(["approve", "hold", "discard", "schedule"]);
+export const RunPolicyCheckRequestSchema = z.object({ platform: PlatformSchema, region: z.string().min(2).max(32).default("GLOBAL") });
+export const ReviewActionRequestSchema = z.object({ action: ReviewActionSchema });
+export const PolicyFindingSchema = z.object({ code: z.string(), severity: PolicyVerdictSchema, message: z.string() });
+export const ContentReviewResponseSchema = z.object({
+  id: z.string(), channelId: z.string(), status: z.enum(["REVIEW_REQUIRED", "APPROVED", "SCHEDULED", "HELD", "FAILED"]), title: z.string(),
+  description: z.string(), durationSeconds: z.number().positive().nullable(), sources: z.array(z.object({ title: z.string(), url: z.string(), sourceName: z.string() })),
+  assets: z.array(z.object({ id: z.string(), licenseStatus: z.string(), purpose: z.string() })),
+  policy: z.object({ status: PolicyVerdictSchema, findings: z.array(PolicyFindingSchema), snapshotId: z.string().nullable() }).nullable()
+});
+export type PolicyVerdict = z.infer<typeof PolicyVerdictSchema>;
+export type RunPolicyCheckRequest = z.infer<typeof RunPolicyCheckRequestSchema>;
+export type ReviewActionRequest = z.infer<typeof ReviewActionRequestSchema>;
+export type ContentReviewResponse = z.infer<typeof ContentReviewResponseSchema>;
 export type FactSourceLink = z.infer<typeof FactSourceLinkSchema>;
 export type GeneratedMetadata = z.infer<typeof GeneratedMetadataSchema>;
 export type GeneratedScript = z.infer<typeof GeneratedScriptSchema>;

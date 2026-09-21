@@ -10,6 +10,7 @@ import { JobsModule } from "./jobs/jobs.module.js";
 import { IdeasModule } from "./ideas/ideas.module.js";
 import { GenerationModule } from "./generation/generation.module.js";
 import { PlatformAccountsModule } from "./platform-accounts/platform-accounts.module.js";
+import { ReviewModule } from "./review/review.module.js";
 
 @Module({
   imports: [
@@ -25,7 +26,8 @@ import { PlatformAccountsModule } from "./platform-accounts/platform-accounts.mo
     GenerationModule,
     IdeasModule,
     JobsModule,
-    PlatformAccountsModule
+    PlatformAccountsModule,
+    ReviewModule
   ],
   controllers: [AppController],
   providers: [

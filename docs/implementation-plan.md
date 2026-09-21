@@ -48,7 +48,10 @@
 | 7    | 소재 자동 수집과 아이디어 관리 | 완료    |
 | 8    | GPT 기반 대본·Scene JSON 생성 | 부분 완료 |
 | 8.5  | 생성 비동기화·실제 LLM 연동 | 완료 (실제 OpenAI 키 검증 대기) |
-| 9~19 | 후속 단계           | 미완료   |
+| 9    | Asset Library·이미지·TTS 파이프라인 | 완료 (실제 Image/TTS Provider 키 검증 대기) |
+| 10   | Remotion·FFmpeg 영상 렌더러 | 완료 (로컬 FFmpeg/ffprobe smoke 환경 대기) |
+| 11   | 정책 검사·검수·승인 UX | 완료 |
+| 12~19 | 후속 단계           | 미완료   |
 
 # 0단계. 저장소 분석 및 개발 계획 고정
 
@@ -498,7 +501,7 @@ storage contract, fallback, checksum 동시 중복, 라이선스 차단, TTS tim
 
 # 11단계. 정책 검사·검수·승인 UX
 
-**상태:** 미완료
+**상태:** 완료
 
 ### 구현 순서
 

@@ -22,6 +22,7 @@
     "@postbot/database": "workspace:*",
     "@postbot/jobs": "workspace:*",
     "@postbot/logger": "workspace:*",
+    "@postbot/policy-engine": "workspace:*",
     "@postbot/providers": "workspace:*",
     "@postbot/scene-schema": "workspace:*",
     "@postbot/publishers": "workspace:*",

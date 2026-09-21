@@ -1,13 +1,13 @@
 # Postbot 대본과 Scene JSON 생성
 
-8단계 생성 파이프라인은 `ContentIdea`를 입력으로 받아 `ContentItem`, `SourceReference`, `ScriptVersion`, `SceneVersion`을 만든다. 이미지, TTS, 실제 렌더링은 9~10단계 범위다.
+8.5단계 생성 파이프라인은 `ContentIdea`를 입력으로 받아 `ContentItem`, `SourceReference`, `ScriptVersion`, `SceneVersion`을 만든다. 이미지, TTS, 실제 렌더링은 9~10단계에서 구현되었다.
 
 ## Provider
 
 LLM 호출은 `LlmProvider` 인터페이스 뒤에 둔다.
 
 - `FakeLlmProvider`: deterministic 테스트와 로컬 개발용
-- `OpenAiLlmProvider`: 실제 OpenAI 연결 지점. 현재 단계에서는 인터페이스 자리만 제공하고 외부 호출은 수행하지 않는다.
+- `OpenAiLlmProvider`: Structured Output을 사용해 실제 OpenAI API를 호출한다. 유효한 `OPENAI_API_KEY`가 없는 이 환경에서는 통합 검증을 실행하지 않았다.
 
 모델명은 `LLM_MODEL` 환경 변수로 주입한다. 기본값은 `gpt-5-mini`이며 도메인 코드에 모델명을 고정하지 않는다.
 

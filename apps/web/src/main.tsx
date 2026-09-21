@@ -28,6 +28,7 @@ import {
   ChannelListResponseSchema,
   ChannelResponseSchema,
   CollectIdeasResponseSchema,
+  ContentReviewResponseSchema,
   ContentIdeaListResponseSchema,
   ContentIdeaSchema,
   CreateChannelRequestSchema,
@@ -38,6 +39,7 @@ import {
   type AuthSession,
   type ChannelResponse,
   type ContentIdea,
+  type ContentReviewResponse,
   type CreateChannelRequest,
   type IdeaStatus,
   type PlatformAccountResponse,
@@ -95,6 +97,8 @@ const fetchIdeas = (channelId: string, status: IdeaStatus | "ALL"): Promise<Cont
   const query = status === "ALL" ? "" : `?status=${status}`;
   return request(`/ideas/channels/${channelId}${query}`, { method: "GET" }, ContentIdeaListResponseSchema).then((data) => data.ideas);
 };
+const fetchReview = (contentItemId: string): Promise<ContentReviewResponse> =>
+  request(`/content/${contentItemId}/review`, { method: "GET" }, ContentReviewResponseSchema);
 
 const requestAbsolute = async <Result,>(
   url: string,
@@ -446,10 +450,33 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
           <EditPanel channel={editing} onClose={() => setEditing(null)} onError={setError} />
         </div>
         <IdeasPanel channels={channels.data ?? []} onError={setError} />
+        <ReviewPanel onError={setError} />
       </section>
       {wizardOpen ? <ChannelWizard onClose={() => setWizardOpen(false)} onError={setError} /> : null}
     </main>
   );
+};
+
+const ReviewPanel = ({ onError }: { onError: (error: string) => void }): ReactElement => {
+  const queryClient = useQueryClient();
+  const [contentItemId, setContentItemId] = useState("");
+  const review = useQuery({ queryKey: ["content-review", contentItemId], queryFn: () => fetchReview(contentItemId), enabled: contentItemId.length > 0, retry: false });
+  const policyCheck = useMutation({
+    mutationFn: (platform: Platform) => request(`/content/${contentItemId}/review/policy-check`, { method: "POST", body: JSON.stringify({ platform }) }, ContentReviewResponseSchema),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["content-review", contentItemId] }); },
+    onError: (error) => onError(error instanceof Error ? error.message : "Policy check failed.")
+  });
+  const action = useMutation({
+    mutationFn: (nextAction: "approve" | "hold" | "discard" | "schedule") => request(`/content/${contentItemId}/review/action`, { method: "POST", body: JSON.stringify({ action: nextAction }) }, ContentReviewResponseSchema),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["content-review", contentItemId] }); },
+    onError: (error) => onError(error instanceof Error ? error.message : "Review action failed.")
+  });
+  const data = review.data;
+  return <section className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="review-panel">
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-lg font-semibold">Content review</h2><p className="mt-1 text-sm text-muted-foreground">Check sources, rights, policy findings, then approve or hold.</p></div><div className="flex gap-2"><input aria-label="Content item ID" className="h-10 rounded-md border border-border px-3 text-sm" onChange={(event) => setContentItemId(event.target.value.trim())} placeholder="Content item ID" value={contentItemId} /><Button disabled={!contentItemId || policyCheck.isPending} onClick={() => policyCheck.mutate("YOUTUBE")}>Run policy check</Button></div></div>
+    {review.isLoading ? <p className="mt-4 text-sm text-muted-foreground">Loading review.</p> : null}
+    {data ? <div className="mt-4 grid gap-4 lg:grid-cols-2"><article className="rounded-md border border-border p-4"><div className="flex items-center justify-between"><h3 className="font-medium">{data.title}</h3><span className="rounded bg-muted px-2 py-1 text-xs">{data.status}</span></div><p className="mt-3 text-sm">{data.description}</p><p className="mt-2 text-sm text-muted-foreground">Duration: {data.durationSeconds ?? "unknown"} seconds</p><h4 className="mt-4 text-sm font-semibold">Sources</h4><ul className="mt-2 space-y-1 text-sm">{data.sources.map((source) => <li key={source.url}><a className="text-primary" href={source.url} rel="noreferrer" target="_blank">{source.sourceName}: {source.title}</a></li>)}</ul><h4 className="mt-4 text-sm font-semibold">Asset rights</h4><ul className="mt-2 space-y-1 text-sm">{data.assets.map((asset) => <li key={`${asset.id}-${asset.purpose}`}>{asset.purpose}: {asset.licenseStatus}</li>)}</ul></article><article className="rounded-md border border-border p-4"><h3 className="font-medium">Policy</h3><p className="mt-2 text-sm">{data.policy ? data.policy.status : "Not checked"}</p><ul className="mt-3 space-y-2 text-sm">{data.policy?.findings.map((finding) => <li key={finding.code} className="rounded bg-muted p-2">{finding.severity}: {finding.message}</li>)}</ul><div className="mt-5 flex flex-wrap gap-2"><Button disabled={action.isPending} onClick={() => action.mutate("approve")}>Approve</Button><Button className="bg-foreground" disabled={action.isPending} onClick={() => action.mutate("hold")}>Hold</Button><Button className="bg-foreground" disabled={action.isPending} onClick={() => action.mutate("discard")}>Discard</Button><Button disabled={action.isPending} onClick={() => action.mutate("schedule")}>Schedule</Button></div></article></div> : null}
+  </section>;
 };
 
 const ideaStatuses: Array<IdeaStatus | "ALL"> = ["ALL", "CANDIDATE", "SHORTLISTED", "REJECTED", "USED", "EXPIRED"];

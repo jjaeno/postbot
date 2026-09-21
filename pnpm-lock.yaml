@@ -65,6 +65,9 @@ importers:
       '@postbot/logger':
         specifier: workspace:*
         version: link:../../packages/logger
+      '@postbot/policy-engine':
+        specifier: workspace:*
+        version: link:../../packages/policy-engine
       '@postbot/providers':
         specifier: workspace:*
         version: link:../../packages/providers
