@@ -25,6 +25,7 @@ const EnvSchema = z.object({
   YOUTUBE_OAUTH_PROVIDER: z.enum(["fake", "google"]).default("fake"),
   YOUTUBE_CLIENT_ID: z.string().default(""),
   YOUTUBE_CLIENT_SECRET: z.string().default(""),
+  YOUTUBE_UPLOAD_PRIVACY: z.enum(["public", "unlisted", "private"]).default("private"),
   WEB_BASE_URL: z.string().url().default("http://localhost:5173"),
   LLM_PROVIDER: z.enum(["fake", "openai"]).default("fake"),
   LLM_MODEL: z.string().min(1).default("gpt-5-mini"),

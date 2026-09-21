@@ -12,6 +12,7 @@ import { GenerationModule } from "./generation/generation.module.js";
 import { PlatformAccountsModule } from "./platform-accounts/platform-accounts.module.js";
 import { ReviewModule } from "./review/review.module.js";
 import { ContentModule } from "./content/content.module.js";
+import { PublishingModule } from "./publishing/publishing.module.js";
 
 @Module({
   imports: [
@@ -29,7 +30,8 @@ import { ContentModule } from "./content/content.module.js";
     JobsModule,
     PlatformAccountsModule,
     ReviewModule,
-    ContentModule
+    ContentModule,
+    PublishingModule
   ],
   controllers: [AppController],
   providers: [

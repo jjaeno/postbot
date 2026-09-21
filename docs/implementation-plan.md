@@ -561,7 +561,7 @@ storage contract, fallback, checksum 동시 중복, 라이선스 차단, TTS tim
 
 # 13단계. 예약·YouTube Shorts 업로드
 
-**상태:** 미완료
+**상태:** 완료 (실제 YouTube 자격 증명 검증 대기)
 
 ### 구현 순서
 

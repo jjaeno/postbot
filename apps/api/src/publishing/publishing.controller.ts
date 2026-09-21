@@ -1,0 +1,3 @@
+import { Body, Controller, Inject, Post, Req, UseGuards } from "@nestjs/common";
+import { AccessTokenGuard } from "../auth/access-token.guard.js"; import type { AuthenticatedRequest } from "../auth/request-types.js"; import { PublishingService } from "./publishing.service.js";
+@Controller("publishing") @UseGuards(AccessTokenGuard) export class PublishingController { constructor(@Inject(PublishingService) private readonly publishing: PublishingService) {} @Post("plans") schedule(@Req() req: AuthenticatedRequest, @Body() body: unknown) { return this.publishing.schedule(req.auth.workspaceId, body); } }

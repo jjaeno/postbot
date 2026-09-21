@@ -251,6 +251,9 @@ importers:
       '@postbot/providers':
         specifier: workspace:*
         version: link:../../packages/providers
+      '@postbot/publishers':
+        specifier: workspace:*
+        version: link:../../packages/publishers
       '@postbot/renderer':
         specifier: workspace:*
         version: link:../renderer

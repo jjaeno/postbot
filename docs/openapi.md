@@ -35,6 +35,7 @@ Current stage 5 endpoints:
 | POST | `/content/:contentItemId/review/policy-check` | Access cookie + CSRF | Evaluate the effective versioned policy rule and preserve an immutable snapshot |
 | POST | `/content/:contentItemId/review/action` | Access cookie + CSRF | Approve, hold, discard, or mark content scheduled; approval requires a passing policy check |
 | GET | `/content` | Access cookie | List up to 100 workspace-scoped content items for operational status and calendar workflows |
+| POST | `/publishing/plans` | Access cookie + CSRF | Create or return an idempotent YouTube publish plan after policy, account, and render gates pass |
 
 Authenticated mutating requests must include:
 

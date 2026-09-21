@@ -21,6 +21,7 @@
     "@postbot/contracts": "workspace:*",
     "@postbot/logger": "workspace:*",
     "@postbot/providers": "workspace:*",
+    "@postbot/publishers": "workspace:*",
     "@postbot/renderer": "workspace:*",
     "@postbot/scene-schema": "workspace:*",
     "dotenv": "^17.2.3",

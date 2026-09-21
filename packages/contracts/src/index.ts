@@ -555,6 +555,11 @@ export const ContentItemSummarySchema = z.object({
 export const ContentItemListResponseSchema = z.object({ items: z.array(ContentItemSummarySchema) });
 export type ContentItemSummary = z.infer<typeof ContentItemSummarySchema>;
 export type ContentItemListResponse = z.infer<typeof ContentItemListResponseSchema>;
+
+export const CreatePublishPlanRequestSchema = z.object({ contentItemId: z.string().min(1), platformAccountId: z.string().min(1), scheduledAt: z.string().datetime(), idempotencyKey: z.string().min(8).max(191) });
+export const PublishPlanResponseSchema = z.object({ id: z.string(), contentItemId: z.string(), platformAccountId: z.string(), platform: PlatformSchema, status: z.enum(["DRAFT", "SCHEDULED", "PUBLISHING", "PUBLISHED", "FAILED", "HELD", "CANCELLED"]), scheduledAt: z.string().datetime(), idempotencyKey: z.string(), title: z.string(), duplicate: z.boolean().optional() });
+export type CreatePublishPlanRequest = z.infer<typeof CreatePublishPlanRequestSchema>;
+export type PublishPlanResponse = z.infer<typeof PublishPlanResponseSchema>;
 export type FactSourceLink = z.infer<typeof FactSourceLinkSchema>;
 export type GeneratedMetadata = z.infer<typeof GeneratedMetadataSchema>;
 export type GeneratedScript = z.infer<typeof GeneratedScriptSchema>;

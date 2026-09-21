@@ -4,6 +4,7 @@ import { AssetPreparationJobPayloadSchema, RenderJobPayloadSchema, ScriptGenerat
 import { ScriptGenerationProcessor } from "./script-generation-processor.js";
 import { AssetPreparationProcessor } from "./asset-preparation-processor.js";
 import { RenderProcessor } from "./render-processor.js";
+import { PublishProcessor } from "./publish-processor.js";
 
 type ProductionJobStatus =
   | "QUEUED"
@@ -57,11 +58,13 @@ export class DeterministicJobProcessor {
   private readonly scriptGeneration: ScriptGenerationProcessor;
   private readonly assetPreparation: AssetPreparationProcessor;
   private readonly render: RenderProcessor;
+  private readonly publish: PublishProcessor;
 
   constructor(private readonly prisma: PrismaClient) {
     this.scriptGeneration = new ScriptGenerationProcessor(prisma);
     this.assetPreparation = new AssetPreparationProcessor(prisma);
     this.render = new RenderProcessor(prisma);
+    this.publish = new PublishProcessor(prisma);
   }
 
   async process(input: EnqueueJobInput): Promise<void> {
@@ -139,6 +142,9 @@ export class DeterministicJobProcessor {
         await this.fail(input.id, attemptNumber, "RENDER_FAILED", message);
         throw error;
       }
+    }
+    if (input.type === "PUBLISH") {
+      try { await this.succeed(input.id, attemptNumber, await this.publish.process(input.payload)); return; } catch (error) { const message = error instanceof Error ? error.message : "PUBLISH_FAILED"; await this.fail(input.id, attemptNumber, "PUBLISH_FAILED", message); throw error; }
     }
 
     await this.succeed(input.id, attemptNumber, {
