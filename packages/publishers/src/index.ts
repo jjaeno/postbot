@@ -42,10 +42,13 @@ export type PublisherProvider = {
 
 export const youtubeReadonlyScope = "https://www.googleapis.com/auth/youtube.readonly";
 export const youtubeUploadScope = "https://www.googleapis.com/auth/youtube.upload";
+export const instagramPublishScope = "instagram_content_publish";
+export const tiktokPublishScope = "video.publish";
 
 export type VideoUploadInput = { title: string; description: string; privacyStatus: "public" | "unlisted" | "private"; publishAt: string | null; video: Uint8Array; idempotencyKey: string };
 export type PublishedVideo = { externalVideoId: string; url: string; publishedAt: string | null; status: "uploaded" | "scheduled" | "published" };
 export interface VideoPublisher { upload(input: VideoUploadInput, accessToken: string): Promise<PublishedVideo>; }
+export interface SocialVideoPublisher extends PublisherProvider, VideoPublisher { validate(input: VideoUploadInput): Promise<void>; getPublicationStatus(externalVideoId: string, accessToken: string): Promise<PublishedVideo>; }
 export const decryptOAuthToken = (cipherText: string, cipher: string, encryptionKey: string): string => {
   if (cipher !== "aes-256-gcm") throw new Error("Unsupported OAuth token cipher.");
   const [iv, tag, encrypted] = cipherText.split(".");
@@ -237,3 +240,16 @@ export class GoogleYouTubePublisherProvider implements PublisherProvider, VideoP
     return { externalVideoId: body.id, url: `https://www.youtube.com/watch?v=${body.id}`, publishedAt: body.status?.publishAt ?? input.publishAt, status: body.status?.privacyStatus === "private" && (body.status.publishAt ?? input.publishAt) ? "scheduled" : "uploaded" };
   }
 }
+
+class FakeSocialPublisher implements SocialVideoPublisher {
+  constructor(readonly capabilities: OAuthProviderCapabilities, private readonly baseUrl: string) {}
+  createAuthorizationUrl(input: OAuthStartInput): string { const url = new URL(input.redirectUri); url.searchParams.set("state", input.state); url.searchParams.set("code", `fake-${this.capabilities.platform}-code`); return url.toString(); }
+  exchangeCode(): Promise<OAuthTokenSet> { return Promise.resolve({ accessToken: `fake-${this.capabilities.platform}-access-token`, refreshToken: `fake-${this.capabilities.platform}-refresh-token`, expiresAt: new Date(Date.now() + 3_600_000), scopes: this.capabilities.requiredScopes }); }
+  getAccountProfile(): Promise<PublisherAccountProfile> { return Promise.resolve({ externalAccountId: `fake-${this.capabilities.platform}-account`, handle: `@postbot-${this.capabilities.platform}`, displayName: `Postbot Fake ${this.capabilities.platform}` }); }
+  refreshAccessToken(refreshToken: string): Promise<OAuthTokenSet> { return Promise.resolve({ accessToken: `fake-${this.capabilities.platform}-refreshed-token`, refreshToken, expiresAt: new Date(Date.now() + 3_600_000), scopes: this.capabilities.requiredScopes }); }
+  async validate(input: VideoUploadInput): Promise<void> { if (!input.title || input.video.byteLength === 0) throw new Error("Invalid social video upload."); }
+  async upload(input: VideoUploadInput): Promise<PublishedVideo> { await this.validate(input); const id = `fake-${this.capabilities.platform}-${input.idempotencyKey.slice(0, 24)}`; return { externalVideoId: id, url: `${this.baseUrl}/${id}`, publishedAt: input.publishAt, status: input.publishAt ? "scheduled" : "published" }; }
+  async getPublicationStatus(externalVideoId: string): Promise<PublishedVideo> { return { externalVideoId, url: `${this.baseUrl}/${externalVideoId}`, publishedAt: null, status: "published" }; }
+}
+export class FakeInstagramPublisherProvider extends FakeSocialPublisher { constructor() { super({ provider: "fake", platform: "instagram", requiredScopes: [instagramPublishScope] }, "https://www.instagram.com/reel"); } }
+export class FakeTikTokPublisherProvider extends FakeSocialPublisher { constructor() { super({ provider: "fake", platform: "tiktok", requiredScopes: [tiktokPublishScope] }, "https://www.tiktok.com/@postbot/video"); } }

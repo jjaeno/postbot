@@ -2,6 +2,7 @@ import { Injectable } from "@nestjs/common";
 import { loadConfig } from "@postbot/config";
 import {
   FakeYouTubePublisherProvider,
+  FakeInstagramPublisherProvider, FakeTikTokPublisherProvider,
   GoogleYouTubePublisherProvider,
   type PublisherProvider
 } from "@postbot/publishers";
@@ -19,4 +20,6 @@ export class PublisherProviderFactory {
     }
     return new FakeYouTubePublisherProvider();
   }
+  instagram(): PublisherProvider { return new FakeInstagramPublisherProvider(); }
+  tiktok(): PublisherProvider { return new FakeTikTokPublisherProvider(); }
 }

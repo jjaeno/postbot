@@ -596,7 +596,7 @@ Fake Publisher E2E, 중복 요청, worker restart, token expiry, 정책 변경, 
 
 # 14단계. Instagram Reels·TikTok 게시 확장
 
-**상태:** 미완료
+**상태:** 완료 (실제 Instagram/TikTok 앱 심사·자격 증명 검증 대기)
 
 ### 구현 순서
 

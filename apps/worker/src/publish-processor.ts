@@ -1,7 +1,7 @@
 import type { PrismaClient } from "@postbot/database";
 import { loadConfig } from "@postbot/config";
 import { FakeStorageProvider, S3StorageProvider, type StorageProvider } from "@postbot/providers";
-import { decryptOAuthToken, FakeYouTubePublisherProvider, GoogleYouTubePublisherProvider, type VideoPublisher } from "@postbot/publishers";
+import { decryptOAuthToken, FakeInstagramPublisherProvider, FakeTikTokPublisherProvider, FakeYouTubePublisherProvider, GoogleYouTubePublisherProvider, type VideoPublisher } from "@postbot/publishers";
 export class PublishProcessor {
   private readonly storage: StorageProvider;
   constructor(private readonly prisma: PrismaClient, storage?: StorageProvider) {
@@ -18,11 +18,11 @@ export class PublishProcessor {
     const attempt = await this.prisma.publishAttempt.create({ data: { publishPlanId: plan.id, attemptNumber, status: "RUNNING", idempotencyKey: `${plan.idempotencyKey}:attempt:${attemptNumber}`, startedAt: new Date() } });
     await this.prisma.publishPlan.update({ where: { id: plan.id }, data: { status: "PUBLISHING" } });
     try {
-      const config = loadConfig(); const publisher: VideoPublisher = config.YOUTUBE_OAUTH_PROVIDER === "google" ? new GoogleYouTubePublisherProvider(config.YOUTUBE_CLIENT_ID, config.YOUTUBE_CLIENT_SECRET) : new FakeYouTubePublisherProvider();
+      const config = loadConfig(); const publisher: VideoPublisher = plan.platform === "INSTAGRAM" ? new FakeInstagramPublisherProvider() : plan.platform === "TIKTOK" ? new FakeTikTokPublisherProvider() : config.YOUTUBE_OAUTH_PROVIDER === "google" ? new GoogleYouTubePublisherProvider(config.YOUTUBE_CLIENT_ID, config.YOUTUBE_CLIENT_SECRET) : new FakeYouTubePublisherProvider();
       const accessToken = plan.platformAccount.credential ? decryptOAuthToken(plan.platformAccount.credential.encryptedAccessToken, plan.platformAccount.credential.tokenCipher, config.OAUTH_ENCRYPTION_KEY) : "fake-access-token";
       const manifest = plan.sceneVersion.renderManifest as { videoKey?: unknown }; if (typeof manifest.videoKey !== "string") throw new Error("RENDER_FILE_NOT_FOUND");
       const video = await this.storage.download(manifest.videoKey); const upload = { title: plan.title, description: plan.description ?? "", privacyStatus: config.YOUTUBE_UPLOAD_PRIVACY, publishAt: plan.scheduledAt.toISOString(), video, idempotencyKey: plan.idempotencyKey };
-      const uploaded = publisher instanceof FakeYouTubePublisherProvider ? await publisher.upload(upload) : await publisher.upload(upload, accessToken);
+      const uploaded = publisher instanceof FakeYouTubePublisherProvider || publisher instanceof FakeInstagramPublisherProvider || publisher instanceof FakeTikTokPublisherProvider ? await publisher.upload(upload) : await publisher.upload(upload, accessToken);
       await this.prisma.$transaction([this.prisma.platformPost.create({ data: { publishPlanId: plan.id, platformAccountId: plan.platformAccountId, platform: plan.platform, externalPostId: uploaded.externalVideoId, postUrl: uploaded.url, publishedAt: new Date(), policyVersion: 1 } }), this.prisma.publishAttempt.update({ where: { id: attempt.id }, data: { status: "SUCCEEDED", finishedAt: new Date(), responseSnapshot: uploaded } }), this.prisma.publishPlan.update({ where: { id: plan.id }, data: { status: "PUBLISHED" } }), this.prisma.contentItem.update({ where: { id: plan.contentItemId }, data: { status: "PUBLISHED" } })]);
       return { externalVideoId: uploaded.externalVideoId, url: uploaded.url };
     } catch (error) {
