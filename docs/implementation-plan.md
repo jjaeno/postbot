@@ -624,13 +624,91 @@ TikTok OAuth, validate/publish/status, 출력 프로필, 정책, 메타데이터
 
 **상태:** 미완료
 
-### 범위
+### 목표
 
-수집→생성→자산→렌더→정책→예약→게시 자동 연결, 콘텐츠 재고, 재생성 제한, 예산, pause/resume, kill switch, drain, 반복·폭주·연속 실패 방지.
+채널별 자동화 설정에 따라 수집부터 게시까지 전체 파이프라인을 지속적으로 실행하되, 중복 실행·무한 재시도·예산 초과·정책 우회를 방지하고 장애 후 안전하게 복구할 수 있게 한다.
+
+### 구현 순서
+
+#### 15A. 자동화 실행 계획과 상태 모델
+
+* 채널별 자동화 실행 단위와 단계별 상태를 영속화한다.
+* 수집 → 아이디어 선정 → 대본 → 자산 → TTS → 렌더 → 정책 → 예약 → 게시 작업을 기존 BullMQ queue와 공개 interface로 연결한다.
+* scheduler 기반 주기 실행과 운영자 수동 실행을 제공한다.
+* 동일 채널·실행 구간의 중복 실행을 분산 락과 DB UNIQUE/idempotency 제약으로 방지한다.
+* 완료된 단계 결과는 재사용하고 실패·중단된 단계부터 재개한다.
+* worker 재시작과 Redis 재연결 후에도 MySQL의 업무 상태를 기준으로 복구한다.
+* 실행 이력, 단계별 시도, 실패 원인, 마지막 heartbeat와 다음 실행 시각을 조회할 수 있게 한다.
+
+#### 15B. 콘텐츠 재고와 자동 예약
+
+* 채널별 최소 재고와 목표 게시량을 기준으로 부족 수량만 계산한다.
+* 생성 중, 검수 대기, 승인, 예약 상태를 구분해 재고를 중복 계산하지 않는다.
+* 빈 게시 슬롯과 플랫폼별 출력 프로필을 반영해 예약한다.
+* 동일 소재·유사 콘텐츠의 반복 생성을 차단하고 재생성 횟수 상한을 적용한다.
+* 강제 검수 주제, 권리 불명, 정책 BLOCK/REVIEW 결과는 완전 자동형에서도 게시하지 않는다.
+* 게시 슬롯 또는 유효한 플랫폼 계정이 없으면 불필요한 생성 비용을 쓰지 않고 보류한다.
+* 승인형과 완전 자동형의 상태 전이 및 자동 예약 조건을 분리한다.
+
+#### 15C. 예산과 비용 실행 제어
+
+* workspace·채널별 일간/월간 예산과 soft/hard limit을 적용한다.
+* 비용 발생 작업 시작 전에 예상 비용을 원자적으로 예약하고, 완료 후 실제 비용을 확정·정산한다.
+* 실패·취소된 작업의 미사용 예약 비용을 해제한다.
+* 동시 worker가 동일 예산을 초과 사용하지 않도록 transaction 또는 원자적 갱신을 사용한다.
+* hard limit에서는 신규 생성 작업을 차단하되 이미 예약된 게시의 처리 정책은 별도로 적용한다.
+* 비용을 확인할 수 없거나 원장이 불일치하면 fail-open하지 않고 보류한다.
+
+#### 15D. 실패·폭주 방지와 복구
+
+* 단계별 retry/backoff/timeout과 콘텐츠별 최대 재생성 횟수를 적용한다.
+* 동일 원인의 연속 실패와 poison job을 감지해 격리한다.
+* 채널·Provider별 연속 실패 임계치를 넘으면 자동 pause하고 원인을 기록한다.
+* circuit breaker로 장애 Provider를 일시 차단하되 영향받지 않는 채널과 Provider는 계속 운영한다.
+* 중복 queue delivery와 scheduler 재실행에도 결과·비용·예약·게시가 중복되지 않게 한다.
+* 게시 결과가 불명확한 timeout은 외부 상태 확인 전 재업로드하지 않는다.
+* 자동화의 생성→실패→재생성 무한 순환을 방지한다.
+
+#### 15E. 운영 제어와 UX
+
+* 채널 pause/resume, workspace 전체 kill switch, Provider별 kill switch를 제공한다.
+* 신규 작업만 막는 graceful pause와 대기 작업까지 중단하는 즉시 중지를 구분한다.
+* queue drain 시 진행 중 작업의 완료·취소 정책을 명시한다.
+* 실패 단계 재시도, 보류, 스킵, 취소, 재개 API와 권한 검사를 구현한다.
+* 운영 화면에서 자동화 상태, 다음 실행, 재고, 예산, 연속 실패와 중단 원인을 확인한다.
+* pause/resume/kill switch와 수동 복구 조작을 감사 가능한 이력으로 남긴다.
+
+### 불변 조건
+
+* 하나의 논리적 작업은 재시도되어도 결과와 비용이 한 번만 반영된다.
+* 정책·사실·권리 gate는 완전 자동형에서도 우회하지 않는다.
+* pause 상태에서는 신규 자동화 작업을 생성하지 않는다.
+* hard limit을 넘는 신규 비용 작업을 시작하지 않는다.
+* 완료된 단계는 재개 시 다시 실행하지 않는다.
+* 외부 게시 여부가 불명확하면 확인 전 중복 업로드하지 않는다.
+
+### 제외
+
+성과 분석, 자동 전략 최적화, 외부 알림 채널, 전면적인 관측성·보안 강화는 각각 16~18단계에서 구현한다.
 
 ### 필수 검증
 
-가상 시간 시뮬레이션, 재고 부족, API 장애, 예산 초과, 정책 실패, 계정 만료, 중단·재개.
+* 가상 시간 기반 하루·일주일 자동 운영 시뮬레이션
+* 재고 부족 수량만 생성하고 예약된 콘텐츠를 중복 계산하지 않음
+* scheduler 중복 실행, queue 중복 전달, worker 재시작
+* 단계 실패 후 완료 지점 보존과 실패 지점 재개
+* LLM/Image/TTS/Storage/Renderer/Publisher 장애와 부분 격리
+* 일간·월간 soft/hard limit 및 동시 비용 경쟁 조건
+* 정책 실패, 강제 검수 주제, 권리 불명 콘텐츠의 자동 게시 차단
+* OAuth 만료, 계정 연결 해제, 게시 ambiguous timeout
+* 재생성 상한, 연속 실패 자동 pause, circuit breaker
+* graceful pause, 즉시 중지, resume, drain
+* workspace·채널 권한과 운영 UI E2E
+* Fake Provider 전체 자동 운영 E2E
+
+### 문서
+
+자동화 상태 전이, 재고 계산, 비용 예약·확정·해제, pause/kill switch/drain 차이와 장애 복구 절차를 문서화한다.
 
 ### Commit
 
@@ -642,20 +720,68 @@ TikTok OAuth, validate/publish/status, 출력 프로필, 정책, 메타데이터
 
 **상태:** 미완료
 
-### 범위
+### 목표
 
-* AnalyticsProvider
-* 플랫폼 metric mapping
-* raw + normalized metric
-* unavailable
-* 기준 기간/timezone/sync 시각/data delay
-* 주기적/수동 sync
-* 분석 대시보드
-* 일간/주간 요약
+플랫폼별로 의미와 제공 시점이 다른 성과 지표를 원본 그대로 보존하면서 공통 지표로 안전하게 정규화하고, 사용자가 기간·플랫폼·채널별 성과와 비용 효율을 확인할 수 있게 한다.
+
+### 구현 순서
+
+#### 16A. Analytics Provider와 지표 계약
+
+* AnalyticsProvider 공통 계약과 YouTube·Instagram·TikTok·Fake 구현을 제공한다.
+* 플랫폼별 metric 이름, 단위, 집계 방식과 지원 여부를 versioned mapping으로 관리한다.
+* 조회수, 노출, 평균 시청 시간, 완주율, 이탈, 반응, 전환 중 실제 API가 제공하는 값만 수집한다.
+* 제공되지 않는 값은 0으로 저장하지 않고 unavailable 상태와 사유를 기록한다.
+* 플랫폼 원본 응답과 normalized metric을 분리해 저장한다.
+* 외부 SDK 타입과 raw 응답을 도메인 계약으로 직접 노출하지 않는다.
+
+#### 16B. 동기화와 데이터 정합성
+
+* ANALYTICS BullMQ processor와 주기적·수동 sync를 구현한다.
+* channel/platform/post/metric/period를 포함한 idempotency key로 중복 저장을 방지한다.
+* 플랫폼 수치의 지연 도착과 사후 수정이 가능하도록 관측 시각과 값의 revision 또는 snapshot을 보존한다.
+* 기준 기간, channel timezone, source timezone, syncedAt와 예상 data delay를 기록한다.
+* API pagination, rate limit, token refresh, 부분 실패와 backfill을 처리한다.
+* 삭제·비공개·연결 해제된 게시물의 마지막 성공 값과 unavailable 상태를 구분한다.
+* 동일 sync 재실행 시 중복 행 없이 최신 원본 상태를 반영한다.
+
+#### 16C. 분석 API와 대시보드
+
+* 채널·플랫폼·콘텐츠·기간 필터와 비교 기간을 제공한다.
+* 플랫폼별 지표와 공통 정의가 검증된 지표만 합산한다.
+* 조회, 평균 시청 시간, 완주율, 참여율, 게시 빈도와 콘텐츠당 비용을 표시한다.
+* 데이터 지연, 미지원 지표, 마지막 동기화 시각과 부분 실패를 UI에 표시한다.
+* 일간·주간 요약과 CSV 내보내기 또는 동등한 재사용 가능한 조회 결과를 제공한다.
+* 원본 지표에서 정규화 지표까지의 출처와 계산식을 추적할 수 있게 한다.
+
+### 불변 조건
+
+* unavailable과 실제 0을 구분한다.
+* 단위·분모·집계 의미가 다른 지표를 이름이 비슷하다는 이유로 합산하지 않는다.
+* raw metric은 덮어써서 이력을 잃지 않는다.
+* 모든 기간 계산은 저장 시 UTC, 표시·경계 계산 시 명시된 timezone을 사용한다.
+* 플랫폼 API가 제공하지 않는 지표를 추정값처럼 원본 지표로 저장하지 않는다.
+
+### 제외
+
+성과 기반 전략 변경과 실험 자동화는 17단계에서 구현한다.
 
 ### 필수 검증
 
-누락 지표, 중복 sync, 수정된 플랫폼 수치, timezone, 의미가 다른 지표의 잘못된 합산 방지.
+* Provider contract와 Fake Analytics 전체 E2E
+* 누락 지표, 실제 0, unavailable 구분
+* 중복·동시 sync와 pagination
+* 플랫폼에서 수정된 과거 수치와 backfill
+* timezone, DST 경계, 일간·주간 기간 계산
+* rate limit, token 만료, 부분 실패, 재시도
+* 의미가 다른 지표의 합산 차단
+* 채널·workspace 데이터 격리와 권한
+* 대시보드 loading/empty/error/partial 상태
+* 일간·주간 요약 계산과 비용 연결
+
+### 문서
+
+플랫폼별 metric mapping, 계산식, data delay, sync 주기와 backfill 운영법을 문서화한다.
 
 ### Commit
 
@@ -667,21 +793,73 @@ TikTok OAuth, validate/publish/status, 출력 프로필, 정책, 메타데이터
 
 **상태:** 미완료
 
-### 범위
+### 목표
 
-* 상위/하위 성과군
-* 패턴 후보
-* 표본 부족 가설 표시
-* OptimizationSuggestion
-* StrategyVersion
-* rollback
-* Experiment
-* 승인형/자동형 변경 제한
-* 보호 항목
+성과 데이터에서 반복 가능한 개선 후보를 추출하되 상관관계를 인과관계로 단정하지 않고, 표본·신뢰도·보호 항목과 승인 절차가 포함된 안전한 전략 개선 흐름을 구현한다.
+
+### 구현 순서
+
+#### 17A. 비교군과 패턴 후보 생성
+
+* 채널·플랫폼·콘텐츠 형식·비교 기간별 상위/하위 성과군을 구성한다.
+* 영상 길이, hook 유형, 주제, 게시 시각, 장면 수, 자막 밀도 등 허용된 feature만 분석한다.
+* 최소 표본 수, 데이터 완전성, 이상치 처리와 baseline을 명시한다.
+* 플랫폼과 의미가 다른 metric을 섞지 않는다.
+* 표본이 부족하거나 편향 가능성이 크면 확정 패턴이 아니라 가설로 표시한다.
+* 분석 입력 snapshot, metric version, 기간과 생성 모델·규칙 버전을 보존한다.
+
+#### 17B. OptimizationSuggestion과 승인
+
+* 근거, 대상 전략 필드, 예상 효과, 표본 수, 신뢰도, 위험과 rollback 방법을 포함한 제안을 생성한다.
+* 제안의 pending/approved/rejected/applied/expired 상태 전이를 구현한다.
+* 사용자가 보호한 주제·브랜드 문구·금지 조건·정책 설정은 변경 후보에서 제외한다.
+* 승인형은 명시적 승인 전 StrategyVersion을 변경하지 않는다.
+* 자동형도 사전에 허용된 필드와 변화 폭 안에서만 적용한다.
+* 적용 시 immutable StrategyVersion을 생성하고 이전 버전을 보존한다.
+
+#### 17C. Experiment와 rollback
+
+* control/variant, 가설, 대상 metric, 시작·종료 조건과 최소 표본을 가진 Experiment를 구현한다.
+* 동일 채널에서 충돌하는 실험의 동시 실행을 차단한다.
+* 콘텐츠 배정은 재현 가능하고 게시 후 임의 변경되지 않게 한다.
+* 중단 조건과 안전 지표 악화 시 자동 중단을 지원한다.
+* 결과에 inconclusive 상태를 포함하고 승자를 강제로 선택하지 않는다.
+* 적용된 전략을 이전 StrategyVersion으로 rollback하고 이후 자동화가 복구된 버전을 사용하게 한다.
+
+#### 17D. 최적화 UX
+
+* 제안 목록, 근거 비교, 승인·거절, 적용 이력과 rollback UI를 제공한다.
+* 실험 진행률, 표본, 데이터 지연, 결과와 중단 사유를 표시한다.
+* 자동 적용 범위와 보호 항목을 채널 설정에서 확인·수정할 수 있게 한다.
+* 전략 변경과 승인·거절·rollback을 감사 가능한 이력으로 남긴다.
+
+### 불변 조건
+
+* 상관관계를 인과관계로 표현하지 않는다.
+* 표본 부족 결과는 확정 패턴으로 자동 적용하지 않는다.
+* 플랫폼 간 metric 의미가 다르면 동일 비교군으로 합치지 않는다.
+* 보호 항목과 정책·권리 gate는 최적화가 변경하거나 우회하지 않는다.
+* 모든 전략 변경은 이전 버전으로 rollback할 수 있다.
+
+### 제외
+
+새로운 ML 학습 인프라, 다변량 고급 실험과 실시간 개인화는 v1 범위에서 제외한다.
 
 ### 필수 검증
 
-표본 부족, 이상치, 플랫폼 분리, 승인/거절, 자동 범위 제한, rollback, 실험 중단, E2E.
+* 표본 부족, 결측 데이터, 데이터 지연과 이상치
+* 플랫폼·채널·기간별 비교군 격리
+* 동일 입력의 deterministic suggestion
+* 승인·거절·만료·적용 상태 전이와 권한
+* 자동형 허용 필드·변화 폭 제한과 보호 항목
+* StrategyVersion 생성·적용·rollback
+* 실험 배정 재현성, 충돌 차단, 조기 중단, inconclusive
+* 최적화 후에도 정책·예산·자동화 안전장치 유지
+* Fake Analytics 기반 API·Playwright E2E
+
+### 문서
+
+feature 목록, 비교·신뢰도 규칙, 자동 적용 허용 범위, 실험 판정과 rollback 절차를 문서화한다.
 
 ### Commit
 
@@ -693,27 +871,76 @@ TikTok OAuth, validate/publish/status, 출력 프로필, 정책, 메타데이터
 
 **상태:** 미완료
 
+### 목표
+
+15단계의 실행 시점 예산 제어를 운영 가능한 비용 관리로 확장하고, 장애 탐지·추적·알림·감사·데이터 수명주기·복구 체계를 완성한다.
+
 ### 구현 순서
 
-#### 18A. 비용·예산·알림
+#### 18A. 비용 원장·예산 관리와 알림
 
-비용 원장, budget/hard limit, 경쟁 조건 방지, 운영 알림과 중복 억제.
+* ProviderUsage와 CostLedger의 생성·예약·확정·조정 흐름을 대사한다.
+* workspace·채널·Provider·작업·기간별 비용 집계 API와 UI를 제공한다.
+* 단가 버전, 통화, 환율 적용 시점과 추정/확정 비용을 구분한다.
+* 원장 합계와 집계값 불일치를 탐지하고 재계산할 수 있게 한다.
+* 예산 soft/hard limit 변경과 적용 이력을 보존한다.
+* 검수 대기, 작업 실패, 연속 실패, 계정 만료, 정책 차단, 예산 임계치와 게시 실패 알림을 제공한다.
+* 알림 event key, cooldown과 acknowledgement로 중복·폭주를 억제한다.
+* v1 알림 채널이 확정되지 않았다면 in-app을 기본으로 하고 외부 채널은 interface 뒤에 둔다.
 
-#### 18B. 관측성
+#### 18B. 관측성과 장애 진단
 
-Pino correlation ID, Sentry, Provider/queue/storage/DB 상태와 장애 진단 정보.
+* 요청·job·workspace·channel·content를 연결하는 correlation ID를 Pino 구조화 로그에 적용한다.
+* Sentry에 API·worker·renderer 오류와 release/environment 정보를 연결한다.
+* 비밀정보, OAuth token, cookie, 원문 개인정보를 로그·breadcrumb에서 제거한다.
+* queue lag, retry/dead-letter, Provider latency/error, storage, DB, scheduler와 게시 성공률 지표를 수집한다.
+* readiness/liveness를 구분하고 의존성 상태와 기능 저하 원인을 노출한다.
+* 운영 화면에서 현재 장애 범위와 최근 실패를 민감정보 없이 조회한다.
 
-#### 18C. 보안·데이터 수명주기
+#### 18C. 보안과 데이터 수명주기
 
-감사 로그, 보존·삭제, OAuth key rotation, security scan와 security header.
+* 로그인·OAuth·게시·승인·설정·예산·kill switch·전략 변경 감사 로그를 구현한다.
+* 감사 로그는 append-only 원칙과 workspace 권한을 적용한다.
+* 사용자·콘텐츠·원본 응답·렌더 파일·로그·OAuth credential의 보존·삭제 정책을 문서화하고 실행한다.
+* 계정 삭제와 workspace 데이터 삭제를 비동기 job으로 처리하고 결과를 검증한다.
+* OAuth 암호화 키 rotation과 이전 key version의 재암호화 절차를 구현한다.
+* CSP, HSTS, CORS, cookie와 기타 security header를 production 설정으로 검증한다.
+* dependency, secret, container 및 정적 보안 scan을 CI에 연결한다.
 
-#### 18D. 운영 복구
+#### 18D. 백업·복구와 운영 runbook
 
-backup/restore 검증과 장애·복구 runbook.
+* MySQL 백업·복원, object storage 복구와 Redis queue 유실 시 MySQL 기준 재구성 절차를 정의한다.
+* 백업 파일의 암호화, 보존 기간과 접근 권한을 적용한다.
+* staging 또는 격리 환경에서 restore rehearsal을 수행하고 RPO/RTO 측정값을 기록한다.
+* Provider 장애, DB 장애, Redis 장애, 저장소 장애, credential 유출 의심, 게시 중복 의심 runbook을 작성한다.
+* 알림에서 관련 진단 정보와 runbook으로 연결한다.
+
+### 불변 조건
+
+* 비용 집계는 원장과 대사 가능해야 하며 부동소수점으로 계산하지 않는다.
+* 알림 실패가 핵심 작업의 상태를 되돌리거나 중복 실행시키지 않는다.
+* 관측 데이터와 감사 로그에 비밀정보를 기록하지 않는다.
+* Redis 복구 시 MySQL 업무 상태를 source of truth로 사용한다.
+* key rotation 중에도 기존 credential을 안전하게 읽고 점진적으로 재암호화한다.
 
 ### 필수 검증
 
-민감정보 로그 검사, 비용 합계와 경쟁 조건, hard limit, 알림 중복, 장애 runbook.
+* 비용 예약·확정·조정·환불과 원장 대사
+* 동시 비용 기록, hard limit 경쟁 조건과 집계 재계산
+* 알림 중복 억제, cooldown, acknowledgement와 알림 채널 실패
+* request→job→Provider→결과 correlation 추적
+* Sentry/Pino 민감정보 redaction 검사
+* queue/Provider/storage/DB 상태와 readiness/liveness
+* 감사 로그 권한과 변조 방지 속성
+* 사용자 데이터 삭제와 보존 예외
+* OAuth key rotation 및 이전 key 호환
+* security header와 CI 보안 scan
+* 실제 백업 생성, 격리 복원, 무결성 확인과 RPO/RTO 기록
+* 주요 장애 runbook tabletop 또는 자동화 검증
+
+### 문서
+
+비용 계산·대사, 알림 정책, 관측성 필드, 데이터 보존·삭제, key rotation, backup/restore와 장애 대응 runbook을 작성한다.
 
 ### Commit
 
@@ -725,37 +952,87 @@ backup/restore 검증과 장애·복구 runbook.
 
 **상태:** 미완료
 
-### 범위
+### 목표
 
-새 기능 추가가 아니라 전체 명세 대비 누락, 오류, 보안·운영 문제 해결과 배포 준비를 수행한다.
+새 기능을 추가하지 않고 기능 명세와 기술 결정에 대한 추적성을 완성하며, production과 동등한 환경에서 회귀·장애·보안·배포·복구 검증을 수행해 v1 출시 가능 여부를 근거와 함께 판정한다.
+
+### 구현 순서
+
+#### 19A. 명세 추적과 미완료 항목 정리
+
+* 기능 명세의 각 요구사항을 코드, API, migration, 테스트와 연결한 추적 매트릭스를 작성한다.
+* 0~18단계의 완료 표시를 코드·migration·테스트·커밋으로 재검증한다.
+* 실제 Provider 키·앱 심사·외부 권한이 필요한 검증을 Fake 완료와 구분한다.
+* 미완료, 제외, 운영 수동 절차와 알려진 위험을 심각도·영향·대응 계획과 함께 기록한다.
+* 치명적·높은 위험은 release blocker로 처리한다.
+
+#### 19B. 전체 회귀와 장애 시뮬레이션
+
+* 신규 사용자 로그인부터 채널 생성, 수집, 제작, 검수, 예약, 게시, 분석, 최적화까지 전체 Fake Provider E2E를 수행한다.
+* 승인형과 완전 자동형의 핵심 사용자 여정을 각각 검증한다.
+* 빈 DB migration, 기존 schema upgrade, seed와 rollback/forward-fix 절차를 검증한다.
+* Redis 재시작·유실, Provider timeout/rate limit, storage 실패, renderer 실패, OAuth 만료, 게시 ambiguous timeout과 예산 초과를 시뮬레이션한다.
+* 중복 요청과 worker 재시작 후 생성·비용·게시 결과가 중복되지 않는지 확인한다.
+* 데이터 격리, 권한, CSRF, rate limit과 민감정보 노출을 회귀 검증한다.
+
+#### 19C. Production build와 CI/CD
+
+* web/api/worker/renderer의 production Docker image와 실행 설정을 완성한다.
+* 환경 변수 schema, secret 주입, migration 실행 순서와 healthcheck를 검증한다.
+* CI에서 install, lint, typecheck, unit, integration, contract, build와 보안 scan을 실행한다.
+* 조건이 갖춰진 환경에서 Playwright, renderer smoke와 migration 검증을 별도 job으로 실행한다.
+* image tag와 release version을 고정하고 동일 artifact를 승격한다.
+* 배포 실패 시 자동 또는 명시적 rollback과 DB forward-fix 기준을 정의한다.
+* production 배포 대상이 미결정이면 임의로 고정하지 않고 필요한 계약과 체크리스트를 완성해 blocker로 기록한다.
+
+#### 19D. 성능·용량과 운영 인수
+
+* 핵심 API, scheduler, queue 처리, SSE, analytics sync와 게시 worker의 기준 부하를 측정한다.
+* 동시 사용자, 채널 수, 일일 콘텐츠 수와 대용량 파일 기준의 테스트 조건·결과를 기록한다.
+* DB query, index, queue concurrency, memory, 임시 디스크와 renderer 처리량 병목을 확인한다.
+* 수치 목표가 미확정이면 실제 측정 baseline과 허용 가능한 운영 범위를 기록하고 임의의 합격 수치를 만들지 않는다.
+* 대시보드, 알림, on-call 대응, backup/restore/rollback runbook을 최종 점검한다.
+* 실제 Provider smoke test는 자격 증명이 있는 항목만 실행하고 결과와 확인일을 기록한다.
+
+#### 19E. v1 완료 판정
+
+* `docs/v1-acceptance-report.md`에 검증 환경, commit SHA, 실행 명령, 결과와 증거를 기록한다.
+* PASS, PASS_WITH_EXTERNAL_VERIFICATION_PENDING, FAIL 중 하나로 판정한다.
+* Fake Provider 성공만으로 실제 SNS·LLM·Image·TTS 연동까지 검증됐다고 선언하지 않는다.
+* 치명적 또는 높은 위험, migration 실패, 보안 blocker, 복구 불가 상태가 남으면 FAIL로 판정한다.
+* 외부 앱 심사나 자격 증명만 남고 내부 구현·Fake 계약·운영 체크리스트가 모두 충족된 경우에만 외부 검증 대기 판정을 사용한다.
 
 ### 필수 검증
 
 * 명세 추적 매트릭스
 * 전체 Fake Provider E2E
-* migration 검증
+* 승인형·완전 자동형 Playwright 핵심 여정
+* 빈 DB 및 기존 DB migration 검증
 * Redis/Provider/upload/token/budget 장애 시뮬레이션
-* lint
-* typecheck
-* unit
-* integration
-* contract
-* Playwright
-* renderer smoke
-* Docker production build
-* healthcheck
-* CI/CD
-* deployment/backup/restore/rollback runbook
+* 중복 요청·worker 재시작·ambiguous publish 복구
+* 전체 lint, typecheck, unit, integration, contract, build
+* renderer smoke와 ffprobe QA
+* production Docker build와 healthcheck
+* CI/CD와 보안 scan
+* 권한·CSRF·rate limit·민감정보 회귀
+* 성능·용량 baseline
+* deployment/backup/restore/rollback rehearsal
+* 가능한 실제 Provider smoke와 미실행 사유
 * `docs/v1-acceptance-report.md`
 
-치명적 또는 높은 위험이 남아 있으면 v1 완료라고 선언하지 않는다.
+### 완료 조건
+
+* 모든 필수 검증 결과와 미실행 사유가 acceptance report에 기록되어 있다.
+* 명세 요구사항이 구현·테스트 또는 명시적 제외 항목으로 추적된다.
+* release blocker가 0개다.
+* 배포·모니터링·복구 절차를 다른 운영자가 문서만 보고 수행할 수 있다.
+* 판정과 남은 외부 검증이 과장 없이 구분되어 있다.
 
 ### Commit
 
 `release: Postbot v1 구현 및 배포 준비 완료`
 
 ---
-
 ## 요구사항 추적
 
 세부 제품 요구사항과 각 단계의 추적 관계는 기능 명세에서 관리한다.
