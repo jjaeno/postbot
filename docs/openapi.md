@@ -34,6 +34,7 @@ Current stage 5 endpoints:
 | GET | `/content/:contentItemId/review` | Access cookie | Read a workspace-scoped content preview, sources, asset rights, and latest policy result |
 | POST | `/content/:contentItemId/review/policy-check` | Access cookie + CSRF | Evaluate the effective versioned policy rule and preserve an immutable snapshot |
 | POST | `/content/:contentItemId/review/action` | Access cookie + CSRF | Approve, hold, discard, or mark content scheduled; approval requires a passing policy check |
+| GET | `/content` | Access cookie | List up to 100 workspace-scoped content items for operational status and calendar workflows |
 
 Authenticated mutating requests must include:
 

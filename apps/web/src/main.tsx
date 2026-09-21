@@ -30,6 +30,7 @@ import {
   CollectIdeasResponseSchema,
   ContentReviewResponseSchema,
   ContentIdeaListResponseSchema,
+  ContentItemListResponseSchema,
   ContentIdeaSchema,
   CreateChannelRequestSchema,
   OAuthCallbackResultSchema,
@@ -39,6 +40,7 @@ import {
   type AuthSession,
   type ChannelResponse,
   type ContentIdea,
+  type ContentItemSummary,
   type ContentReviewResponse,
   type CreateChannelRequest,
   type IdeaStatus,
@@ -99,6 +101,7 @@ const fetchIdeas = (channelId: string, status: IdeaStatus | "ALL"): Promise<Cont
 };
 const fetchReview = (contentItemId: string): Promise<ContentReviewResponse> =>
   request(`/content/${contentItemId}/review`, { method: "GET" }, ContentReviewResponseSchema);
+const fetchContent = (): Promise<ContentItemSummary[]> => request("/content", { method: "GET" }, ContentItemListResponseSchema).then((data) => data.items);
 
 const requestAbsolute = async <Result,>(
   url: string,
@@ -410,6 +413,7 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
     queryFn: fetchPlatformAccounts,
     enabled: Boolean(session)
   });
+  const content = useQuery({ queryKey: ["content"], queryFn: fetchContent, enabled: Boolean(session) });
 
   return (
     <main className="min-h-screen bg-background px-5 py-6 text-foreground md:px-8">
@@ -439,6 +443,8 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
 
         {error ? <p className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</p> : null}
 
+        <OperationsOverview channels={channels.data ?? []} content={content.data ?? []} />
+
         <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
           <ChannelList
             accounts={platformAccounts.data ?? []}
@@ -450,12 +456,33 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
           <EditPanel channel={editing} onClose={() => setEditing(null)} onError={setError} />
         </div>
         <IdeasPanel channels={channels.data ?? []} onError={setError} />
+        <ContentPanel content={content.data ?? []} isLoading={content.isLoading} onError={setError} />
+        <CalendarPanel channels={channels.data ?? []} />
         <ReviewPanel onError={setError} />
       </section>
       {wizardOpen ? <ChannelWizard onClose={() => setWizardOpen(false)} onError={setError} /> : null}
     </main>
   );
 };
+
+const OperationsOverview = ({ channels, content }: { channels: ChannelResponse[]; content: ContentItemSummary[] }): ReactElement => {
+  const active = channels.filter((channel) => channel.status === "ACTIVE").length;
+  return <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="Operations overview">
+    {[{ label: "Active channels", value: active }, { label: "Needs review", value: content.filter((item) => item.status === "REVIEW_REQUIRED").length }, { label: "Ready to schedule", value: content.filter((item) => item.status === "APPROVED").length }, { label: "Weekly slots", value: channels.flatMap((channel) => channel.scheduleRules).reduce((total, rule) => total + rule.maxPosts, 0) }].map((metric) => <article className="rounded-md border border-border bg-white p-4 shadow-sm" key={metric.label}><p className="text-sm text-muted-foreground">{metric.label}</p><p className="mt-2 text-2xl font-semibold">{metric.value}</p></article>)}
+  </section>;
+};
+
+const ContentPanel = ({ content, isLoading, onError }: { content: ContentItemSummary[]; isLoading: boolean; onError: (error: string) => void }): ReactElement => {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const retry = useQueryClient();
+  return <section className="rounded-md border border-border bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><div><h2 className="text-lg font-semibold">Content operations</h2><p className="mt-1 text-sm text-muted-foreground">Generated content, render readiness, and review state.</p></div><Button className="bg-foreground" onClick={() => { onError(""); void retry.invalidateQueries({ queryKey: ["content"] }); }}>Retry</Button></div>{isLoading ? <p className="mt-4 text-sm text-muted-foreground">Loading content.</p> : content.length === 0 ? <p className="mt-4 rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">No generated content yet. Select an idea and start generation.</p> : <div className="mt-4 grid gap-2">{content.map((item) => <button className={`flex items-center justify-between rounded-md border p-3 text-left text-sm ${selectedId === item.id ? "border-primary" : "border-border"}`} key={item.id} onClick={() => setSelectedId(item.id)} type="button"><span><span className="font-medium">{item.title}</span><span className="ml-2 text-muted-foreground">{item.status}</span></span><span className="text-xs text-muted-foreground">{item.renderReady ? "render ready" : "render pending"}</span></button>)}</div>}</section>;
+};
+
+const weekdayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+const CalendarPanel = ({ channels }: { channels: ChannelResponse[] }): ReactElement => <section className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="calendar-panel">
+  <div><h2 className="text-lg font-semibold">Publishing calendar</h2><p className="mt-1 text-sm text-muted-foreground">Configured slots only. Publishing is enabled in stage 13.</p></div>
+  {channels.length === 0 ? <p className="mt-4 rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">Create a channel to see its publishing schedule.</p> : <div className="mt-4 grid gap-3 md:grid-cols-7">{weekdayLabels.map((day, index) => <article className="min-h-32 rounded-md border border-border p-3" key={day}><h3 className="text-sm font-semibold">{day}</h3><div className="mt-3 space-y-2">{channels.flatMap((channel) => channel.scheduleRules.filter((rule) => rule.dayOfWeek === index).map((rule) => ({ channel, rule }))).map(({ channel, rule }) => <div className="rounded bg-muted p-2 text-xs" key={`${channel.id}-${rule.platform}-${rule.timeOfDayLocal}`}><p className="font-medium">{rule.timeOfDayLocal}</p><p className="mt-1">{channel.name}</p><p className="text-muted-foreground">{rule.platform} · max {rule.maxPosts}</p></div>)}</div></article>)}</div>}
+</section>;
 
 const ReviewPanel = ({ onError }: { onError: (error: string) => void }): ReactElement => {
   const queryClient = useQueryClient();

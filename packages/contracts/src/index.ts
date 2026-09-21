@@ -547,6 +547,14 @@ export type PolicyVerdict = z.infer<typeof PolicyVerdictSchema>;
 export type RunPolicyCheckRequest = z.infer<typeof RunPolicyCheckRequestSchema>;
 export type ReviewActionRequest = z.infer<typeof ReviewActionRequestSchema>;
 export type ContentReviewResponse = z.infer<typeof ContentReviewResponseSchema>;
+
+export const ContentItemSummarySchema = z.object({
+  id: z.string(), channelId: z.string(), title: z.string(), status: z.enum(["IDEA", "VALIDATING", "GENERATING", "REVIEW_REQUIRED", "APPROVED", "SCHEDULED", "PUBLISHING", "PUBLISHED", "FAILED", "HELD"]),
+  updatedAt: z.string().datetime(), sceneVersionId: z.string().nullable(), renderReady: z.boolean()
+});
+export const ContentItemListResponseSchema = z.object({ items: z.array(ContentItemSummarySchema) });
+export type ContentItemSummary = z.infer<typeof ContentItemSummarySchema>;
+export type ContentItemListResponse = z.infer<typeof ContentItemListResponseSchema>;
 export type FactSourceLink = z.infer<typeof FactSourceLinkSchema>;
 export type GeneratedMetadata = z.infer<typeof GeneratedMetadataSchema>;
 export type GeneratedScript = z.infer<typeof GeneratedScriptSchema>;

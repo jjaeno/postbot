@@ -51,7 +51,8 @@
 | 9    | Asset Library·이미지·TTS 파이프라인 | 완료 (실제 Image/TTS Provider 키 검증 대기) |
 | 10   | Remotion·FFmpeg 영상 렌더러 | 완료 (로컬 FFmpeg/ffprobe smoke 환경 대기) |
 | 11   | 정책 검사·검수·승인 UX | 완료 |
-| 12~19 | 후속 단계           | 미완료   |
+| 12   | 대시보드·캘린더·운영 UX | 완료 |
+| 13~19 | 후속 단계           | 미완료   |
 
 # 0단계. 저장소 분석 및 개발 계획 고정
 
@@ -534,7 +535,7 @@ storage contract, fallback, checksum 동시 중복, 라이선스 차단, TTS tim
 
 # 12단계. 대시보드·캘린더·운영 UX
 
-**상태:** 미완료
+**상태:** 완료
 
 ### 범위
 

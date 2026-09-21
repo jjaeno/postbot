@@ -132,6 +132,10 @@ const mockApi = async (page: Page): Promise<void> => {
     await route.fulfill({ json: { accounts: connected ? [account] : [] } });
   });
 
+  await page.route("**/content", async (route) => {
+    await route.fulfill({ json: { items: [{ id: "content-1", channelId: "channel-1", title: "Reusable rocket", status: "REVIEW_REQUIRED", updatedAt: "2026-09-21T00:00:00.000Z", sceneVersionId: "scene-1", renderReady: true }] } });
+  });
+
   await page.route("**/channels", async (route) => {
     const request = route.request();
     if (request.method() === "POST") {
@@ -145,8 +149,8 @@ const mockApi = async (page: Page): Promise<void> => {
   });
 
   await page.route("**/channels/channel-1", async (route) => {
-    const body = route.request().postDataJSON() as { name?: string };
-    channels = [channel(body.name ?? "Science Today", connected)];
+    const body = route.request().postDataJSON() as { name?: string } | null;
+    channels = [channel(body?.name ?? "Science Today", connected)];
     await route.fulfill({ json: channels[0] });
   });
 
@@ -182,7 +186,7 @@ test("creates and edits a channel through the eight-step wizard", async ({ page 
   await expect(page.getByTestId("channel-card-channel-1")).toContainText("연결 예정");
 
   await page.getByTestId("edit-channel-channel-1").click();
-  await page.getByRole("textbox").fill("Science Today Updated");
+  await page.locator("aside input").first().fill("Science Today Updated");
   await page.getByTestId("save-channel-settings").click();
 
   await expect(page.getByTestId("channel-card-channel-1")).toContainText("Science Today Updated");
@@ -199,4 +203,14 @@ test("connects and disconnects YouTube with the fake OAuth provider", async ({ p
 
   await page.getByTestId("disconnect-youtube-channel-1").click();
   await expect(page.getByTestId("channel-card-channel-1")).toContainText("연결 예정");
+});
+
+test("restores the operating dashboard and calendar after refresh", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/");
+  await expect(page.getByLabel("Operations overview")).toContainText("Needs review");
+  await expect(page.getByTestId("calendar-panel")).toContainText("09:00");
+  await expect(page.getByText("Reusable rocket")).toBeVisible();
+  await page.reload();
+  await expect(page.getByTestId("calendar-panel")).toContainText("Science Today");
 });

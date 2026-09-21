@@ -11,6 +11,7 @@ import { IdeasModule } from "./ideas/ideas.module.js";
 import { GenerationModule } from "./generation/generation.module.js";
 import { PlatformAccountsModule } from "./platform-accounts/platform-accounts.module.js";
 import { ReviewModule } from "./review/review.module.js";
+import { ContentModule } from "./content/content.module.js";
 
 @Module({
   imports: [
@@ -27,7 +28,8 @@ import { ReviewModule } from "./review/review.module.js";
     IdeasModule,
     JobsModule,
     PlatformAccountsModule,
-    ReviewModule
+    ReviewModule,
+    ContentModule
   ],
   controllers: [AppController],
   providers: [
