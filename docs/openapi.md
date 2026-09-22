@@ -42,6 +42,8 @@ Current stage 5 endpoints:
 | POST | `/automation/runs/:runId/control` | Access cookie + CSRF | Pause, resume, drain, kill, retry, hold, or skip an automation run step |
 | POST | `/automation/budgets` | Access cookie + CSRF | Configure workspace or channel daily/monthly soft and hard limits |
 | POST | `/automation/switches` | Access cookie + CSRF | Set workspace or provider kill switches |
+| POST | `/analytics/sync` | Access cookie + CSRF | Create an idempotent ANALYTICS sync job for one channel/platform/period |
+| GET | `/analytics/report` | Access cookie | Return normalized metrics, availability, mapping version, and latest sync state |
 
 Authenticated mutating requests must include:
 

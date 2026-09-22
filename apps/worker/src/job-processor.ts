@@ -5,6 +5,7 @@ import { ScriptGenerationProcessor } from "./script-generation-processor.js";
 import { AssetPreparationProcessor } from "./asset-preparation-processor.js";
 import { RenderProcessor } from "./render-processor.js";
 import { PublishProcessor } from "./publish-processor.js";
+import { AnalyticsProcessor } from "./analytics-processor.js";
 
 type ProductionJobStatus =
   | "QUEUED"
@@ -75,12 +76,14 @@ export class DeterministicJobProcessor {
   private readonly assetPreparation: AssetPreparationProcessor;
   private readonly render: RenderProcessor;
   private readonly publish: PublishProcessor;
+  private readonly analytics: AnalyticsProcessor;
 
   constructor(private readonly prisma: PrismaClient) {
     this.scriptGeneration = new ScriptGenerationProcessor(prisma);
     this.assetPreparation = new AssetPreparationProcessor(prisma);
     this.render = new RenderProcessor(prisma);
     this.publish = new PublishProcessor(prisma);
+    this.analytics = new AnalyticsProcessor(prisma);
   }
 
   async process(input: EnqueueJobInput): Promise<void> {
@@ -166,6 +169,9 @@ export class DeterministicJobProcessor {
     }
     if (input.type === "PUBLISH") {
       try { await this.succeed(input.id, attemptNumber, await this.publish.process(input.payload)); return; } catch (error) { const message = error instanceof Error ? error.message : "PUBLISH_FAILED"; await this.fail(input.id, attemptNumber, "PUBLISH_FAILED", message); throw error; }
+    }
+    if (input.type === "ANALYTICS") {
+      try { await this.succeed(input.id, attemptNumber, await this.analytics.process(input.payload)); return; } catch (error) { const message = error instanceof Error ? error.message : "ANALYTICS_SYNC_FAILED"; await this.fail(input.id, attemptNumber, "ANALYTICS_SYNC_FAILED", message); throw error; }
     }
 
     await this.succeed(input.id, attemptNumber, {

@@ -14,6 +14,7 @@ import { ReviewModule } from "./review/review.module.js";
 import { ContentModule } from "./content/content.module.js";
 import { PublishingModule } from "./publishing/publishing.module.js";
 import { AutomationModule } from "./automation/automation.module.js";
+import { AnalyticsModule } from "./analytics/analytics.module.js";
 
 @Module({
   imports: [
@@ -33,7 +34,8 @@ import { AutomationModule } from "./automation/automation.module.js";
     ReviewModule,
     ContentModule,
     PublishingModule,
-    AutomationModule
+    AutomationModule,
+    AnalyticsModule
   ],
   controllers: [AppController],
   providers: [

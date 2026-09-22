@@ -24,6 +24,7 @@ import { createRoot } from "react-dom/client";
 import { useForm, type UseFormRegisterReturn } from "react-hook-form";
 import {
   AuthResponseSchema,
+  AnalyticsReportResponseSchema,
   AutomationRunResponseSchema,
   AuthSessionSchema,
   ChannelListResponseSchema,
@@ -38,6 +39,7 @@ import {
   PlatformAccountListResponseSchema,
   StartOAuthConnectionResponseSchema,
   type AuthResponse,
+  type AnalyticsReportResponse,
   type AutomationRunResponse,
   type AuthSession,
   type ChannelResponse,
@@ -105,6 +107,10 @@ const fetchReview = (contentItemId: string): Promise<ContentReviewResponse> =>
   request(`/content/${contentItemId}/review`, { method: "GET" }, ContentReviewResponseSchema);
 const fetchContent = (): Promise<ContentItemSummary[]> => request("/content", { method: "GET" }, ContentItemListResponseSchema).then((data) => data.items);
 const fetchAutomationRuns = (): Promise<AutomationRunResponse[]> => request("/automation/runs", { method: "GET" }, { parse: (value: unknown) => AutomationRunResponseSchema.array().parse(value) });
+const fetchAnalyticsReport = (channelId: string): Promise<AnalyticsReportResponse> => {
+  const end = new Date(); const start = new Date(end.getTime() - 7 * 24 * 60 * 60 * 1000);
+  return request(`/analytics/report?channelId=${encodeURIComponent(channelId)}&periodStart=${encodeURIComponent(start.toISOString())}&periodEnd=${encodeURIComponent(end.toISOString())}`, { method: "GET" }, AnalyticsReportResponseSchema);
+};
 
 const requestAbsolute = async <Result,>(
   url: string,
@@ -418,6 +424,7 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
   });
   const content = useQuery({ queryKey: ["content"], queryFn: fetchContent, enabled: Boolean(session) });
   const automationRuns = useQuery({ queryKey: ["automation-runs"], queryFn: fetchAutomationRuns, enabled: Boolean(session), refetchInterval: 30_000 });
+  const analytics = useQuery({ queryKey: ["analytics", channels.data?.[0]?.id], queryFn: () => fetchAnalyticsReport(channels.data?.[0]?.id ?? ""), enabled: Boolean(channels.data?.[0]?.id) });
 
   return (
     <main className="min-h-screen bg-background px-5 py-6 text-foreground md:px-8">
@@ -449,6 +456,7 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
 
         <OperationsOverview channels={channels.data ?? []} content={content.data ?? []} />
         <AutomationPanel runs={automationRuns.data ?? []} isLoading={automationRuns.isLoading} />
+        <AnalyticsPanel report={analytics.data} isLoading={analytics.isLoading} />
 
         <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
           <ChannelList
@@ -481,6 +489,11 @@ const AutomationPanel = ({ runs, isLoading }: { runs: AutomationRunResponse[]; i
     {isLoading ? <p className="mt-4 text-sm text-muted-foreground">Loading automation runs.</p> : runs.length === 0 ? <p className="mt-4 rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">No automation runs yet.</p> : <div className="mt-4 grid gap-2">{runs.slice(0, 10).map((run) => <article className="rounded-md border border-border p-3 text-sm" key={run.id}><div className="flex items-center justify-between gap-3"><span className="font-medium">{run.status}</span><span className="text-xs text-muted-foreground">{run.heartbeatAt ?? "No heartbeat"}</span></div><p className="mt-2 text-xs text-muted-foreground">{run.lastErrorCode ?? "No error"}</p><div className="mt-2 flex flex-wrap gap-1">{run.steps.map((step) => <span className="rounded bg-muted px-2 py-1 text-xs" key={step.stage}>{step.stage}: {step.status}</span>)}</div>{["RUNNING", "QUEUED"].includes(run.status) ? <Button className="mt-3 h-8" disabled={control.isPending} onClick={() => control.mutate({ runId: run.id, action: "pause" })}>Pause</Button> : run.status === "PAUSED" ? <Button className="mt-3 h-8" disabled={control.isPending} onClick={() => control.mutate({ runId: run.id, action: "resume" })}>Resume</Button> : null}</article>)}</div>}
   </section>;
 };
+
+const AnalyticsPanel = ({ report, isLoading }: { report: AnalyticsReportResponse | undefined; isLoading: boolean }): ReactElement => <section className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="analytics-panel">
+  <div><h2 className="text-lg font-semibold">Performance analytics</h2><p className="mt-1 text-sm text-muted-foreground">Recent seven-day normalized metrics with platform availability.</p></div>
+  {isLoading ? <p className="mt-4 text-sm text-muted-foreground">Loading analytics.</p> : !report || report.metrics.length === 0 ? <p className="mt-4 rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">No synced metrics for this period.</p> : <><div className="mt-4 grid gap-2 md:grid-cols-2">{report.metrics.map((metric) => <article className="rounded-md border border-border p-3 text-sm" key={`${metric.metric}-${metric.observedAt}`}><p className="font-medium">{metric.metric}</p><p className="mt-1 text-lg">{metric.status === "AVAILABLE" ? `${metric.value ?? 0} ${metric.unit ?? ""}` : "Unavailable"}</p><p className="mt-1 text-xs text-muted-foreground">{metric.unavailableReason ?? `${metric.aggregation ?? "raw"} · ${metric.observedAt}`}</p></article>)}</div><p className="mt-3 text-xs text-muted-foreground">{report.partial ? "Partial data or unavailable metrics are included." : "All returned metrics are available."} Last synced: {report.lastSyncedAt ?? "never"}</p></>}
+</section>;
 
 const OperationsOverview = ({ channels, content }: { channels: ChannelResponse[]; content: ContentItemSummary[] }): ReactElement => {
   const active = channels.filter((channel) => channel.status === "ACTIVE").length;

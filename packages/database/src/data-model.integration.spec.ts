@@ -14,6 +14,8 @@ const cleanDatabase = async (): Promise<void> => {
     prisma.automationRun.deleteMany(),
     prisma.automationBudget.deleteMany(),
     prisma.automationSwitch.deleteMany(),
+    prisma.analyticsMetricSnapshot.deleteMany(),
+    prisma.analyticsSync.deleteMany(),
     prisma.publishAttempt.deleteMany(),
     prisma.platformPost.deleteMany(),
     prisma.publishPlan.deleteMany(),

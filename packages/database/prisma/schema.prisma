@@ -190,6 +190,12 @@ enum AutomationEventAction {
   AUTO_PAUSE
 }
 
+enum AnalyticsMetricStatus {
+  AVAILABLE
+  UNAVAILABLE
+  PARTIAL
+}
+
 model User {
   id          String       @id @default(cuid())
   email       String       @unique @db.VarChar(320)
@@ -323,6 +329,7 @@ model Channel {
   optimizationSuggestions OptimizationSuggestion[]
   automationRuns          AutomationRun[]
   automationBudgets       AutomationBudget[]
+  analyticsSyncs          AnalyticsSync[]
 
   @@unique([workspaceId, slug])
   @@index([workspaceId, status])
@@ -769,7 +776,7 @@ model AutomationCostReservation {
   createdAt       DateTime @default(now()) @db.DateTime(3)
   automationRun   AutomationRun @relation(fields: [automationRunId], references: [id], onDelete: Restrict)
 
-  @@index([automationRunId, releasedAt, settledAt])
+  @@index([automationRunId, releasedAt, settledAt], map: "auto_cost_res_run_state_idx")
   @@map("automation_cost_reservations")
 }
 
@@ -933,10 +940,54 @@ model PlatformPost {
   createdAt         DateTime        @default(now()) @db.DateTime(3)
   publishPlan       PublishPlan     @relation(fields: [publishPlanId], references: [id], onDelete: Restrict)
   platformAccount   PlatformAccount @relation(fields: [platformAccountId], references: [id], onDelete: Restrict)
+  analyticsSnapshots AnalyticsMetricSnapshot[]
 
   @@unique([platform, externalPostId])
   @@index([platformAccountId, publishedAt])
   @@map("platform_posts")
+}
+
+model AnalyticsSync {
+  id              String   @id @default(cuid())
+  channelId       String
+  platform        Platform
+  status          String   @db.VarChar(32)
+  idempotencyKey  String   @unique @db.VarChar(191)
+  periodStart     DateTime @db.DateTime(3)
+  periodEnd       DateTime @db.DateTime(3)
+  timezone        String   @db.VarChar(64)
+  syncedAt        DateTime @default(now()) @db.DateTime(3)
+  dataDelayHours  Int?
+  errorCode       String?  @db.VarChar(80)
+  errorMessage    String?  @db.Text
+  channel         Channel  @relation(fields: [channelId], references: [id], onDelete: Restrict)
+  snapshots       AnalyticsMetricSnapshot[]
+
+  @@index([channelId, platform, periodStart])
+  @@map("analytics_syncs")
+}
+
+model AnalyticsMetricSnapshot {
+  id              String                @id @default(cuid())
+  analyticsSyncId String
+  platformPostId  String
+  metric          String                @db.VarChar(80)
+  mappingVersion  String                @db.VarChar(40)
+  status          AnalyticsMetricStatus
+  value           Decimal?              @db.Decimal(20, 6)
+  unit            String?               @db.VarChar(40)
+  aggregation     String?               @db.VarChar(40)
+  unavailableReason String?             @db.Text
+  rawSnapshot     Json
+  observedAt      DateTime              @db.DateTime(3)
+  revision        Int                   @default(1)
+  createdAt       DateTime              @default(now()) @db.DateTime(3)
+  analyticsSync   AnalyticsSync         @relation(fields: [analyticsSyncId], references: [id], onDelete: Restrict)
+  platformPost    PlatformPost          @relation(fields: [platformPostId], references: [id], onDelete: Restrict)
+
+  @@unique([platformPostId, metric, observedAt, revision])
+  @@index([analyticsSyncId, metric])
+  @@map("analytics_metric_snapshots")
 }
 
 model ProviderUsage {

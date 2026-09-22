@@ -4,6 +4,23 @@ export interface ProviderResult {
   readonly createdAt: string;
 }
 
+export type AnalyticsMetric = "views" | "impressions" | "average_watch_seconds" | "completion_rate" | "engagement_rate";
+export type AnalyticsMetricValue = { metric: AnalyticsMetric; value: number | null; unit: "count" | "seconds" | "ratio" | null; aggregation: "sum" | "average" | "ratio" | null; unavailableReason: string | null };
+export type AnalyticsPostResult = { externalPostId: string; observedAt: string; raw: Record<string, unknown>; metrics: readonly AnalyticsMetricValue[] };
+export type AnalyticsPage = { posts: readonly AnalyticsPostResult[]; nextPageToken: string | null; dataDelayHours: number | null };
+export interface AnalyticsProvider { fetchPage(input: { platform: "YOUTUBE" | "INSTAGRAM" | "TIKTOK"; postIds: readonly string[]; periodStart: string; periodEnd: string; pageToken: string | null }): Promise<AnalyticsPage>; }
+
+export class FakeAnalyticsProvider implements AnalyticsProvider {
+  fetchPage(input: { platform: "YOUTUBE" | "INSTAGRAM" | "TIKTOK"; postIds: readonly string[]; periodStart: string; periodEnd: string; pageToken: string | null }): Promise<AnalyticsPage> {
+    const posts = input.postIds.slice(input.pageToken ? 1 : 0, input.pageToken ? 2 : 1).map((externalPostId, index) => ({ externalPostId, observedAt: input.periodEnd, raw: { platform: input.platform, periodStart: input.periodStart, page: input.pageToken ?? "first" }, metrics: [
+      { metric: "views" as const, value: 100 + index, unit: "count" as const, aggregation: "sum" as const, unavailableReason: null },
+      { metric: "average_watch_seconds" as const, value: 12.5, unit: "seconds" as const, aggregation: "average" as const, unavailableReason: null },
+      { metric: "completion_rate" as const, value: null, unit: null, aggregation: null, unavailableReason: "NOT_PROVIDED_BY_PLATFORM" }
+    ] }));
+    return Promise.resolve({ posts, nextPageToken: input.pageToken || input.postIds.length < 2 ? null : "next", dataDelayHours: 24 });
+  }
+}
+
 export type TopicSourceKind = "NEWS" | "OFFICIAL" | "PAPER" | "RSS" | "PUBLIC_DATA" | "MANUAL";
 
 export type TopicSourceCandidate = {
