@@ -7,7 +7,13 @@ const prisma = new PrismaClient({
 });
 
 const cleanDatabase = async (): Promise<void> => {
-  await prisma.$transaction([
+  const operations = [
+    prisma.automationEvent.deleteMany(),
+    prisma.automationCostReservation.deleteMany(),
+    prisma.automationStep.deleteMany(),
+    prisma.automationRun.deleteMany(),
+    prisma.automationBudget.deleteMany(),
+    prisma.automationSwitch.deleteMany(),
     prisma.publishAttempt.deleteMany(),
     prisma.platformPost.deleteMany(),
     prisma.publishPlan.deleteMany(),
@@ -28,6 +34,7 @@ const cleanDatabase = async (): Promise<void> => {
     prisma.sceneVersion.deleteMany(),
     prisma.scriptVersion.deleteMany(),
     prisma.sourceReference.deleteMany(),
+    prisma.contentIdea.deleteMany(),
     prisma.contentItem.deleteMany(),
     prisma.scheduleRule.deleteMany(),
     prisma.platformOutputProfile.deleteMany(),
@@ -41,7 +48,10 @@ const cleanDatabase = async (): Promise<void> => {
     prisma.membership.deleteMany(),
     prisma.workspace.deleteMany(),
     prisma.user.deleteMany()
-  ]);
+  ];
+  for (const operation of operations) {
+    await operation;
+  }
 };
 
 const createWorkspace = async () => {

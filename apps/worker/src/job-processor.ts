@@ -54,6 +54,22 @@ const sleep = async (timeoutMs: number): Promise<void> => {
   await new Promise((resolve) => setTimeout(resolve, timeoutMs));
 };
 
+const automationRunId = (payload: Record<string, unknown>): string | null => {
+  const automation = payload.automation;
+  return automation && typeof automation === "object" && !Array.isArray(automation) && typeof (automation as Record<string, unknown>).runId === "string" ? String((automation as Record<string, unknown>).runId) : null;
+};
+
+const providerForJobType = (type: EnqueueJobInput["type"]): string | null => {
+  const providers: Partial<Record<EnqueueJobInput["type"], string>> = {
+    SCRIPT: "llm",
+    ASSET: "image",
+    TTS: "tts",
+    RENDER: "renderer",
+    PUBLISH: "publisher"
+  };
+  return providers[type] ?? null;
+};
+
 export class DeterministicJobProcessor {
   private readonly scriptGeneration: ScriptGenerationProcessor;
   private readonly assetPreparation: AssetPreparationProcessor;
@@ -68,11 +84,16 @@ export class DeterministicJobProcessor {
   }
 
   async process(input: EnqueueJobInput): Promise<void> {
+    if (await this.isProviderDisabled(input.id, input.type)) {
+      await this.holdForProviderSwitch(input.id, input.type);
+      return;
+    }
     const attemptNumber = await this.start(input.id);
     if (attemptNumber === null) {
       await this.cancel(input.id, null);
       return;
     }
+    await this.markAutomationStepRunning(input.id, attemptNumber);
 
     const behavior = readBehavior(input.payload);
     if (behavior.mode === "timeout") {
@@ -201,6 +222,37 @@ export class DeterministicJobProcessor {
       errorCode: null,
       errorMessage: null
     });
+    const job = await this.prisma.productionJob.findUnique({ where: { id: jobId }, select: { payload: true, type: true } });
+    const runId = job ? automationRunId(job.payload as Record<string, unknown>) : null;
+    if (runId && job) {
+      const now = new Date();
+      await this.prisma.$transaction([
+        this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "SUCCEEDED", attemptCount: attemptNumber, output: result as Prisma.InputJsonObject, finishedAt: now } }),
+        this.prisma.automationRun.update({ where: { id: runId }, data: { status: job.type === "PUBLISH" ? "SUCCEEDED" : "RUNNING", heartbeatAt: now, checkpoint: { stage: job.type.toLowerCase(), lastJobId: jobId, completedAt: now.toISOString() } } })
+      ]);
+      await this.settleReservation(runId, jobId, job.type, false);
+    }
+  }
+
+  private async isProviderDisabled(jobId: string, type: EnqueueJobInput["type"]): Promise<boolean> {
+    const provider = providerForJobType(type);
+    if (!provider) return false;
+    const job = await this.prisma.productionJob.findUnique({ where: { id: jobId }, select: { channel: { select: { workspaceId: true } } } });
+    if (!job?.channel) return false;
+    const blocked = await this.prisma.automationSwitch.findFirst({ where: { workspaceId: job.channel.workspaceId, provider, isEnabled: false } });
+    return blocked !== null;
+  }
+
+  private async holdForProviderSwitch(jobId: string, type: EnqueueJobInput["type"]): Promise<void> {
+    const job = await this.prisma.productionJob.findUnique({ where: { id: jobId }, select: { payload: true, type: true, channel: { select: { workspaceId: true } } } });
+    const runId = job ? automationRunId(job.payload as Record<string, unknown>) : null;
+    await this.prisma.productionJob.update({ where: { id: jobId }, data: { status: "NEEDS_REVIEW", errorCode: "PROVIDER_SWITCH_DISABLED", errorMessage: "The provider kill switch is enabled." } });
+    if (!runId) return;
+    await this.prisma.$transaction([
+      this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "HELD", errorCode: "PROVIDER_SWITCH_DISABLED", errorMessage: "The provider kill switch is enabled.", finishedAt: new Date() } }),
+      this.prisma.automationRun.update({ where: { id: runId }, data: { status: "PAUSED", pausedReason: `${providerForJobType(type) ?? "provider"}_SWITCH_DISABLED` } }),
+      this.prisma.automationEvent.create({ data: { automationRunId: runId, action: "HOLD", reason: "PROVIDER_SWITCH_DISABLED", details: { provider: providerForJobType(type) } } })
+    ]);
   }
 
   private async fail(jobId: string, attemptNumber: number, errorCode: string, errorMessage: string): Promise<void> {
@@ -210,6 +262,55 @@ export class DeterministicJobProcessor {
       errorCode,
       errorMessage
     });
+    const job = await this.prisma.productionJob.findUnique({ where: { id: jobId }, select: { payload: true, type: true, channel: { select: { workspaceId: true } } } });
+    const runId = job ? automationRunId(job.payload as Record<string, unknown>) : null;
+    if (runId && job) {
+      const now = new Date();
+      await this.prisma.$transaction([
+        this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "FAILED", attemptCount: attemptNumber, errorCode, errorMessage, finishedAt: now } }),
+        this.prisma.automationRun.update({ where: { id: runId }, data: { status: "FAILED", failureCount: { increment: 1 }, heartbeatAt: now, lastErrorCode: errorCode, lastErrorMessage: errorMessage } })
+      ]);
+      await this.settleReservation(runId, jobId, job.type, true);
+      const run = await this.prisma.automationRun.findUnique({ where: { id: runId }, select: { failureCount: true } });
+      if (run && run.failureCount >= 3) {
+        await this.prisma.$transaction([
+          this.prisma.automationRun.update({ where: { id: runId }, data: { status: "PAUSED", pausedReason: "CONSECUTIVE_FAILURE_THRESHOLD" } }),
+          this.prisma.automationEvent.create({ data: { automationRunId: runId, action: "AUTO_PAUSE", reason: "CONSECUTIVE_FAILURE_THRESHOLD", details: { failureCount: run.failureCount, errorCode } } })
+        ]);
+        const provider = providerForJobType(job?.type ?? "COLLECT");
+        if (provider && job?.channel) {
+          await this.prisma.automationSwitch.upsert({
+            where: { workspaceId_provider: { workspaceId: job.channel.workspaceId, provider } },
+            update: { isEnabled: false, reason: "CIRCUIT_BREAKER_CONSECUTIVE_FAILURES" },
+            create: { workspaceId: job.channel.workspaceId, provider, isEnabled: false, reason: "CIRCUIT_BREAKER_CONSECUTIVE_FAILURES" }
+          });
+        }
+      }
+    }
+  }
+
+  private async settleReservation(runId: string, jobId: string, type: EnqueueJobInput["type"], release: boolean): Promise<void> {
+    const key = `automation:${runId}:${type.toLowerCase()}:cost`;
+    const reservation = await this.prisma.automationCostReservation.findUnique({ where: { idempotencyKey: key } });
+    if (!reservation || reservation.releasedAt || reservation.settledAt) return;
+    const usage = release ? null : await this.prisma.providerUsage.aggregate({ where: { productionJobId: jobId }, _sum: { actualCost: true } });
+    const actual = usage?._sum.actualCost;
+    const now = new Date();
+    await this.prisma.$transaction([
+      this.prisma.automationCostReservation.update({ where: { id: reservation.id }, data: actual ? { settledAt: now } : { releasedAt: now } }),
+      this.prisma.automationRun.update({ where: { id: runId }, data: { budgetReserved: { decrement: reservation.amount }, ...(actual ? { budgetActual: { increment: actual } } : {}) } })
+    ]);
+  }
+
+  private async markAutomationStepRunning(jobId: string, attemptNumber: number): Promise<void> {
+    const job = await this.prisma.productionJob.findUnique({ where: { id: jobId }, select: { payload: true } });
+    const runId = job ? automationRunId(job.payload as Record<string, unknown>) : null;
+    if (!runId) return;
+    const now = new Date();
+    await this.prisma.$transaction([
+      this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "RUNNING", attemptCount: attemptNumber, startedAt: now } }),
+      this.prisma.automationRun.update({ where: { id: runId }, data: { status: "RUNNING", heartbeatAt: now } })
+    ]);
   }
 
   private async needsReview(jobId: string, attemptNumber: number, result: Record<string, unknown>): Promise<void> {

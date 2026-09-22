@@ -13,6 +13,7 @@ import { PlatformAccountsModule } from "./platform-accounts/platform-accounts.mo
 import { ReviewModule } from "./review/review.module.js";
 import { ContentModule } from "./content/content.module.js";
 import { PublishingModule } from "./publishing/publishing.module.js";
+import { AutomationModule } from "./automation/automation.module.js";
 
 @Module({
   imports: [
@@ -31,7 +32,8 @@ import { PublishingModule } from "./publishing/publishing.module.js";
     PlatformAccountsModule,
     ReviewModule,
     ContentModule,
-    PublishingModule
+    PublishingModule,
+    AutomationModule
   ],
   controllers: [AppController],
   providers: [

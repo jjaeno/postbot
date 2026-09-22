@@ -1,0 +1,1 @@
+import { Module } from "@nestjs/common"; import { JobsModule } from "../jobs/jobs.module.js"; import { AutomationController } from "./automation.controller.js"; import { AutomationService } from "./automation.service.js"; @Module({ imports: [JobsModule], controllers: [AutomationController], providers: [AutomationService] }) export class AutomationModule {}

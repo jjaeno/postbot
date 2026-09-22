@@ -560,6 +560,37 @@ export const CreatePublishPlanRequestSchema = z.object({ contentItemId: z.string
 export const PublishPlanResponseSchema = z.object({ id: z.string(), contentItemId: z.string(), platformAccountId: z.string(), platform: PlatformSchema, status: z.enum(["DRAFT", "SCHEDULED", "PUBLISHING", "PUBLISHED", "FAILED", "HELD", "CANCELLED"]), scheduledAt: z.string().datetime(), idempotencyKey: z.string(), title: z.string(), duplicate: z.boolean().optional() });
 export type CreatePublishPlanRequest = z.infer<typeof CreatePublishPlanRequestSchema>;
 export type PublishPlanResponse = z.infer<typeof PublishPlanResponseSchema>;
+
+export const AutomationRunStatusSchema = z.enum(["QUEUED", "RUNNING", "PAUSED", "DRAINING", "SUCCEEDED", "FAILED", "CANCELLED"]);
+export const AutomationStageSchema = z.enum(["COLLECT", "SCRIPT", "ASSET", "TTS", "RENDER", "POLICY", "PUBLISH"]);
+export const AutomationStepStatusSchema = z.enum(["PENDING", "QUEUED", "RUNNING", "SUCCEEDED", "HELD", "FAILED", "CANCELLED", "SKIPPED"]);
+export const AutomationRunRequestSchema = z.object({
+  channelId: z.string().min(1),
+  idempotencyKey: z.string().min(8).max(191),
+  estimatedCostsUsd: z.record(AutomationStageSchema, z.number().nonnegative().finite()).optional()
+});
+export const AutomationControlRequestSchema = z.object({ action: z.enum(["pause", "resume", "drain", "kill", "retry", "hold", "skip"]), reason: z.string().max(500).optional(), stage: AutomationStageSchema.optional() });
+export const AutomationRunResponseSchema = z.object({
+  id: z.string(), channelId: z.string(), status: AutomationRunStatusSchema, idempotencyKey: z.string(),
+  checkpoint: z.record(z.string(), z.unknown()).nullable(), failureCount: z.number().int(),
+  nextRunAt: z.string().datetime().nullable(), heartbeatAt: z.string().datetime().nullable(),
+  lastErrorCode: z.string().nullable(), lastErrorMessage: z.string().nullable(),
+  steps: z.array(z.object({ stage: AutomationStageSchema, status: AutomationStepStatusSchema, attemptCount: z.number().int(), maxAttempts: z.number().int(), productionJobId: z.string().nullable(), errorCode: z.string().nullable(), errorMessage: z.string().nullable() }))
+});
+export const AutomationBudgetRequestSchema = z.object({
+  channelId: z.string().min(1).nullable().default(null), currency: z.string().length(3).default("USD"),
+  dailySoftLimit: z.number().nonnegative().nullable().default(null), dailyHardLimit: z.number().nonnegative().nullable().default(null),
+  monthlySoftLimit: z.number().nonnegative().nullable().default(null), monthlyHardLimit: z.number().nonnegative().nullable().default(null)
+}).superRefine((value, ctx) => {
+  if (value.dailySoftLimit !== null && value.dailyHardLimit !== null && value.dailySoftLimit > value.dailyHardLimit) ctx.addIssue({ code: "custom", path: ["dailySoftLimit"], message: "Soft limit cannot exceed hard limit." });
+  if (value.monthlySoftLimit !== null && value.monthlyHardLimit !== null && value.monthlySoftLimit > value.monthlyHardLimit) ctx.addIssue({ code: "custom", path: ["monthlySoftLimit"], message: "Soft limit cannot exceed hard limit." });
+});
+export const AutomationSwitchRequestSchema = z.object({ provider: z.string().min(1).max(80).nullable().default(null), isEnabled: z.boolean(), reason: z.string().max(500).optional() });
+export type AutomationRunStatus = z.infer<typeof AutomationRunStatusSchema>;
+export type AutomationStage = z.infer<typeof AutomationStageSchema>;
+export type AutomationStepStatus = z.infer<typeof AutomationStepStatusSchema>;
+export type AutomationRunResponse = z.infer<typeof AutomationRunResponseSchema>;
+export type AutomationBudgetRequest = z.infer<typeof AutomationBudgetRequestSchema>;
 export type FactSourceLink = z.infer<typeof FactSourceLinkSchema>;
 export type GeneratedMetadata = z.infer<typeof GeneratedMetadataSchema>;
 export type GeneratedScript = z.infer<typeof GeneratedScriptSchema>;

@@ -36,6 +36,12 @@ Current stage 5 endpoints:
 | POST | `/content/:contentItemId/review/action` | Access cookie + CSRF | Approve, hold, discard, or mark content scheduled; approval requires a passing policy check |
 | GET | `/content` | Access cookie | List up to 100 workspace-scoped content items for operational status and calendar workflows |
 | POST | `/publishing/plans` | Access cookie + CSRF | Create or return an idempotent YouTube publish plan after policy, account, and render gates pass |
+| GET | `/automation/runs` | Access cookie | List workspace-scoped automation runs and step states |
+| GET | `/automation/runs/:runId` | Access cookie | Read one automation run, heartbeat, error, and checkpoints |
+| POST | `/automation/runs` | Access cookie + CSRF | Start an idempotent automation run; optional stage cost estimates enable reserved-cost processing |
+| POST | `/automation/runs/:runId/control` | Access cookie + CSRF | Pause, resume, drain, kill, retry, hold, or skip an automation run step |
+| POST | `/automation/budgets` | Access cookie + CSRF | Configure workspace or channel daily/monthly soft and hard limits |
+| POST | `/automation/switches` | Access cookie + CSRF | Set workspace or provider kill switches |
 
 Authenticated mutating requests must include:
 

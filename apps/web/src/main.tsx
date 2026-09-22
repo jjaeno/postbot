@@ -24,6 +24,7 @@ import { createRoot } from "react-dom/client";
 import { useForm, type UseFormRegisterReturn } from "react-hook-form";
 import {
   AuthResponseSchema,
+  AutomationRunResponseSchema,
   AuthSessionSchema,
   ChannelListResponseSchema,
   ChannelResponseSchema,
@@ -37,6 +38,7 @@ import {
   PlatformAccountListResponseSchema,
   StartOAuthConnectionResponseSchema,
   type AuthResponse,
+  type AutomationRunResponse,
   type AuthSession,
   type ChannelResponse,
   type ContentIdea,
@@ -102,6 +104,7 @@ const fetchIdeas = (channelId: string, status: IdeaStatus | "ALL"): Promise<Cont
 const fetchReview = (contentItemId: string): Promise<ContentReviewResponse> =>
   request(`/content/${contentItemId}/review`, { method: "GET" }, ContentReviewResponseSchema);
 const fetchContent = (): Promise<ContentItemSummary[]> => request("/content", { method: "GET" }, ContentItemListResponseSchema).then((data) => data.items);
+const fetchAutomationRuns = (): Promise<AutomationRunResponse[]> => request("/automation/runs", { method: "GET" }, { parse: (value: unknown) => AutomationRunResponseSchema.array().parse(value) });
 
 const requestAbsolute = async <Result,>(
   url: string,
@@ -414,6 +417,7 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
     enabled: Boolean(session)
   });
   const content = useQuery({ queryKey: ["content"], queryFn: fetchContent, enabled: Boolean(session) });
+  const automationRuns = useQuery({ queryKey: ["automation-runs"], queryFn: fetchAutomationRuns, enabled: Boolean(session), refetchInterval: 30_000 });
 
   return (
     <main className="min-h-screen bg-background px-5 py-6 text-foreground md:px-8">
@@ -444,6 +448,7 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
         {error ? <p className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</p> : null}
 
         <OperationsOverview channels={channels.data ?? []} content={content.data ?? []} />
+        <AutomationPanel runs={automationRuns.data ?? []} isLoading={automationRuns.isLoading} />
 
         <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
           <ChannelList
@@ -463,6 +468,18 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
       {wizardOpen ? <ChannelWizard onClose={() => setWizardOpen(false)} onError={setError} /> : null}
     </main>
   );
+};
+
+const AutomationPanel = ({ runs, isLoading }: { runs: AutomationRunResponse[]; isLoading: boolean }): ReactElement => {
+  const cache = useQueryClient();
+  const control = useMutation({
+    mutationFn: ({ runId, action }: { runId: string; action: "pause" | "resume" }) => request(`/automation/runs/${runId}/control`, { method: "POST", body: JSON.stringify({ action }) }, AutomationRunResponseSchema),
+    onSuccess: () => void cache.invalidateQueries({ queryKey: ["automation-runs"] })
+  });
+  return <section className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="automation-panel">
+    <div><h2 className="text-lg font-semibold">Automation operations</h2><p className="mt-1 text-sm text-muted-foreground">Run state, heartbeat, failed stages, and operator holds.</p></div>
+    {isLoading ? <p className="mt-4 text-sm text-muted-foreground">Loading automation runs.</p> : runs.length === 0 ? <p className="mt-4 rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">No automation runs yet.</p> : <div className="mt-4 grid gap-2">{runs.slice(0, 10).map((run) => <article className="rounded-md border border-border p-3 text-sm" key={run.id}><div className="flex items-center justify-between gap-3"><span className="font-medium">{run.status}</span><span className="text-xs text-muted-foreground">{run.heartbeatAt ?? "No heartbeat"}</span></div><p className="mt-2 text-xs text-muted-foreground">{run.lastErrorCode ?? "No error"}</p><div className="mt-2 flex flex-wrap gap-1">{run.steps.map((step) => <span className="rounded bg-muted px-2 py-1 text-xs" key={step.stage}>{step.stage}: {step.status}</span>)}</div>{["RUNNING", "QUEUED"].includes(run.status) ? <Button className="mt-3 h-8" disabled={control.isPending} onClick={() => control.mutate({ runId: run.id, action: "pause" })}>Pause</Button> : run.status === "PAUSED" ? <Button className="mt-3 h-8" disabled={control.isPending} onClick={() => control.mutate({ runId: run.id, action: "resume" })}>Resume</Button> : null}</article>)}</div>}
+  </section>;
 };
 
 const OperationsOverview = ({ channels, content }: { channels: ChannelResponse[]; content: ContentItemSummary[] }): ReactElement => {
