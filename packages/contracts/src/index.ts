@@ -596,6 +596,25 @@ export const AnalyticsMetricResponseSchema = z.object({ metric: z.string(), stat
 export const AnalyticsReportResponseSchema = z.object({ channelId: z.string(), platform: PlatformSchema.optional(), periodStart: z.string().datetime(), periodEnd: z.string().datetime(), metrics: z.array(AnalyticsMetricResponseSchema), partial: z.boolean(), lastSyncedAt: z.string().datetime().nullable() });
 export type AnalyticsSyncRequest = z.infer<typeof AnalyticsSyncRequestSchema>;
 export type AnalyticsReportResponse = z.infer<typeof AnalyticsReportResponseSchema>;
+
+export const OptimizationSettingsSchema = z.object({
+  protectedTopics: z.array(z.string().min(1).max(120)).max(50).default([]),
+  protectedBrandPhrases: z.array(z.string().min(1).max(120)).max(50).default([]),
+  prohibitedPatterns: z.array(z.string().min(1).max(120)).max(50).default([]),
+  autoApplyFields: z.array(z.enum(["durationSeconds", "hookStyle", "subtitleDensity", "publishHour"])).max(4).default([]),
+  maxChangeRatio: z.number().min(0).max(0.5).default(0.2)
+});
+export const UpdateOptimizationSettingsRequestSchema = z.object({ channelId: z.string().min(1), settings: OptimizationSettingsSchema });
+export const GenerateSuggestionsRequestSchema = z.object({ channelId: z.string().min(1), platform: PlatformSchema, metric: z.enum(["views", "impressions", "average_watch_seconds", "completion_rate", "engagement_rate"]), periodStart: z.string().datetime(), periodEnd: z.string().datetime(), idempotencyKey: z.string().min(8).max(128) }).refine((value) => value.periodStart < value.periodEnd, { message: "periodStart must precede periodEnd" });
+export const SuggestionActionRequestSchema = z.object({ action: z.enum(["approve", "reject", "apply", "expire"]), reason: z.string().min(1).max(500).optional() });
+export const CreateExperimentRequestSchema = z.object({ channelId: z.string().min(1), name: z.string().min(1).max(120), hypothesis: z.string().min(1).max(2000), targetMetric: z.string().min(1).max(80), minSampleSize: z.number().int().min(2).max(10_000), control: JsonObjectSchema, variant: JsonObjectSchema, successCriteria: JsonObjectSchema, stopCriteria: JsonObjectSchema.optional() });
+export const ExperimentActionRequestSchema = z.object({ action: z.enum(["start", "pause", "stop", "complete", "inconclusive"]), reason: z.string().min(1).max(500).optional() });
+export const AssignExperimentRequestSchema = z.object({ contentItemId: z.string().min(1) });
+export const OptimizationSuggestionResponseSchema = z.object({ id: z.string(), channelId: z.string(), status: z.enum(["PENDING", "PROPOSED", "APPROVED", "REJECTED", "HELD", "APPLIED", "EXPIRED"]), title: z.string(), rationale: z.string(), evidence: z.unknown(), targetStrategy: z.unknown().nullable(), sampleSize: z.number().int(), confidenceScore: z.number().nullable(), expectedImpact: z.unknown().nullable(), risk: z.unknown().nullable(), expiresAt: z.string().datetime().nullable(), createdAt: z.string().datetime(), appliedAt: z.string().datetime().nullable() });
+export const ExperimentResponseSchema = z.object({ id: z.string(), channelId: z.string(), status: z.enum(["DRAFT", "RUNNING", "PAUSED", "COMPLETED", "CANCELLED", "STOPPED", "INCONCLUSIVE"]), name: z.string(), hypothesis: z.string(), targetMetric: z.string().nullable(), minSampleSize: z.number().int(), allocation: z.unknown(), successCriteria: z.unknown(), stopCriteria: z.unknown().nullable(), result: z.unknown().nullable(), stopReason: z.string().nullable(), startedAt: z.string().datetime().nullable(), endedAt: z.string().datetime().nullable() });
+export type OptimizationSettings = z.infer<typeof OptimizationSettingsSchema>;
+export type OptimizationSuggestionResponse = z.infer<typeof OptimizationSuggestionResponseSchema>;
+export type ExperimentResponse = z.infer<typeof ExperimentResponseSchema>;
 export type FactSourceLink = z.infer<typeof FactSourceLinkSchema>;
 export type GeneratedMetadata = z.infer<typeof GeneratedMetadataSchema>;
 export type GeneratedScript = z.infer<typeof GeneratedScriptSchema>;

@@ -143,11 +143,13 @@ enum CostDirection {
 }
 
 enum SuggestionStatus {
+  PENDING
   PROPOSED
   APPROVED
   REJECTED
   HELD
   APPLIED
+  EXPIRED
 }
 
 enum ExperimentStatus {
@@ -156,6 +158,8 @@ enum ExperimentStatus {
   PAUSED
   COMPLETED
   CANCELLED
+  STOPPED
+  INCONCLUSIVE
 }
 
 enum AutomationRunStatus {
@@ -310,6 +314,7 @@ model Channel {
   minInventoryCount       Int                      @default(3)
   dailyPublishLimit       Int                      @default(1)
   errorAction             Json?
+  optimizationSettings    Json?
   createdAt               DateTime                 @default(now()) @db.DateTime(3)
   updatedAt               DateTime                 @updatedAt @db.DateTime(3)
   workspace               Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
@@ -522,6 +527,7 @@ model ContentItem {
   strategyVersions        StrategyVersion[]
   optimizationSuggestions OptimizationSuggestion[]
   experiments             Experiment[]
+  experimentAssignments   ExperimentAssignment[]
 
   @@unique([channelId, topicKey])
   @@index([channelId, status, createdAt])
@@ -1059,12 +1065,20 @@ model OptimizationSuggestion {
   contentItemId     String?
   strategyVersionId String?
   status            SuggestionStatus @default(PROPOSED)
+  suggestionKey     String?          @unique @db.VarChar(128)
   title             String           @db.VarChar(191)
   rationale         String           @db.Text
   evidence          Json
   sampleSize        Int
   confidenceScore   Decimal?         @db.Decimal(7, 6)
   expectedImpact    Json?
+  targetStrategy    Json?
+  risk              Json?
+  inputSnapshot     Json?
+  metricVersion     String?          @db.VarChar(80)
+  ruleVersion       String?          @db.VarChar(80)
+  rollbackStrategyVersionId String?  @db.VarChar(191)
+  expiresAt         DateTime?        @db.DateTime(3)
   decidedAt         DateTime?        @db.DateTime(3)
   appliedAt         DateTime?        @db.DateTime(3)
   createdAt         DateTime         @default(now()) @db.DateTime(3)
@@ -1073,6 +1087,7 @@ model OptimizationSuggestion {
   strategyVersion   StrategyVersion? @relation(fields: [strategyVersionId], references: [id], onDelete: SetNull)
 
   @@index([channelId, status, createdAt])
+  @@index([channelId, expiresAt])
   @@map("optimization_suggestions")
 }
 
@@ -1086,6 +1101,11 @@ model Experiment {
   hypothesis        String           @db.Text
   allocation        Json
   successCriteria   Json
+  targetMetric      String?          @db.VarChar(80)
+  minSampleSize     Int              @default(20)
+  stopCriteria      Json?
+  result            Json?
+  stopReason        String?          @db.Text
   startedAt         DateTime?        @db.DateTime(3)
   endedAt           DateTime?        @db.DateTime(3)
   createdAt         DateTime         @default(now()) @db.DateTime(3)
@@ -1093,7 +1113,23 @@ model Experiment {
   channel           Channel          @relation(fields: [channelId], references: [id], onDelete: Restrict)
   contentItem       ContentItem?     @relation(fields: [contentItemId], references: [id], onDelete: SetNull)
   strategyVersion   StrategyVersion? @relation(fields: [strategyVersionId], references: [id], onDelete: SetNull)
+  assignments       ExperimentAssignment[]
 
   @@index([channelId, status, createdAt])
   @@map("experiments")
+}
+
+model ExperimentAssignment {
+  id                String     @id @default(cuid())
+  experimentId      String
+  contentItemId     String
+  arm               String     @db.VarChar(40)
+  assignmentKey     String     @unique @db.VarChar(128)
+  assignedAt        DateTime   @default(now()) @db.DateTime(3)
+  experiment        Experiment @relation(fields: [experimentId], references: [id], onDelete: Restrict)
+  contentItem       ContentItem @relation(fields: [contentItemId], references: [id], onDelete: Restrict)
+
+  @@unique([experimentId, contentItemId])
+  @@index([experimentId, arm])
+  @@map("experiment_assignments")
 }

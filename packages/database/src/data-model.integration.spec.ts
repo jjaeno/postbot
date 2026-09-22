@@ -8,6 +8,7 @@ const prisma = new PrismaClient({
 
 const cleanDatabase = async (): Promise<void> => {
   const operations = [
+    prisma.experimentAssignment.deleteMany(),
     prisma.automationEvent.deleteMany(),
     prisma.automationCostReservation.deleteMany(),
     prisma.automationStep.deleteMany(),
@@ -194,6 +195,14 @@ describe("core Prisma data model", () => {
         }
       })
     ).rejects.toMatchObject({ code: "P2002" });
+  });
+
+  it("preserves immutable experiment assignments", async () => {
+    const { channel } = await createWorkspace();
+    const contentItem = await prisma.contentItem.create({ data: { channelId: channel.id, title: "Experiment content", topicKey: "experiment-content" } });
+    const experiment = await prisma.experiment.create({ data: { channelId: channel.id, name: "Duration", hypothesis: "A bounded duration adjustment may improve views.", allocation: { control: {}, variant: {} }, successCriteria: { metric: "views" }, targetMetric: "views", minSampleSize: 20 } });
+    await prisma.experimentAssignment.create({ data: { experimentId: experiment.id, contentItemId: contentItem.id, arm: "control", assignmentKey: "experiment-assignment-key" } });
+    await expect(prisma.experimentAssignment.create({ data: { experimentId: experiment.id, contentItemId: contentItem.id, arm: "variant", assignmentKey: "experiment-assignment-key-2" } })).rejects.toMatchObject({ code: "P2002" });
   });
 
   it("enforces publish idempotency and platform account assignment uniqueness", async () => {

@@ -36,6 +36,7 @@ import {
   ContentIdeaSchema,
   CreateChannelRequestSchema,
   OAuthCallbackResultSchema,
+  OptimizationSuggestionResponseSchema,
   PlatformAccountListResponseSchema,
   StartOAuthConnectionResponseSchema,
   type AuthResponse,
@@ -50,6 +51,7 @@ import {
   type IdeaStatus,
   type PlatformAccountResponse,
   type Platform
+  , type OptimizationSuggestionResponse
 } from "@postbot/contracts";
 import { Button } from "./components/ui/button";
 import "./styles.css";
@@ -111,6 +113,8 @@ const fetchAnalyticsReport = (channelId: string): Promise<AnalyticsReportRespons
   const end = new Date(); const start = new Date(end.getTime() - 7 * 24 * 60 * 60 * 1000);
   return request(`/analytics/report?channelId=${encodeURIComponent(channelId)}&periodStart=${encodeURIComponent(start.toISOString())}&periodEnd=${encodeURIComponent(end.toISOString())}`, { method: "GET" }, AnalyticsReportResponseSchema);
 };
+const fetchSuggestions = (channelId: string): Promise<OptimizationSuggestionResponse[]> =>
+  request(`/optimization/suggestions?channelId=${encodeURIComponent(channelId)}`, { method: "GET" }, { parse: (value: unknown) => OptimizationSuggestionResponseSchema.array().parse(value) });
 
 const requestAbsolute = async <Result,>(
   url: string,
@@ -425,6 +429,7 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
   const content = useQuery({ queryKey: ["content"], queryFn: fetchContent, enabled: Boolean(session) });
   const automationRuns = useQuery({ queryKey: ["automation-runs"], queryFn: fetchAutomationRuns, enabled: Boolean(session), refetchInterval: 30_000 });
   const analytics = useQuery({ queryKey: ["analytics", channels.data?.[0]?.id], queryFn: () => fetchAnalyticsReport(channels.data?.[0]?.id ?? ""), enabled: Boolean(channels.data?.[0]?.id) });
+  const suggestions = useQuery({ queryKey: ["optimization-suggestions", channels.data?.[0]?.id], queryFn: () => fetchSuggestions(channels.data?.[0]?.id ?? ""), enabled: Boolean(channels.data?.[0]?.id) });
 
   return (
     <main className="min-h-screen bg-background px-5 py-6 text-foreground md:px-8">
@@ -457,6 +462,7 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
         <OperationsOverview channels={channels.data ?? []} content={content.data ?? []} />
         <AutomationPanel runs={automationRuns.data ?? []} isLoading={automationRuns.isLoading} />
         <AnalyticsPanel report={analytics.data} isLoading={analytics.isLoading} />
+        <OptimizationPanel suggestions={suggestions.data ?? []} isLoading={suggestions.isLoading} />
 
         <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
           <ChannelList
@@ -494,6 +500,12 @@ const AnalyticsPanel = ({ report, isLoading }: { report: AnalyticsReportResponse
   <div><h2 className="text-lg font-semibold">Performance analytics</h2><p className="mt-1 text-sm text-muted-foreground">Recent seven-day normalized metrics with platform availability.</p></div>
   {isLoading ? <p className="mt-4 text-sm text-muted-foreground">Loading analytics.</p> : !report || report.metrics.length === 0 ? <p className="mt-4 rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">No synced metrics for this period.</p> : <><div className="mt-4 grid gap-2 md:grid-cols-2">{report.metrics.map((metric) => <article className="rounded-md border border-border p-3 text-sm" key={`${metric.metric}-${metric.observedAt}`}><p className="font-medium">{metric.metric}</p><p className="mt-1 text-lg">{metric.status === "AVAILABLE" ? `${metric.value ?? 0} ${metric.unit ?? ""}` : "Unavailable"}</p><p className="mt-1 text-xs text-muted-foreground">{metric.unavailableReason ?? `${metric.aggregation ?? "raw"} · ${metric.observedAt}`}</p></article>)}</div><p className="mt-3 text-xs text-muted-foreground">{report.partial ? "Partial data or unavailable metrics are included." : "All returned metrics are available."} Last synced: {report.lastSyncedAt ?? "never"}</p></>}
 </section>;
+
+const OptimizationPanel = ({ suggestions, isLoading }: { suggestions: OptimizationSuggestionResponse[]; isLoading: boolean }): ReactElement => {
+  const cache = useQueryClient();
+  const action = useMutation({ mutationFn: ({ id, next }: { id: string; next: "approve" | "reject" | "apply" }) => request(`/optimization/suggestions/${id}/action`, { method: "POST", body: JSON.stringify({ action: next }) }, OptimizationSuggestionResponseSchema), onSuccess: () => void cache.invalidateQueries({ queryKey: ["optimization-suggestions"] }) });
+  return <section className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="optimization-panel"><div><h2 className="text-lg font-semibold">Optimization suggestions</h2><p className="mt-1 text-sm text-muted-foreground">Correlation-based hypotheses, evidence, approval history, and rollback-safe strategy changes.</p></div>{isLoading ? <p className="mt-4 text-sm text-muted-foreground">Loading suggestions.</p> : suggestions.length === 0 ? <p className="mt-4 rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">No suggestions yet. Sync analytics and generate a comparison cohort first.</p> : <div className="mt-4 grid gap-2">{suggestions.map((suggestion) => <article className="rounded-md border border-border p-3 text-sm" key={suggestion.id}><div className="flex items-center justify-between gap-2"><p className="font-medium">{suggestion.title}</p><span className="rounded bg-muted px-2 py-1 text-xs">{suggestion.status}</span></div><p className="mt-2 text-muted-foreground">{suggestion.rationale}</p><p className="mt-2 text-xs text-muted-foreground">sample: {suggestion.sampleSize} · confidence: {suggestion.confidenceScore ?? "not established"} · expiry: {suggestion.expiresAt ?? "none"}</p>{suggestion.status === "PENDING" ? <div className="mt-3 flex gap-2"><Button className="h-8" disabled={action.isPending} onClick={() => action.mutate({ id: suggestion.id, next: "approve" })}>Approve</Button><Button className="h-8" disabled={action.isPending} onClick={() => action.mutate({ id: suggestion.id, next: "reject" })}>Reject</Button></div> : suggestion.status === "APPROVED" ? <Button className="mt-3 h-8" disabled={action.isPending} onClick={() => action.mutate({ id: suggestion.id, next: "apply" })}>Apply immutable strategy</Button> : null}</article>)}</div>}</section>;
+};
 
 const OperationsOverview = ({ channels, content }: { channels: ChannelResponse[]; content: ContentItemSummary[] }): ReactElement => {
   const active = channels.filter((channel) => channel.status === "ACTIVE").length;
