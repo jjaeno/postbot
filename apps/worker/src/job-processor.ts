@@ -269,6 +269,10 @@ export class DeterministicJobProcessor {
       errorMessage
     });
     const job = await this.prisma.productionJob.findUnique({ where: { id: jobId }, select: { payload: true, type: true, channel: { select: { workspaceId: true } } } });
+    if (job?.channel) {
+      const bucket = Math.floor(Date.now() / 1_800_000);
+      await this.prisma.notification.upsert({ where: { notificationKey: `${job.channel.workspaceId}:job.failed:${jobId}:${bucket}` }, create: { workspaceId: job.channel.workspaceId, notificationKey: `${job.channel.workspaceId}:job.failed:${jobId}:${bucket}`, eventKey: "job.failed", severity: "WARNING", payload: { jobId, type: job.type, errorCode } }, update: {} });
+    }
     const runId = job ? automationRunId(job.payload as Record<string, unknown>) : null;
     if (runId && job) {
       const now = new Date();

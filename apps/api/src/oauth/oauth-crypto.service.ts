@@ -14,10 +14,13 @@ const base64url = (value: Buffer): string => value.toString("base64url");
 export class OAuthCryptoService {
   private readonly config = loadConfig();
   private readonly key = createHash("sha256").update(this.config.OAUTH_ENCRYPTION_KEY).digest();
+  private readonly previousKeys = this.config.OAUTH_ENCRYPTION_PREVIOUS_KEYS.split(",").map((key) => key.trim()).filter(Boolean).map((key) => createHash("sha256").update(key).digest());
 
   randomToken(bytes = 32): string {
     return base64url(randomBytes(bytes));
   }
+
+  get keyVersion(): number { return this.config.OAUTH_ENCRYPTION_KEY_VERSION; }
 
   sha256(value: string): string {
     return createHash("sha256").update(value).digest("hex");
@@ -47,11 +50,13 @@ export class OAuthCryptoService {
     if (!ivRaw || !tagRaw || !encryptedRaw) {
       throw new Error("Invalid encrypted OAuth token payload.");
     }
-    const decipher = createDecipheriv("aes-256-gcm", this.key, Buffer.from(ivRaw, "base64url"));
-    decipher.setAuthTag(Buffer.from(tagRaw, "base64url"));
-    return Buffer.concat([
-      decipher.update(Buffer.from(encryptedRaw, "base64url")),
-      decipher.final()
-    ]).toString("utf8");
+    for (const key of [this.key, ...this.previousKeys]) {
+      try {
+        const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(ivRaw, "base64url"));
+        decipher.setAuthTag(Buffer.from(tagRaw, "base64url"));
+        return Buffer.concat([decipher.update(Buffer.from(encryptedRaw, "base64url")), decipher.final()]).toString("utf8");
+      } catch { /* Try the next retained key. */ }
+    }
+    throw new Error("Unable to decrypt OAuth token with configured keys.");
   }
 }

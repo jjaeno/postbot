@@ -37,6 +37,8 @@ import {
   CreateChannelRequestSchema,
   OAuthCallbackResultSchema,
   OptimizationSuggestionResponseSchema,
+  CostReportResponseSchema,
+  NotificationResponseSchema,
   PlatformAccountListResponseSchema,
   StartOAuthConnectionResponseSchema,
   type AuthResponse,
@@ -51,7 +53,7 @@ import {
   type IdeaStatus,
   type PlatformAccountResponse,
   type Platform
-  , type OptimizationSuggestionResponse
+  , type OptimizationSuggestionResponse, type CostReportResponse, type NotificationResponse
 } from "@postbot/contracts";
 import { Button } from "./components/ui/button";
 import "./styles.css";
@@ -115,6 +117,8 @@ const fetchAnalyticsReport = (channelId: string): Promise<AnalyticsReportRespons
 };
 const fetchSuggestions = (channelId: string): Promise<OptimizationSuggestionResponse[]> =>
   request(`/optimization/suggestions?channelId=${encodeURIComponent(channelId)}`, { method: "GET" }, { parse: (value: unknown) => OptimizationSuggestionResponseSchema.array().parse(value) });
+const fetchCosts = (): Promise<CostReportResponse> => { const end = new Date(); const start = new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000); return request(`/operations/costs?periodStart=${encodeURIComponent(start.toISOString())}&periodEnd=${encodeURIComponent(end.toISOString())}`, { method: "GET" }, CostReportResponseSchema); };
+const fetchNotifications = (): Promise<NotificationResponse[]> => request("/operations/notifications", { method: "GET" }, { parse: (value: unknown) => NotificationResponseSchema.array().parse(value) });
 
 const requestAbsolute = async <Result,>(
   url: string,
@@ -430,6 +434,8 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
   const automationRuns = useQuery({ queryKey: ["automation-runs"], queryFn: fetchAutomationRuns, enabled: Boolean(session), refetchInterval: 30_000 });
   const analytics = useQuery({ queryKey: ["analytics", channels.data?.[0]?.id], queryFn: () => fetchAnalyticsReport(channels.data?.[0]?.id ?? ""), enabled: Boolean(channels.data?.[0]?.id) });
   const suggestions = useQuery({ queryKey: ["optimization-suggestions", channels.data?.[0]?.id], queryFn: () => fetchSuggestions(channels.data?.[0]?.id ?? ""), enabled: Boolean(channels.data?.[0]?.id) });
+  const costs = useQuery({ queryKey: ["operations-costs"], queryFn: fetchCosts, enabled: Boolean(session) });
+  const notifications = useQuery({ queryKey: ["operations-notifications"], queryFn: fetchNotifications, enabled: Boolean(session), refetchInterval: 30_000 });
 
   return (
     <main className="min-h-screen bg-background px-5 py-6 text-foreground md:px-8">
@@ -463,6 +469,7 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
         <AutomationPanel runs={automationRuns.data ?? []} isLoading={automationRuns.isLoading} />
         <AnalyticsPanel report={analytics.data} isLoading={analytics.isLoading} />
         <OptimizationPanel suggestions={suggestions.data ?? []} isLoading={suggestions.isLoading} />
+        <OperationsPanel costs={costs.data} notifications={notifications.data ?? []} isLoading={costs.isLoading || notifications.isLoading} />
 
         <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
           <ChannelList
@@ -505,6 +512,12 @@ const OptimizationPanel = ({ suggestions, isLoading }: { suggestions: Optimizati
   const cache = useQueryClient();
   const action = useMutation({ mutationFn: ({ id, next }: { id: string; next: "approve" | "reject" | "apply" }) => request(`/optimization/suggestions/${id}/action`, { method: "POST", body: JSON.stringify({ action: next }) }, OptimizationSuggestionResponseSchema), onSuccess: () => void cache.invalidateQueries({ queryKey: ["optimization-suggestions"] }) });
   return <section className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="optimization-panel"><div><h2 className="text-lg font-semibold">Optimization suggestions</h2><p className="mt-1 text-sm text-muted-foreground">Correlation-based hypotheses, evidence, approval history, and rollback-safe strategy changes.</p></div>{isLoading ? <p className="mt-4 text-sm text-muted-foreground">Loading suggestions.</p> : suggestions.length === 0 ? <p className="mt-4 rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">No suggestions yet. Sync analytics and generate a comparison cohort first.</p> : <div className="mt-4 grid gap-2">{suggestions.map((suggestion) => <article className="rounded-md border border-border p-3 text-sm" key={suggestion.id}><div className="flex items-center justify-between gap-2"><p className="font-medium">{suggestion.title}</p><span className="rounded bg-muted px-2 py-1 text-xs">{suggestion.status}</span></div><p className="mt-2 text-muted-foreground">{suggestion.rationale}</p><p className="mt-2 text-xs text-muted-foreground">sample: {suggestion.sampleSize} · confidence: {suggestion.confidenceScore ?? "not established"} · expiry: {suggestion.expiresAt ?? "none"}</p>{suggestion.status === "PENDING" ? <div className="mt-3 flex gap-2"><Button className="h-8" disabled={action.isPending} onClick={() => action.mutate({ id: suggestion.id, next: "approve" })}>Approve</Button><Button className="h-8" disabled={action.isPending} onClick={() => action.mutate({ id: suggestion.id, next: "reject" })}>Reject</Button></div> : suggestion.status === "APPROVED" ? <Button className="mt-3 h-8" disabled={action.isPending} onClick={() => action.mutate({ id: suggestion.id, next: "apply" })}>Apply immutable strategy</Button> : null}</article>)}</div>}</section>;
+};
+
+const OperationsPanel = ({ costs, notifications, isLoading }: { costs: CostReportResponse | undefined; notifications: NotificationResponse[]; isLoading: boolean }): ReactElement => {
+  const cache = useQueryClient();
+  const acknowledge = useMutation({ mutationFn: (id: string) => request(`/operations/notifications/${id}/acknowledge`, { method: "POST" }, NotificationResponseSchema), onSuccess: () => void cache.invalidateQueries({ queryKey: ["operations-notifications"] }) });
+  return <section className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="operations-panel"><div><h2 className="text-lg font-semibold">Operations cost and alerts</h2><p className="mt-1 text-sm text-muted-foreground">Ledger-reconciled cost totals and in-app operational alerts.</p></div>{isLoading ? <p className="mt-4 text-sm text-muted-foreground">Loading operations data.</p> : <><div className="mt-4 grid gap-2 md:grid-cols-4"><article className="rounded border border-border p-3 text-sm"><p>Estimated</p><p className="mt-1 text-lg">{costs?.estimated ?? 0} {costs?.currency ?? "USD"}</p></article><article className="rounded border border-border p-3 text-sm"><p>Actual</p><p className="mt-1 text-lg">{costs?.actual ?? 0} {costs?.currency ?? "USD"}</p></article><article className="rounded border border-border p-3 text-sm"><p>Credit</p><p className="mt-1 text-lg">{costs?.credit ?? 0}</p></article><article className="rounded border border-border p-3 text-sm"><p>Reconciliation</p><p className="mt-1 text-lg">{costs?.reconciled ? "Matched" : `Difference ${costs?.discrepancy ?? 0}`}</p></article></div><div className="mt-4 grid gap-2">{notifications.length === 0 ? <p className="text-sm text-muted-foreground">No operational alerts.</p> : notifications.slice(0, 10).map((notification) => <article className="flex items-center justify-between gap-3 rounded border border-border p-3 text-sm" key={notification.id}><span>{notification.severity} · {notification.eventKey}</span>{notification.acknowledgedAt ? <span className="text-xs text-muted-foreground">Acknowledged</span> : <Button className="h-8" disabled={acknowledge.isPending} onClick={() => acknowledge.mutate(notification.id)}>Acknowledge</Button>}</article>)}</div></>}</section>;
 };
 
 const OperationsOverview = ({ channels, content }: { channels: ChannelResponse[]; content: ContentItemSummary[] }): ReactElement => {

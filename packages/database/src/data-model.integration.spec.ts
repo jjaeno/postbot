@@ -8,6 +8,9 @@ const prisma = new PrismaClient({
 
 const cleanDatabase = async (): Promise<void> => {
   const operations = [
+    prisma.notification.deleteMany(),
+    prisma.auditLog.deleteMany(),
+    prisma.budgetHistory.deleteMany(),
     prisma.experimentAssignment.deleteMany(),
     prisma.automationEvent.deleteMany(),
     prisma.automationCostReservation.deleteMany(),

@@ -615,6 +615,14 @@ export const ExperimentResponseSchema = z.object({ id: z.string(), channelId: z.
 export type OptimizationSettings = z.infer<typeof OptimizationSettingsSchema>;
 export type OptimizationSuggestionResponse = z.infer<typeof OptimizationSuggestionResponseSchema>;
 export type ExperimentResponse = z.infer<typeof ExperimentResponseSchema>;
+
+export const CostReportQuerySchema = z.object({ periodStart: z.string().datetime(), periodEnd: z.string().datetime(), channelId: z.string().min(1).optional(), provider: z.string().min(1).max(80).optional() }).refine((value) => value.periodStart < value.periodEnd, { message: "periodStart must precede periodEnd" });
+export const CostReportResponseSchema = z.object({ currency: z.string(), periodStart: z.string().datetime(), periodEnd: z.string().datetime(), estimated: z.number(), actual: z.number(), credit: z.number(), reconciled: z.boolean(), discrepancy: z.number(), byProvider: z.array(z.object({ provider: z.string(), estimated: z.number(), actual: z.number(), credit: z.number() })) });
+export const NotificationResponseSchema = z.object({ id: z.string(), eventKey: z.string(), severity: z.enum(["INFO", "WARNING", "CRITICAL"]), payload: z.unknown(), acknowledgedAt: z.string().datetime().nullable(), createdAt: z.string().datetime() });
+export const AuditLogResponseSchema = z.object({ id: z.string(), action: z.string(), targetType: z.string(), targetId: z.string().nullable(), metadata: z.unknown().nullable(), createdAt: z.string().datetime() });
+export type CostReportResponse = z.infer<typeof CostReportResponseSchema>;
+export type NotificationResponse = z.infer<typeof NotificationResponseSchema>;
+export type AuditLogResponse = z.infer<typeof AuditLogResponseSchema>;
 export type FactSourceLink = z.infer<typeof FactSourceLinkSchema>;
 export type GeneratedMetadata = z.infer<typeof GeneratedMetadataSchema>;
 export type GeneratedScript = z.infer<typeof GeneratedScriptSchema>;

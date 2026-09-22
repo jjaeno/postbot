@@ -25,7 +25,7 @@ export class AutomationController {
 
   @Post("budgets")
   setBudget(@Req() req: AuthenticatedRequest, @Body() body: unknown) {
-    return this.automation.setBudget(req.auth.workspaceId, body);
+    return this.automation.setBudget(req.auth.workspaceId, req.auth.userId, body);
   }
 
   @Post("switches")

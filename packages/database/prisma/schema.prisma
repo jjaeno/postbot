@@ -200,6 +200,12 @@ enum AnalyticsMetricStatus {
   PARTIAL
 }
 
+enum NotificationSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
 model User {
   id          String       @id @default(cuid())
   email       String       @unique @db.VarChar(320)
@@ -255,6 +261,9 @@ model Workspace {
   oauthStates      OAuthConnectionState[]
   automationBudgets AutomationBudget[]
   automationSwitches AutomationSwitch[]
+  notifications     Notification[]
+  auditLogs         AuditLog[]
+  budgetHistories   BudgetHistory[]
 
   @@index([ownerId])
   @@map("workspaces")
@@ -335,6 +344,7 @@ model Channel {
   automationRuns          AutomationRun[]
   automationBudgets       AutomationBudget[]
   analyticsSyncs          AnalyticsSync[]
+  notifications           Notification[]
 
   @@unique([workspaceId, slug])
   @@index([workspaceId, status])
@@ -765,9 +775,61 @@ model AutomationBudget {
   updatedAt       DateTime @updatedAt @db.DateTime(3)
   workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   channel         Channel? @relation(fields: [channelId], references: [id], onDelete: Restrict)
+  histories       BudgetHistory[]
 
   @@unique([workspaceId, channelId])
   @@map("automation_budgets")
+}
+
+model BudgetHistory {
+  id                 String   @id @default(cuid())
+  automationBudgetId String
+  workspaceId        String
+  channelId          String?
+  changedByUserId    String?
+  before             Json?
+  after              Json
+  createdAt          DateTime @default(now()) @db.DateTime(3)
+  automationBudget   AutomationBudget @relation(fields: [automationBudgetId], references: [id], onDelete: Restrict)
+  workspace          Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+
+  @@index([workspaceId, createdAt])
+  @@map("budget_histories")
+}
+
+model Notification {
+  id                 String               @id @default(cuid())
+  workspaceId        String
+  channelId          String?
+  notificationKey    String               @unique @db.VarChar(191)
+  eventKey           String               @db.VarChar(120)
+  severity           NotificationSeverity @default(INFO)
+  payload            Json
+  acknowledgedAt     DateTime?            @db.DateTime(3)
+  acknowledgedByUserId String?            @db.VarChar(191)
+  createdAt          DateTime             @default(now()) @db.DateTime(3)
+  workspace          Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  channel            Channel?             @relation(fields: [channelId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, acknowledgedAt, createdAt])
+  @@index([workspaceId, eventKey, createdAt])
+  @@map("notifications")
+}
+
+model AuditLog {
+  id          String    @id @default(cuid())
+  workspaceId String
+  userId      String?   @db.VarChar(191)
+  action      String    @db.VarChar(120)
+  targetType  String    @db.VarChar(80)
+  targetId    String?   @db.VarChar(191)
+  metadata    Json?
+  createdAt   DateTime  @default(now()) @db.DateTime(3)
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+
+  @@index([workspaceId, createdAt])
+  @@index([workspaceId, action, createdAt])
+  @@map("audit_logs")
 }
 
 model AutomationCostReservation {

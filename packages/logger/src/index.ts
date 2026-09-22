@@ -13,7 +13,12 @@ export const createLogger = (name: string) =>
         "accessToken",
         "refreshToken",
         "apiKey",
-        "password"
+        "password",
+        "encryptedAccessToken",
+        "encryptedRefreshToken",
+        "encryptedCodeVerifier",
+        "providerResponse",
+        "req.body"
       ],
       censor: "[REDACTED]"
     }

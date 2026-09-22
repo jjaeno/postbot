@@ -47,15 +47,20 @@ export const tiktokPublishScope = "video.publish";
 
 export type VideoUploadInput = { title: string; description: string; privacyStatus: "public" | "unlisted" | "private"; publishAt: string | null; video: Uint8Array; idempotencyKey: string };
 export type PublishedVideo = { externalVideoId: string; url: string; publishedAt: string | null; status: "uploaded" | "scheduled" | "published" };
-export interface VideoPublisher { upload(input: VideoUploadInput, accessToken: string): Promise<PublishedVideo>; }
-export interface SocialVideoPublisher extends PublisherProvider, VideoPublisher { validate(input: VideoUploadInput): Promise<void>; getPublicationStatus(externalVideoId: string, accessToken: string): Promise<PublishedVideo>; }
-export const decryptOAuthToken = (cipherText: string, cipher: string, encryptionKey: string): string => {
+export interface VideoPublisher { upload(input: VideoUploadInput, accessToken?: string): Promise<PublishedVideo>; }
+export interface SocialVideoPublisher extends PublisherProvider, VideoPublisher { validate(input: VideoUploadInput): Promise<void>; getPublicationStatus(externalVideoId: string, accessToken?: string): Promise<PublishedVideo>; }
+export const decryptOAuthToken = (cipherText: string, cipher: string, encryptionKey: string, previousKeys: readonly string[] = []): string => {
   if (cipher !== "aes-256-gcm") throw new Error("Unsupported OAuth token cipher.");
   const [iv, tag, encrypted] = cipherText.split(".");
   if (!iv || !tag || !encrypted) throw new Error("Invalid encrypted OAuth token payload.");
-  const decipher = createDecipheriv("aes-256-gcm", createHash("sha256").update(encryptionKey).digest(), Buffer.from(iv, "base64url"));
-  decipher.setAuthTag(Buffer.from(tag, "base64url"));
-  return Buffer.concat([decipher.update(Buffer.from(encrypted, "base64url")), decipher.final()]).toString("utf8");
+  for (const key of [encryptionKey, ...previousKeys]) {
+    try {
+      const decipher = createDecipheriv("aes-256-gcm", createHash("sha256").update(key).digest(), Buffer.from(iv, "base64url"));
+      decipher.setAuthTag(Buffer.from(tag, "base64url"));
+      return Buffer.concat([decipher.update(Buffer.from(encrypted, "base64url")), decipher.final()]).toString("utf8");
+    } catch { /* Try the next retained key. */ }
+  }
+  throw new Error("Unable to decrypt OAuth token with configured keys.");
 };
 
 export class OAuthScopeError extends Error {
@@ -247,9 +252,9 @@ class FakeSocialPublisher implements SocialVideoPublisher {
   exchangeCode(): Promise<OAuthTokenSet> { return Promise.resolve({ accessToken: `fake-${this.capabilities.platform}-access-token`, refreshToken: `fake-${this.capabilities.platform}-refresh-token`, expiresAt: new Date(Date.now() + 3_600_000), scopes: this.capabilities.requiredScopes }); }
   getAccountProfile(): Promise<PublisherAccountProfile> { return Promise.resolve({ externalAccountId: `fake-${this.capabilities.platform}-account`, handle: `@postbot-${this.capabilities.platform}`, displayName: `Postbot Fake ${this.capabilities.platform}` }); }
   refreshAccessToken(refreshToken: string): Promise<OAuthTokenSet> { return Promise.resolve({ accessToken: `fake-${this.capabilities.platform}-refreshed-token`, refreshToken, expiresAt: new Date(Date.now() + 3_600_000), scopes: this.capabilities.requiredScopes }); }
-  async validate(input: VideoUploadInput): Promise<void> { if (!input.title || input.video.byteLength === 0) throw new Error("Invalid social video upload."); }
+  validate(input: VideoUploadInput): Promise<void> { if (!input.title || input.video.byteLength === 0) return Promise.reject(new Error("Invalid social video upload.")); return Promise.resolve(); }
   async upload(input: VideoUploadInput): Promise<PublishedVideo> { await this.validate(input); const id = `fake-${this.capabilities.platform}-${input.idempotencyKey.slice(0, 24)}`; return { externalVideoId: id, url: `${this.baseUrl}/${id}`, publishedAt: input.publishAt, status: input.publishAt ? "scheduled" : "published" }; }
-  async getPublicationStatus(externalVideoId: string): Promise<PublishedVideo> { return { externalVideoId, url: `${this.baseUrl}/${externalVideoId}`, publishedAt: null, status: "published" }; }
+  getPublicationStatus(externalVideoId: string, accessToken?: string): Promise<PublishedVideo> { void accessToken; return Promise.resolve({ externalVideoId, url: `${this.baseUrl}/${externalVideoId}`, publishedAt: null, status: "published" }); }
 }
 export class FakeInstagramPublisherProvider extends FakeSocialPublisher { constructor() { super({ provider: "fake", platform: "instagram", requiredScopes: [instagramPublishScope] }, "https://www.instagram.com/reel"); } }
 export class FakeTikTokPublisherProvider extends FakeSocialPublisher { constructor() { super({ provider: "fake", platform: "tiktok", requiredScopes: [tiktokPublishScope] }, "https://www.tiktok.com/@postbot/video"); } }

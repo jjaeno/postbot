@@ -1,6 +1,7 @@
 import { Module } from "@nestjs/common";
 import { DatabaseModule } from "../database/database.module.js";
 import { OAuthCryptoService } from "../oauth/oauth-crypto.service.js";
+import { OperationsModule } from "../operations/operations.module.js";
 import { PlatformAccountsController } from "./platform-accounts.controller.js";
 import { PLATFORM_ACCOUNTS_REPOSITORY } from "./platform-accounts.repository.js";
 import { PlatformAccountsService } from "./platform-accounts.service.js";
@@ -8,7 +9,7 @@ import { PrismaPlatformAccountsRepository } from "./prisma-platform-accounts.rep
 import { PublisherProviderFactory } from "./publisher-provider.factory.js";
 
 @Module({
-  imports: [DatabaseModule],
+  imports: [DatabaseModule, OperationsModule],
   controllers: [PlatformAccountsController],
   providers: [
     OAuthCryptoService,

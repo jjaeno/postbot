@@ -3,6 +3,7 @@ import { AutomationBudgetRequestSchema, AutomationControlRequestSchema, Automati
 import { Prisma, type PrismaClient } from "@postbot/database";
 import { JobsService } from "../jobs/jobs.service.js";
 import { evaluateBudget, isCostStage } from "./automation-safety.js";
+import { OperationsService } from "../operations/operations.service.js";
 
 export const automationStages = ["COLLECT", "SCRIPT", "ASSET", "TTS", "RENDER", "POLICY", "PUBLISH"] as const satisfies readonly AutomationStage[];
 type Stage = (typeof automationStages)[number];
@@ -13,7 +14,7 @@ const isTerminal = (status: string): boolean => ["SUCCEEDED", "FAILED", "CANCELL
 export class AutomationService implements OnModuleInit, OnModuleDestroy {
   private scheduler: NodeJS.Timeout | null = null;
 
-  constructor(@Inject("PRISMA_CLIENT") private readonly prisma: PrismaClient, private readonly jobs: JobsService) {}
+  constructor(@Inject("PRISMA_CLIENT") private readonly prisma: PrismaClient, private readonly jobs: JobsService, private readonly operations: OperationsService) {}
 
   onModuleInit(): void {
     this.scheduler = setInterval(() => void this.scheduleDueRuns(), 60_000);
@@ -55,7 +56,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     return runs.map((run) => this.toResponse(run));
   }
 
-  async setBudget(workspaceId: string, raw: unknown) {
+  async setBudget(workspaceId: string, userId: string, raw: unknown) {
     const input = AutomationBudgetRequestSchema.parse(raw);
     if (input.channelId) {
       const channel = await this.prisma.channel.findFirst({ where: { id: input.channelId, workspaceId }, select: { id: true } });
@@ -63,7 +64,13 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     }
     const existing = await this.prisma.automationBudget.findFirst({ where: { workspaceId, channelId: input.channelId } });
     const data = { currency: input.currency.toUpperCase(), dailySoftLimit: input.dailySoftLimit, dailyHardLimit: input.dailyHardLimit, monthlySoftLimit: input.monthlySoftLimit, monthlyHardLimit: input.monthlyHardLimit };
-    return existing ? this.prisma.automationBudget.update({ where: { id: existing.id }, data }) : this.prisma.automationBudget.create({ data: { workspaceId, channelId: input.channelId, ...data } });
+    const budget = await this.prisma.$transaction(async (tx) => {
+      const saved = existing ? await tx.automationBudget.update({ where: { id: existing.id }, data }) : await tx.automationBudget.create({ data: { workspaceId, channelId: input.channelId, ...data } });
+      await tx.budgetHistory.create({ data: { automationBudgetId: saved.id, workspaceId, channelId: input.channelId, changedByUserId: userId, before: existing ? { currency: existing.currency, dailySoftLimit: existing.dailySoftLimit?.toString() ?? null, dailyHardLimit: existing.dailyHardLimit?.toString() ?? null, monthlySoftLimit: existing.monthlySoftLimit?.toString() ?? null, monthlyHardLimit: existing.monthlyHardLimit?.toString() ?? null } : undefined, after: { currency: saved.currency, dailySoftLimit: saved.dailySoftLimit?.toString() ?? null, dailyHardLimit: saved.dailyHardLimit?.toString() ?? null, monthlySoftLimit: saved.monthlySoftLimit?.toString() ?? null, monthlyHardLimit: saved.monthlyHardLimit?.toString() ?? null } } });
+      return saved;
+    });
+    await this.operations.audit(workspaceId, userId, "budget.update", "automation_budget", budget.id, { channelId: input.channelId ?? null });
+    return budget;
   }
 
   async setSwitch(workspaceId: string, raw: unknown) {
@@ -135,7 +142,10 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
       await tx.automationRun.update({ where: { id: runId }, data: { budgetReserved: { increment: new Prisma.Decimal(estimate.toFixed(6)) } } });
       return true;
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-    if (!result) await this.holdStep(runId, stage, "BUDGET_HARD_LIMIT");
+    if (!result) {
+      await this.holdStep(runId, stage, "BUDGET_HARD_LIMIT");
+      await this.operations.notify(workspaceId, { eventKey: "budget.hard_limit", severity: "CRITICAL", channelId, cooldownMinutes: 30, payload: { automationRunId: runId, stage } });
+    }
     return result;
   }
 

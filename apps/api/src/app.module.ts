@@ -16,6 +16,7 @@ import { PublishingModule } from "./publishing/publishing.module.js";
 import { AutomationModule } from "./automation/automation.module.js";
 import { AnalyticsModule } from "./analytics/analytics.module.js";
 import { OptimizationModule } from "./optimization/optimization.module.js";
+import { OperationsModule } from "./operations/operations.module.js";
 
 @Module({
   imports: [
@@ -37,7 +38,8 @@ import { OptimizationModule } from "./optimization/optimization.module.js";
     PublishingModule,
     AutomationModule,
     AnalyticsModule,
-    OptimizationModule
+    OptimizationModule,
+    OperationsModule
   ],
   controllers: [AppController],
   providers: [

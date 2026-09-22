@@ -9,11 +9,12 @@ import type {
 import { AccessTokenGuard } from "../auth/access-token.guard.js";
 import type { AuthenticatedRequest } from "../auth/request-types.js";
 import { PlatformAccountsService } from "./platform-accounts.service.js";
+import { OperationsService } from "../operations/operations.service.js";
 
 @ApiTags("platform-accounts")
 @Controller("platform-accounts")
 export class PlatformAccountsController {
-  constructor(@Inject(PlatformAccountsService) private readonly accounts: PlatformAccountsService) {}
+  constructor(@Inject(PlatformAccountsService) private readonly accounts: PlatformAccountsService, private readonly operations: OperationsService) {}
 
   @Get()
   @UseGuards(AccessTokenGuard)
@@ -42,6 +43,6 @@ export class PlatformAccountsController {
     @Req() req: AuthenticatedRequest,
     @Param("platformAccountId") platformAccountId: string
   ): Promise<DisconnectPlatformAccountResponse> {
-    return this.accounts.disconnect(req.auth.workspaceId, platformAccountId);
+    return this.accounts.disconnect(req.auth.workspaceId, platformAccountId).then(async (result) => { await this.operations.audit(req.auth.workspaceId, req.auth.userId, "oauth.disconnect", "platform_account", platformAccountId); return result; });
   }
 }

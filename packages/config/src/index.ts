@@ -22,6 +22,7 @@ const EnvSchema = z.object({
   JWT_REFRESH_SECRET: z.string().min(16).default("local-refresh-secret-change-me"),
   OAUTH_ENCRYPTION_KEY: z.string().min(16).default("local-oauth-encryption-key-change-me"),
   OAUTH_ENCRYPTION_KEY_VERSION: z.coerce.number().int().positive().default(1),
+  OAUTH_ENCRYPTION_PREVIOUS_KEYS: z.string().default(""),
   YOUTUBE_OAUTH_PROVIDER: z.enum(["fake", "google"]).default("fake"),
   YOUTUBE_CLIENT_ID: z.string().default(""),
   YOUTUBE_CLIENT_SECRET: z.string().default(""),

@@ -2,6 +2,7 @@ import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundExce
 import { Prisma, type PrismaClient } from "@postbot/database";
 import { AssignExperimentRequestSchema, CreateExperimentRequestSchema, ExperimentActionRequestSchema, ExperimentResponseSchema, GenerateSuggestionsRequestSchema, OptimizationSettingsSchema, OptimizationSuggestionResponseSchema, SuggestionActionRequestSchema, UpdateOptimizationSettingsRequestSchema, type ExperimentResponse, type OptimizationSettings, type OptimizationSuggestionResponse } from "@postbot/contracts";
 import { createHash } from "node:crypto";
+import { OperationsService } from "../operations/operations.service.js";
 
 const MIN_SAMPLE_SIZE = 4;
 const RULE_VERSION = "optimization-rules-v1";
@@ -19,18 +20,19 @@ const isProtected = (content: { title: string; topicKey: string }, settings: Opt
 
 @Injectable()
 export class OptimizationService {
-  constructor(@Inject("PRISMA_CLIENT") private readonly prisma: PrismaClient) {}
+  constructor(@Inject("PRISMA_CLIENT") private readonly prisma: PrismaClient, private readonly operations: OperationsService) {}
 
   async getSettings(workspaceId: string, channelId: string): Promise<OptimizationSettings> {
     const channel = await this.channel(workspaceId, channelId);
     return OptimizationSettingsSchema.parse(asRecord(channel.optimizationSettings));
   }
 
-  async updateSettings(workspaceId: string, role: string, raw: unknown): Promise<OptimizationSettings> {
+  async updateSettings(workspaceId: string, role: string, userId: string, raw: unknown): Promise<OptimizationSettings> {
     this.requireOwner(role);
     const input = UpdateOptimizationSettingsRequestSchema.parse(raw);
     await this.channel(workspaceId, input.channelId);
     await this.prisma.channel.update({ where: { id: input.channelId }, data: { optimizationSettings: input.settings } });
+    await this.operations.audit(workspaceId, userId, "optimization.settings.update", "channel", input.channelId);
     return input.settings;
   }
 
@@ -88,7 +90,7 @@ export class OptimizationService {
     return suggestions.map((suggestion) => this.suggestionResponse(suggestion));
   }
 
-  async suggestionAction(workspaceId: string, role: string, suggestionId: string, raw: unknown): Promise<OptimizationSuggestionResponse> {
+  async suggestionAction(workspaceId: string, role: string, userId: string, suggestionId: string, raw: unknown): Promise<OptimizationSuggestionResponse> {
     this.requireOwner(role);
     const input = SuggestionActionRequestSchema.parse(raw);
     const suggestion = await this.prisma.optimizationSuggestion.findFirst({ where: { id: suggestionId, channel: { workspaceId } } });
@@ -98,11 +100,13 @@ export class OptimizationService {
     if (input.action === "reject" || input.action === "expire") {
       const status = input.action === "reject" ? "REJECTED" : "EXPIRED";
       const updated = await this.prisma.optimizationSuggestion.update({ where: { id: suggestion.id }, data: { status, decidedAt: new Date(), risk: { ...asRecord(suggestion.risk), decisionReason: input.reason ?? null } } });
+      await this.operations.audit(workspaceId, userId, `optimization.suggestion.${input.action}`, "optimization_suggestion", updated.id);
       return this.suggestionResponse(updated);
     }
-    if (input.action === "approve") return this.suggestionResponse(await this.prisma.optimizationSuggestion.update({ where: { id: suggestion.id }, data: { status: "APPROVED", decidedAt: new Date() } }));
+    if (input.action === "approve") { const updated = await this.prisma.optimizationSuggestion.update({ where: { id: suggestion.id }, data: { status: "APPROVED", decidedAt: new Date() } }); await this.operations.audit(workspaceId, userId, "optimization.suggestion.approve", "optimization_suggestion", updated.id); return this.suggestionResponse(updated); }
     if (suggestion.status !== "APPROVED") throw new ConflictException("SUGGESTION_REQUIRES_APPROVAL");
     const applied = await this.applyStrategy(suggestion);
+    await this.operations.audit(workspaceId, userId, "optimization.suggestion.apply", "optimization_suggestion", applied.id);
     return this.suggestionResponse(applied);
   }
 
@@ -141,13 +145,14 @@ export class OptimizationService {
     return { arm: assignment.arm === "control" ? "control" : "variant", assignmentKey: assignment.assignmentKey };
   }
 
-  async rollback(workspaceId: string, role: string, channelId: string, version: number): Promise<{ id: string; version: number }> {
+  async rollback(workspaceId: string, role: string, userId: string, channelId: string, version: number): Promise<{ id: string; version: number }> {
     this.requireOwner(role);
     await this.channel(workspaceId, channelId);
     const previous = await this.prisma.strategyVersion.findUnique({ where: { channelId_version: { channelId, version } } });
     if (!previous) throw new NotFoundException("STRATEGY_VERSION_NOT_FOUND");
     const next = await this.prisma.strategyVersion.aggregate({ where: { channelId }, _max: { version: true } });
     const restored = await this.prisma.strategyVersion.create({ data: { channelId, version: (next._max.version ?? 0) + 1, name: `Rollback of ${previous.name}`, strategy: toInputJson(previous.strategy), promptVersion: previous.promptVersion, appliedAt: new Date() } });
+    await this.operations.audit(workspaceId, userId, "strategy.rollback", "strategy_version", restored.id, { restoredFromVersion: version });
     return { id: restored.id, version: restored.version };
   }
 
