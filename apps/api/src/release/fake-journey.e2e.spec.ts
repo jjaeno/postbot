@@ -182,21 +182,22 @@ describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, 
     // Rendering time varies significantly on cold CI hosts. Give the pipeline a
     // rolling set of near-future slots so a completed render never rolls a
     // single missed weekly slot into the following week.
-    const scheduleRules = Array.from({ length: 12 }, (_, index) => {
+    const platforms = ["YOUTUBE", "INSTAGRAM", "TIKTOK"] as const;
+    const scheduleRules = platforms.flatMap((platform) => Array.from({ length: 7 }, (_, index) => {
       const scheduleAt = new Date(Date.now() + (index + 2) * 60_000);
       return {
-        platform: "YOUTUBE" as const,
+        platform,
         dayOfWeek: scheduleAt.getUTCDay(),
         timeOfDayLocal: `${String(scheduleAt.getUTCHours()).padStart(2, "0")}:${String(scheduleAt.getUTCMinutes()).padStart(2, "0")}`,
         timezone: "UTC",
         maxPosts: 1
       };
-    });
+    }));
     const channel = ChannelResponseSchema.parse(await session.json("/channels", {
-      name: `${mode} ${suffix}`, language: "en", targetAudience: "Science readers", topic: "science", platforms: ["YOUTUBE"],
+      name: `${mode} ${suffix}`, language: "en", targetAudience: "Science readers", topic: "science", platforms,
       collectionRule: { keywords: ["rocket"], recencyHours: 24, collectionFrequencyMinutes: 1440 },
       template: { name: mode, tone: "clear", voiceProfile: "neutral", subtitleStyle: {}, visualStyle: {}, aiStockRatio: 1 },
-      outputProfiles: [{ platform: "YOUTUBE", minDurationSeconds: 15, maxDurationSeconds: 60, hookStyle: "question", captionStyle: "simple", metadataRules: {} }],
+      outputProfiles: platforms.map((platform) => ({ platform, minDurationSeconds: 15, maxDurationSeconds: 60, hookStyle: "question", captionStyle: "simple", metadataRules: {} })),
       scheduleRules,
       automation: { mode, minInventoryCount: 1, dailyPublishLimit: 1, errorAction: { onPolicyFailure: "hold", onAssetLicenseUnknown: "hold", onConsecutiveFailures: "pause_channel" } }
     }));
@@ -210,9 +211,11 @@ describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, 
       }
       return null;
     })();
-    const oauth = StartOAuthConnectionResponseSchema.parse(await session.json("/platform-accounts/youtube/connect", { channelId: channel.id }));
-    const callbackUrl = new URL(oauth.authorizationUrl);
-    OAuthCallbackResultSchema.parse(await session.json(`${callbackUrl.pathname}${callbackUrl.search}`));
+    for (const platform of platforms) {
+      const oauth = StartOAuthConnectionResponseSchema.parse(await session.json(`/platform-accounts/${platform.toLowerCase()}/connect`, { channelId: channel.id }));
+      const callbackUrl = new URL(oauth.authorizationUrl);
+      OAuthCallbackResultSchema.parse(await session.json(`${callbackUrl.pathname}${callbackUrl.search}`));
+    }
     await session.json("/automation/budgets", { channelId: channel.id, currency: "USD", dailySoftLimit: 50, dailyHardLimit: 100, monthlySoftLimit: 500, monthlyHardLimit: 1_000 });
     const input = { channelId: channel.id, idempotencyKey: `automation:${mode.toLowerCase()}:${suffix}`, estimatedCostsUsd: { SCRIPT: 0.01, ASSET: 0.01, TTS: 0.01, RENDER: 0.01 } };
     const started = AutomationRunResponseSchema.parse(await session.json("/automation/runs", input));
@@ -220,7 +223,7 @@ describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, 
 
     if (mode === "APPROVAL") {
       const held = await session.automationRun(started.id, (run) => run.status === "PAUSED" && run.pausedReason === "AWAITING_APPROVAL");
-      const scriptJobId = held.steps.find((step) => step.stage === "SCRIPT")?.productionJobId;
+      const scriptJobId = held.steps.find((step) => step.stage === "SCRIPT" && step.platform === "YOUTUBE")?.productionJobId;
       if (!scriptJobId) throw new Error("Automation SCRIPT job missing");
       const scriptJob = await prisma.productionJob.findUniqueOrThrow({ where: { id: scriptJobId } });
       const result = z.object({ contentItemId: z.string() }).parse(scriptJob.result);
@@ -230,13 +233,21 @@ describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, 
 
     const completed = await session.automationRun(started.id, (run) => run.status === "SUCCEEDED");
     expect(completed.steps.every((step) => step.status === "SUCCEEDED")).toBe(true);
-    const publishJobId = completed.steps.find((step) => step.stage === "PUBLISH")?.productionJobId;
+    expect(completed.steps).toHaveLength(1 + platforms.length * 6);
+    const publishJobId = completed.steps.find((step) => step.stage === "PUBLISH" && step.platform === "YOUTUBE")?.productionJobId;
     if (!publishJobId) throw new Error("Automation PUBLISH job missing");
     const publishJob = await prisma.productionJob.findUniqueOrThrow({ where: { id: publishJobId } });
     const contentItemId = publishJob.contentItemId;
     if (!contentItemId) throw new Error("Automation content item missing");
-    expect(await prisma.platformPost.count({ where: { publishPlan: { contentItemId } } })).toBe(1);
-    expect(await prisma.analyticsSync.count({ where: { channelId: channel.id, idempotencyKey: `automation:${started.id}:analytics`, status: "SUCCEEDED" } })).toBe(1);
+    expect(await prisma.scriptVersion.count({ where: { contentItemId, platform: { in: [...platforms] } } })).toBe(3);
+    expect(await prisma.sceneVersion.count({ where: { contentItemId, platform: { in: [...platforms] } } })).toBe(3);
+    expect(await prisma.publishPlan.count({ where: { contentItemId, platform: { in: [...platforms] } } })).toBe(3);
+    const posts = await prisma.platformPost.findMany({ where: { publishPlan: { contentItemId } } });
+    expect(posts).toHaveLength(3);
+    expect(new Set(posts.map((post) => post.externalPostId)).size).toBe(3);
+    expect(await prisma.analyticsSync.count({ where: { channelId: channel.id, idempotencyKey: { startsWith: `automation:${started.id}:` }, status: "SUCCEEDED" } })).toBe(3);
+    expect(AutomationRunResponseSchema.parse(await session.json("/automation/runs", input)).id).toBe(started.id);
+    expect(await prisma.platformPost.count({ where: { publishPlan: { contentItemId } } })).toBe(3);
     const period = { periodStart: new Date(Date.now() - 86_400_000).toISOString(), periodEnd: new Date(Date.now() + 86_400_000).toISOString() };
     const suggestion = OptimizationSuggestionResponseSchema.parse(await session.json("/optimization/suggestions/generate", { channelId: channel.id, platform: "YOUTUBE", metric: "views", ...period, idempotencyKey: `optimization:${started.id}` }));
     expect(suggestion.sampleSize).toBeGreaterThanOrEqual(1);

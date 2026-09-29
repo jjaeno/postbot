@@ -23,8 +23,8 @@ describe.skipIf(!enabled)("automation payload safety", () => {
       await prisma.automationStep.create({ data: { automationRunId: run.id, stage: type, productionJobId: job.id } });
       await expect(new DeterministicJobProcessor(prisma).process({ id: job.id, type, queueName, payload, runAfter: null })).rejects.toThrow("AUTOMATION_STAGE_NOT_CONNECTED");
       expect(await prisma.productionJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ status: "FAILED", errorCode: "AUTOMATION_STAGE_NOT_CONNECTED" });
-      expect(await prisma.automationStep.findUniqueOrThrow({ where: { automationRunId_stage: { automationRunId: run.id, stage: type } } })).toMatchObject({ status: "FAILED" });
-      expect(await prisma.automationRun.findUniqueOrThrow({ where: { id: run.id } })).toMatchObject({ status: "FAILED" });
+      expect(await prisma.automationStep.findFirstOrThrow({ where: { automationRunId: run.id, stage: type } })).toMatchObject({ status: "FAILED" });
+      expect(await prisma.automationRun.findUniqueOrThrow({ where: { id: run.id } })).toMatchObject({ status: "RUNNING" });
       expect(await prisma.providerUsage.count({ where: { productionJobId: job.id } })).toBe(0);
     }
   );
