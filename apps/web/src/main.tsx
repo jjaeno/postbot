@@ -1083,12 +1083,12 @@ const ChannelWizard = ({
             이전
           </Button>
           {step === lastStep ? (
-            <Button className="gap-2" data-testid="wizard-create" disabled={mutation.isPending} type="submit">
+            <Button className="gap-2" data-testid="wizard-create" disabled={mutation.isPending} key="create" type="submit">
               <CheckCircle2 aria-hidden="true" className="h-4 w-4" />
               생성
             </Button>
           ) : (
-            <Button className="gap-2" data-testid="wizard-next" onClick={() => setStep((current) => current + 1)} type="button">
+            <Button className="gap-2" data-testid="wizard-next" key="next" onClick={() => setStep((current) => current + 1)} type="button">
               다음
               <ChevronRight aria-hidden="true" className="h-4 w-4" />
             </Button>

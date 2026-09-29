@@ -237,10 +237,7 @@ test("creates and edits a channel through the eight-step wizard", async ({ page 
     await page.getByTestId("wizard-next").click();
   }
 
-  const createButton = page.getByTestId("wizard-create");
-  if ((await createButton.count()) > 0) {
-    await createButton.click();
-  }
+  await page.getByTestId("wizard-create").click();
 
   await expect(page.getByTestId("channel-card-channel-1")).toContainText("Science Today");
   await expect(page.getByTestId("channel-card-channel-1")).toContainText("연결 예정");
@@ -301,10 +298,7 @@ test("creates a full-auto channel through the fake API", async ({ page }) => {
   await page.locator('select[name="automationMode"]').selectOption("FULL_AUTO");
   await page.getByTestId("wizard-next").click();
 
-  const createButton = page.getByTestId("wizard-create");
-  if ((await createButton.count()) > 0) {
-    await createButton.click();
-  }
+  await page.getByTestId("wizard-create").click();
 
   await expect(page.getByTestId("channel-card-channel-1")).toContainText("Auto Science");
   await expect(page.getByTestId("channel-card-channel-1")).toContainText("완전 자동형");
