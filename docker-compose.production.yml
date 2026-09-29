@@ -1,0 +1,66 @@
+services:
+  migrate:
+    build:
+      context: .
+      target: build
+    user: node
+    env_file: .env
+    command: [./packages/database/node_modules/.bin/prisma, migrate, deploy, --schema, packages/database/prisma/schema.prisma]
+    restart: "no"
+  api:
+    build:
+      context: .
+      args: { APP: api }
+    env_file: .env
+    command: node dist/main.js
+    ports: ["3000:3000"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'node -e "fetch(''http://127.0.0.1:3000/ready'').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"'
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+  worker:
+    build:
+      context: .
+      args: { APP: worker }
+    env_file: .env
+    command: node dist/main.js
+    environment:
+      WORKER_QUEUES: collect,script,asset,tts,policy,publish,analytics
+      MAINTENANCE_WORKER_ENABLED: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"process.exit(0)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  renderer:
+    build:
+      context: .
+      args: { APP: renderer }
+    env_file: .env
+    environment:
+      WORKER_QUEUES: render
+      MAINTENANCE_WORKER_ENABLED: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "ffmpeg -version >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  web:
+    build:
+      context: .
+      args: { APP: web }
+    env_file: .env
+    command: node scripts/serve.mjs
+    ports: ["5173:5173"]
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:5173').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5

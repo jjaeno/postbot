@@ -1,0 +1,164 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_browser_e2e:
+        description: Run the browser regression job
+        required: false
+        default: false
+        type: boolean
+      run_renderer_smoke:
+        description: Run the production renderer smoke job
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: postbot-root
+          MYSQL_DATABASE: postbot
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -ppostbot-root"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: mysql://root:postbot-root@127.0.0.1:3306/postbot
+      REDIS_URL: redis://127.0.0.1:6379
+      S3_ENDPOINT: http://127.0.0.1:9000
+      JWT_ACCESS_SECRET: ci-access-secret
+      JWT_REFRESH_SECRET: ci-refresh-secret
+      OAUTH_ENCRYPTION_KEY: ci-oauth-encryption-key
+      LLM_PROVIDER: fake
+      IMAGE_PROVIDER: fake
+      TTS_PROVIDER: fake
+      STORAGE_PROVIDER: fake
+      YOUTUBE_OAUTH_PROVIDER: fake
+      INSTAGRAM_OAUTH_PROVIDER: fake
+      TIKTOK_OAUTH_PROVIDER: fake
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @postbot/database exec prisma generate --schema prisma/schema.prisma
+      - run: pnpm --filter @postbot/database exec prisma migrate deploy --schema prisma/schema.prisma
+      - run: pnpm --filter @postbot/database db:reset:test
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - run: pnpm audit --prod --audit-level=high
+
+  docker-smoke:
+    needs: validate
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: postbot-root
+          MYSQL_DATABASE: postbot
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -ppostbot-root"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval=10s --health-timeout=5s --health-retries=10
+    env:
+      DATABASE_URL: mysql://root:postbot-root@127.0.0.1:3306/postbot
+      REDIS_URL: redis://127.0.0.1:6379
+      JWT_ACCESS_SECRET: ci-access-secret
+      JWT_REFRESH_SECRET: ci-refresh-secret
+      OAUTH_ENCRYPTION_KEY: ci-oauth-encryption-key
+      LLM_PROVIDER: fake
+      IMAGE_PROVIDER: fake
+      TTS_PROVIDER: fake
+      STORAGE_PROVIDER: fake
+      YOUTUBE_OAUTH_PROVIDER: fake
+      INSTAGRAM_OAUTH_PROVIDER: fake
+      TIKTOK_OAUTH_PROVIDER: fake
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @postbot/database exec prisma migrate deploy --schema prisma/schema.prisma
+      - run: docker build --build-arg APP=api -t postbot-api:${{ github.sha }} .
+      - run: docker build --build-arg APP=worker -t postbot-worker:${{ github.sha }} .
+      - run: docker build --build-arg APP=web -t postbot-web:${{ github.sha }} .
+      - run: docker build --build-arg APP=renderer -t postbot-renderer:${{ github.sha }} .
+      - run: >-
+          docker run --detach --name postbot-api --network host
+          --env DATABASE_URL --env REDIS_URL
+          --env JWT_ACCESS_SECRET --env JWT_REFRESH_SECRET --env OAUTH_ENCRYPTION_KEY
+          --env LLM_PROVIDER --env IMAGE_PROVIDER --env TTS_PROVIDER
+          --env STORAGE_PROVIDER
+          --env YOUTUBE_OAUTH_PROVIDER --env INSTAGRAM_OAUTH_PROVIDER --env TIKTOK_OAUTH_PROVIDER
+          postbot-api:${{ github.sha }}
+      - run: curl --fail --retry 10 --retry-connrefused --retry-delay 2 http://127.0.0.1:3000/ready
+      - if: always()
+        run: docker logs postbot-api
+      - if: always()
+        run: docker rm --force postbot-api
+
+  browser-e2e:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @postbot/web exec playwright install --with-deps chromium
+      - run: pnpm --filter @postbot/web e2e
+
+  acceptance:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - run: docker compose -f docker-compose.acceptance.yml build api worker migrate acceptance
+      - run: docker compose -f docker-compose.acceptance.yml up -d --wait api worker
+      - run: docker compose -f docker-compose.acceptance.yml run --rm acceptance
+      - if: always()
+        run: docker compose -f docker-compose.acceptance.yml down
+
+  renderer-smoke:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_renderer_smoke
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: docker build --build-arg APP=renderer -t postbot-renderer-smoke:${{ github.sha }} .
+      - run: docker run --rm --entrypoint node postbot-renderer-smoke:${{ github.sha }} node_modules/@postbot/renderer/scripts/smoke.mjs

@@ -1,0 +1,15 @@
+node_modules
+**/node_modules
+**/dist
+.git
+.turbo
+.env
+.env.*
+**/.env
+**/.env.*
+**/.turbo
+**/coverage
+**/test-results
+tmp
+coverage
+test-results

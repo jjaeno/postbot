@@ -9,19 +9,38 @@ jobs:
   dependency-and-secret-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v4
         with:
           version: 10.34.5
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm audit --prod --audit-level=high
-      - uses: gitleaks/gitleaks-action@v2
-      - uses: aquasecurity/trivy-action@0.33.1
+      - uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: aquasecurity/trivy-action@0.36.0
         with:
           scan-type: fs
           severity: HIGH,CRITICAL
+          exit-code: '1'
+
+  container-scan:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [api, worker, renderer, web]
+    steps:
+      - uses: actions/checkout@v6
+      - run: docker build --build-arg APP=${{ matrix.app }} -t postbot-${{ matrix.app }}:security-${{ github.sha }} .
+      - uses: aquasecurity/trivy-action@0.36.0
+        with:
+          scan-type: image
+          image-ref: postbot-${{ matrix.app }}:security-${{ github.sha }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
           exit-code: '1'
