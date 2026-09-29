@@ -56,11 +56,11 @@ export class RenderProcessor {
     }
     const sceneDocument = SceneDocumentSchema.parse(sceneVersion.sceneDocument);
     const usages = await this.prisma.assetUsage.findMany({
-      where: { contentItemId: input.contentItemId, purpose: { in: ["tts-narration", "bgm", "sfx"] } },
+      where: { contentItemId: input.contentItemId, purpose: { in: ["tts-narration", `tts-narration:${sceneVersion.platform ?? "COMMON"}`, "bgm", "sfx"] } },
       include: { asset: true },
       orderBy: { createdAt: "asc" }
     });
-    const narration = usages.find((usage) => usage.purpose === "tts-narration");
+    const narration = usages.find((usage) => usage.purpose === `tts-narration:${sceneVersion.platform ?? "COMMON"}`) ?? usages.find((usage) => usage.purpose === "tts-narration");
     const background = usages.find((usage) => usage.purpose === "bgm" || usage.purpose === "sfx");
     const captions = narration ? readCaptions(narration.usageSnapshot) : [];
     const expectedDuration = sceneDocument.durationInFrames / sceneDocument.fps;

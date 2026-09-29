@@ -23,13 +23,13 @@ export class AssetPreparationProcessor {
 
   async processAsset(payload: Record<string, unknown>, jobId: string): Promise<Record<string, unknown>> {
     const input = AssetPreparationJobPayloadSchema.parse(payload).assetPreparation;
-    const result = await this.preparation.prepareImage({ channelId: input.channelId, contentItemId: input.contentItemId, key: `images/${jobId}`, prompt: input.prompt, model: this.config.IMAGE_MODEL, idempotencyKey: input.idempotencyKey });
+    const result = await this.preparation.prepareImage({ channelId: input.channelId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose: input.platform ? `scene-image:${input.platform}` : undefined, key: `images/${jobId}`, prompt: input.prompt, model: this.config.IMAGE_MODEL, idempotencyKey: input.idempotencyKey });
     return { ...result, contentItemId: input.contentItemId };
   }
 
   async processTts(payload: Record<string, unknown>, jobId: string): Promise<Record<string, unknown>> {
     const input = TtsPreparationJobPayloadSchema.parse(payload).ttsPreparation;
-    const result = await this.preparation.prepareTts({ channelId: input.channelId, contentItemId: input.contentItemId, key: `audio/${jobId}`, text: input.text, voice: input.voice, model: this.config.TTS_MODEL, idempotencyKey: input.idempotencyKey });
+    const result = await this.preparation.prepareTts({ channelId: input.channelId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose: input.platform ? `tts-narration:${input.platform}` : undefined, key: `audio/${jobId}`, text: input.text, voice: input.voice, model: this.config.TTS_MODEL, idempotencyKey: input.idempotencyKey });
     return result;
   }
 }

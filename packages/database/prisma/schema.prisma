@@ -757,6 +757,8 @@ model AutomationStep {
   id              String               @id @default(cuid())
   automationRunId String
   stage           ProductionJobType
+  platform        Platform?
+  branchKey       String               @default("COMMON") @db.VarChar(16)
   status          AutomationStepStatus @default(PENDING)
   productionJobId String?              @unique
   attemptCount    Int                  @default(0)
@@ -771,8 +773,9 @@ model AutomationStep {
   automationRun   AutomationRun        @relation(fields: [automationRunId], references: [id], onDelete: Restrict)
   productionJob   ProductionJob?       @relation(fields: [productionJobId], references: [id], onDelete: SetNull)
 
-  @@unique([automationRunId, stage])
+  @@unique([automationRunId, stage, branchKey])
   @@index([automationRunId, status])
+  @@index([automationRunId, platform, status])
   @@map("automation_steps")
 }
 

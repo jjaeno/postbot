@@ -18,8 +18,13 @@ export class PolicyProcessor {
   async process(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
     const input = PolicyAutomationJobPayloadSchema.parse(payload).policy;
     const item = await this.prisma.contentItem.findUniqueOrThrow({ where: { id: input.contentItemId }, include: {
-      channel: { include: { contentItems: { where: { id: { not: input.contentItemId } }, include: { scriptVersions: { orderBy: { version: "desc" }, take: 1 } }, take: 50 } } },
-      sourceReferences: true, assetUsages: { include: { asset: { include: { licenses: { orderBy: { checkedAt: "desc" }, take: 1 } } } } }, scriptVersions: { orderBy: { version: "desc" }, take: 1 }
+      channel: { include: { contentItems: { where: { id: { not: input.contentItemId } }, include: { scriptVersions: { where: { platform: input.platform }, orderBy: { version: "desc" }, take: 1 } }, take: 50 } } },
+      sourceReferences: true,
+      assetUsages: {
+        where: { OR: [{ sceneVersion: { platform: input.platform } }, { sceneVersionId: null }] },
+        include: { asset: { include: { licenses: { orderBy: { checkedAt: "desc" }, take: 1 } } } }
+      },
+      scriptVersions: { where: { platform: input.platform }, orderBy: { version: "desc" }, take: 1 }
     } });
     const ruleRecord = await this.prisma.policyRule.findFirstOrThrow({ where: { platform: input.platform, region: input.region, effectiveAt: { lte: new Date() } }, orderBy: [{ effectiveAt: "desc" }, { version: "desc" }] });
     const rule: PolicyRule = {

@@ -504,6 +504,8 @@ export const AssetPreparationJobPayloadSchema = z.object({
   assetPreparation: z.object({
     channelId: z.string().min(1),
     contentItemId: z.string().min(1).nullable().default(null),
+    sceneVersionId: z.string().min(1).nullable().default(null),
+    platform: PlatformSchema.nullable().default(null),
     prompt: z.string().min(1).max(2_000),
     idempotencyKey: z.string().min(8).max(191)
   })
@@ -513,6 +515,8 @@ export const TtsPreparationJobPayloadSchema = z.object({
   ttsPreparation: z.object({
     channelId: z.string().min(1),
     contentItemId: z.string().min(1),
+    sceneVersionId: z.string().min(1).nullable().default(null),
+    platform: PlatformSchema.nullable().default(null),
     text: z.string().min(1).max(10_000),
     voice: z.string().min(1).max(191),
     idempotencyKey: z.string().min(8).max(191)
@@ -529,7 +533,7 @@ export const RenderJobPayloadSchema = z.object({
 });
 
 export const AutomationJobContextSchema = z.object({
-  automation: z.object({ runId: z.string().min(1), stage: z.enum(["COLLECT", "SCRIPT", "ASSET", "TTS", "RENDER", "POLICY", "PUBLISH"]) })
+  automation: z.object({ runId: z.string().min(1), stage: z.enum(["COLLECT", "SCRIPT", "ASSET", "TTS", "RENDER", "POLICY", "PUBLISH"]), platform: PlatformSchema.nullable().default(null) })
 });
 
 export const CollectAutomationJobPayloadSchema = AutomationJobContextSchema.extend({
@@ -608,14 +612,14 @@ export const AutomationRunRequestSchema = z.object({
   idempotencyKey: z.string().min(8).max(191),
   estimatedCostsUsd: z.partialRecord(AutomationStageSchema, z.number().nonnegative().finite()).optional()
 });
-export const AutomationControlRequestSchema = z.object({ action: z.enum(["pause", "resume", "drain", "kill", "retry", "hold", "skip"]), reason: z.string().max(500).optional(), stage: AutomationStageSchema.optional() });
+export const AutomationControlRequestSchema = z.object({ action: z.enum(["pause", "resume", "drain", "kill", "retry", "hold", "skip"]), reason: z.string().max(500).optional(), stage: AutomationStageSchema.optional(), platform: PlatformSchema.optional() });
 export const AutomationRunResponseSchema = z.object({
   id: z.string(), channelId: z.string(), status: AutomationRunStatusSchema, idempotencyKey: z.string(),
   checkpoint: z.record(z.string(), z.unknown()).nullable(), failureCount: z.number().int(),
   pausedReason: z.string().nullable(),
   nextRunAt: z.string().datetime().nullable(), heartbeatAt: z.string().datetime().nullable(),
   lastErrorCode: z.string().nullable(), lastErrorMessage: z.string().nullable(),
-  steps: z.array(z.object({ stage: AutomationStageSchema, status: AutomationStepStatusSchema, attemptCount: z.number().int(), maxAttempts: z.number().int(), productionJobId: z.string().nullable(), errorCode: z.string().nullable(), errorMessage: z.string().nullable() }))
+  steps: z.array(z.object({ stage: AutomationStageSchema, platform: PlatformSchema.nullable(), status: AutomationStepStatusSchema, attemptCount: z.number().int(), maxAttempts: z.number().int(), productionJobId: z.string().nullable(), errorCode: z.string().nullable(), errorMessage: z.string().nullable() }))
 });
 export const AutomationBudgetRequestSchema = z.object({
   channelId: z.string().min(1).nullable().default(null), currency: z.string().length(3).default("USD"),

@@ -12,10 +12,12 @@ export class PublishProcessor {
   async process(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
     const publish = payload.publish;
     if (!publish || typeof publish !== "object" || Array.isArray(publish) || typeof (publish as Record<string, unknown>).publishPlanId !== "string") throw new Error("INVALID_PUBLISH_PAYLOAD");
-    const plan = await this.prisma.publishPlan.findUniqueOrThrow({ where: { id: (publish as Record<string, string>).publishPlanId }, include: { sceneVersion: true, platformAccount: { include: { credential: true } }, platformPost: true, attempts: { orderBy: { attemptNumber: "desc" }, take: 1 }, contentItem: { include: { policyChecks: { orderBy: { checkedAt: "desc" }, take: 1 }, sourceReferences: true, assetUsages: { include: { asset: { include: { licenses: { orderBy: { checkedAt: "desc" }, take: 1 } } } } } } } } });
+    const plan = await this.prisma.publishPlan.findUniqueOrThrow({ where: { id: (publish as Record<string, string>).publishPlanId }, include: { sceneVersion: true, platformAccount: { include: { credential: true } }, platformPost: true, attempts: { orderBy: { attemptNumber: "desc" }, take: 1 }, contentItem: { include: { policyChecks: { orderBy: { checkedAt: "desc" } }, sourceReferences: true, assetUsages: { include: { asset: { include: { licenses: { orderBy: { checkedAt: "desc" }, take: 1 } } } } } } } } });
     if (plan.platformPost) return { externalVideoId: plan.platformPost.externalPostId, url: plan.platformPost.postUrl, duplicate: true };
-    const rightsVerified = plan.contentItem.assetUsages.length > 0 && plan.contentItem.assetUsages.every((usage) => usage.asset.licenses[0]?.status === "VERIFIED" && usage.asset.licenses[0]?.commercialUseAllowed === true);
-    if (plan.status !== "SCHEDULED" || !plan.sceneVersion?.renderManifest || plan.platformAccount.status !== "CONNECTED" || plan.contentItem.policyChecks[0]?.status !== "PASS" || plan.contentItem.sourceReferences.length === 0 || !rightsVerified) throw new Error("PUBLISH_GATE_FAILED");
+    const branchUsages = plan.contentItem.assetUsages.filter((usage) => usage.sceneVersionId === plan.sceneVersionId || usage.sceneVersionId === null);
+    const rightsVerified = branchUsages.length > 0 && branchUsages.every((usage) => usage.asset.licenses[0]?.status === "VERIFIED" && usage.asset.licenses[0]?.commercialUseAllowed === true);
+    const policyCheck = plan.contentItem.policyChecks.find((check) => check.platform === plan.platform);
+    if (plan.status !== "SCHEDULED" || !plan.sceneVersion?.renderManifest || plan.platformAccount.status !== "CONNECTED" || policyCheck?.status !== "PASS" || plan.contentItem.sourceReferences.length === 0 || !rightsVerified) throw new Error("PUBLISH_GATE_FAILED");
     const attemptNumber = (plan.attempts[0]?.attemptNumber ?? 0) + 1;
     const attempt = await this.prisma.publishAttempt.create({ data: { publishPlanId: plan.id, attemptNumber, status: "RUNNING", idempotencyKey: `${plan.idempotencyKey}:attempt:${attemptNumber}`, startedAt: new Date() } });
     await this.prisma.publishPlan.update({ where: { id: plan.id }, data: { status: "PUBLISHING" } });

@@ -1,25 +1,105 @@
 import { ConflictException, Inject, Injectable, NotFoundException, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
-import { AutomationBudgetRequestSchema, AutomationControlRequestSchema, AutomationRunRequestSchema, AutomationRunResponseSchema, AutomationSwitchRequestSchema, type AutomationRunResponse, type AutomationStage } from "@postbot/contracts";
+import {
+  AutomationBudgetRequestSchema,
+  AutomationControlRequestSchema,
+  AutomationRunRequestSchema,
+  AutomationRunResponseSchema,
+  AutomationSwitchRequestSchema,
+  type AutomationRunResponse,
+  type AutomationStage,
+  type Platform
+} from "@postbot/contracts";
 import { Prisma, type PrismaClient } from "@postbot/database";
-import { JobsService } from "../jobs/jobs.service.js";
-import { evaluateBudget, isCostStage } from "./automation-safety.js";
-import { OperationsService } from "../operations/operations.service.js";
 import { loadConfig } from "@postbot/config";
+import { JobsService } from "../jobs/jobs.service.js";
+import { OperationsService } from "../operations/operations.service.js";
+import { isCostStage } from "./automation-safety.js";
+import { reserveAutomationCost } from "./automation-budget.js";
 
 export const automationStages = ["COLLECT", "SCRIPT", "ASSET", "TTS", "RENDER", "POLICY", "PUBLISH"] as const satisfies readonly AutomationStage[];
+const platformStages = automationStages.filter((stage): stage is Exclude<AutomationStage, "COLLECT"> => stage !== "COLLECT");
 type Stage = (typeof automationStages)[number];
-export const inventoryDeficit = (minimum: number, generating: number, review: number, approved: number, scheduled: number): number => Math.max(0, minimum - (generating + review + approved + scheduled));
+type BranchPlatform = Platform | null;
+const branchKey = (platform: BranchPlatform): string => platform ?? "COMMON";
+const isComplete = (status: string): boolean => status === "SUCCEEDED" || status === "SKIPPED";
 const isTerminal = (status: string): boolean => ["SUCCEEDED", "FAILED", "CANCELLED"].includes(status);
+const asObject = (value: Prisma.JsonValue | null): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value) ? value : {};
+export const isAbandonedAutomationClaim = (updatedAt: Date, now = Date.now()): boolean => updatedAt.getTime() <= now - 60_000;
+
+export const inventoryDeficit = (
+  minimum: number,
+  generating: number,
+  review: number,
+  approved: number,
+  scheduled: number
+): number => Math.max(0, minimum - (generating + review + approved + scheduled));
+
+type RunStep = {
+  id?: string;
+  stage: string;
+  platform: Platform | null;
+  status: string;
+};
+
+export type AutomationRunDecision =
+  | { status: "RUNNING"; runnable: Array<{ stage: Stage; platform: BranchPlatform }> }
+  | { status: "SUCCEEDED" | "FAILED" | "PAUSED"; runnable: [] };
+
+export const evaluateAutomationBranches = (steps: RunStep[]): AutomationRunDecision => {
+  const common = steps.find((step) => step.stage === "COLLECT" && step.platform === null);
+  if (!common) return { status: "FAILED", runnable: [] };
+  if (common.status === "FAILED") return { status: "FAILED", runnable: [] };
+  if (common.status === "HELD") return { status: "PAUSED", runnable: [] };
+  if (!isComplete(common.status)) {
+    return common.status === "PENDING"
+      ? { status: "RUNNING", runnable: [{ stage: "COLLECT", platform: null }] }
+      : { status: "RUNNING", runnable: [] };
+  }
+
+  const platforms = [...new Set(steps.flatMap((step) => step.platform ? [step.platform] : []))];
+  const runnable: Array<{ stage: Stage; platform: BranchPlatform }> = [];
+  let active = false;
+  let failed = false;
+  let held = false;
+  for (const platform of platforms) {
+    const branch = platformStages.map((stage) => steps.find((step) => step.stage === stage && step.platform === platform));
+    if (branch.some((step) => !step)) {
+      failed = true;
+      continue;
+    }
+    const firstIncomplete = branch.findIndex((step) => !isComplete(step!.status));
+    if (firstIncomplete < 0) continue;
+    const step = branch[firstIncomplete]!;
+    if (step.status === "FAILED") failed = true;
+    else if (step.status === "HELD") held = true;
+    else if (step.status === "PENDING") {
+      runnable.push({ stage: step.stage as Stage, platform });
+      active = true;
+    } else {
+      active = true;
+    }
+  }
+  if (runnable.length > 0 || active) return { status: "RUNNING", runnable };
+  if (failed) return { status: "FAILED", runnable: [] };
+  if (held) return { status: "PAUSED", runnable: [] };
+  return { status: "SUCCEEDED", runnable: [] };
+};
 
 @Injectable()
 export class AutomationService implements OnModuleInit, OnModuleDestroy {
   private scheduler: NodeJS.Timeout | null = null;
+  private scheduling = false;
 
-  constructor(@Inject("PRISMA_CLIENT") private readonly prisma: PrismaClient, private readonly jobs: JobsService, private readonly operations: OperationsService) {}
+  constructor(
+    @Inject("PRISMA_CLIENT") private readonly prisma: PrismaClient,
+    private readonly jobs: JobsService,
+    private readonly operations: OperationsService
+  ) {}
 
   onModuleInit(): void {
-    this.scheduler = setInterval(() => void this.scheduleDueRuns(), loadConfig().AUTOMATION_POLL_INTERVAL_MS);
-    void this.scheduleDueRuns();
+    this.scheduler = setInterval(() => void this.scheduleDueRuns().catch(() => undefined), loadConfig().AUTOMATION_POLL_INTERVAL_MS);
+    void this.scheduleDueRuns().catch(() => undefined);
   }
 
   onModuleDestroy(): void {
@@ -28,223 +108,746 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
 
   async start(workspaceId: string, raw: unknown): Promise<AutomationRunResponse> {
     const input = AutomationRunRequestSchema.parse(raw);
-    const workspaceSwitch = await this.prisma.automationSwitch.findFirst({ where: { workspaceId, provider: null, isEnabled: false } });
+    const workspaceSwitch = await this.prisma.automationSwitch.findFirst({
+      where: { workspaceId, provider: null, isEnabled: false }
+    });
     if (workspaceSwitch) throw new ConflictException("AUTOMATION_KILL_SWITCH_ENABLED");
-    const existing = await this.prisma.automationRun.findUnique({ where: { idempotencyKey: input.idempotencyKey }, include: { steps: { orderBy: { createdAt: "asc" } } } });
+    const existing = await this.prisma.automationRun.findUnique({
+      where: { idempotencyKey: input.idempotencyKey },
+      include: { steps: { orderBy: [{ platform: "asc" }, { createdAt: "asc" }] } }
+    });
     if (existing) return this.toResponse(existing);
-    const channel = await this.prisma.channel.findFirst({ where: { id: input.channelId, workspaceId, status: "ACTIVE" }, include: { platformAccounts: true, scheduleRules: { where: { isActive: true } } } });
+
+    const channel = await this.prisma.channel.findFirst({
+      where: { id: input.channelId, workspaceId, status: "ACTIVE" },
+      include: {
+        platformAccounts: true,
+        scheduleRules: { where: { isActive: true } },
+        outputProfiles: { where: { isActive: true } }
+      }
+    });
     if (!channel) throw new NotFoundException("ACTIVE_CHANNEL_NOT_FOUND");
-    const counts = await this.prisma.contentItem.groupBy({ by: ["status"], where: { channelId: channel.id }, _count: { _all: true } });
-    const count = (status: "GENERATING" | "REVIEW_REQUIRED" | "APPROVED" | "SCHEDULED"): number => counts.find((entry) => entry.status === status)?._count._all ?? 0;
-    const deficit = inventoryDeficit(channel.minInventoryCount, count("GENERATING"), count("REVIEW_REQUIRED"), count("APPROVED"), count("SCHEDULED"));
-    const heldReason = channel.automationMode === "FULL_AUTO" && (!channel.platformAccounts.some((account) => account.status === "CONNECTED") || channel.scheduleRules.length === 0) ? "NO_CONNECTED_ACCOUNT_OR_SCHEDULE" : null;
-    const run = await this.prisma.$transaction((tx) => tx.automationRun.create({
-      data: { channelId: channel.id, idempotencyKey: input.idempotencyKey, status: deficit === 0 ? "SUCCEEDED" : heldReason ? "PAUSED" : "QUEUED", pausedReason: heldReason, checkpoint: { stage: deficit === 0 ? "inventory-satisfied" : "collect", deficit, completed: [], estimatedCostsUsd: input.estimatedCostsUsd ?? {} }, nextRunAt: deficit === 0 || heldReason ? null : new Date(), steps: { create: automationStages.map((stage) => ({ stage, status: deficit === 0 ? "SKIPPED" : heldReason ? "HELD" : "PENDING" })) }, events: { create: { action: "START", details: { deficit, mode: channel.automationMode } } } },
-      include: { steps: { orderBy: { createdAt: "asc" } } }
-    }));
-    if (deficit > 0 && !heldReason) await this.enqueueStage(workspaceId, run.id, channel.id, "COLLECT");
+    const platforms = [...new Set([
+      ...channel.outputProfiles.map((profile) => profile.platform),
+      ...channel.platformAccounts.filter((account) => account.status === "CONNECTED").map((account) => account.platform)
+    ])].sort();
+    if (platforms.length === 0) throw new ConflictException("ACTIVE_OUTPUT_PLATFORM_REQUIRED");
+
+    const counts = await this.prisma.contentItem.groupBy({
+      by: ["status"],
+      where: { channelId: channel.id },
+      _count: { _all: true }
+    });
+    const count = (status: "GENERATING" | "REVIEW_REQUIRED" | "APPROVED" | "SCHEDULED"): number =>
+      counts.find((entry) => entry.status === status)?._count._all ?? 0;
+    const deficit = inventoryDeficit(
+      channel.minInventoryCount,
+      count("GENERATING"),
+      count("REVIEW_REQUIRED"),
+      count("APPROVED"),
+      count("SCHEDULED")
+    );
+    const missingFullAutoSetup = channel.automationMode === "FULL_AUTO" && platforms.some((platform) =>
+      !channel.platformAccounts.some((account) => account.status === "CONNECTED" && account.platform === platform)
+      || !channel.scheduleRules.some((rule) => rule.platform === null || rule.platform === platform)
+    );
+    const heldReason = missingFullAutoSetup ? "NO_CONNECTED_ACCOUNT_OR_SCHEDULE" : null;
+    const initialStatus: "SKIPPED" | "HELD" | "PENDING" = deficit === 0 ? "SKIPPED" : heldReason ? "HELD" : "PENDING";
+    const steps = [
+      { stage: "COLLECT" as const, platform: null, branchKey: "COMMON", status: initialStatus },
+      ...platforms.flatMap((platform) => platformStages.map((stage) => ({
+        stage,
+        platform,
+        branchKey: platform,
+        status: initialStatus
+      })))
+    ];
+    const run = await this.prisma.automationRun.create({
+      data: {
+        channelId: channel.id,
+        idempotencyKey: input.idempotencyKey,
+        status: deficit === 0 ? "SUCCEEDED" : heldReason ? "PAUSED" : "QUEUED",
+        pausedReason: heldReason,
+        checkpoint: {
+          stage: deficit === 0 ? "inventory-satisfied" : "collect",
+          deficit,
+          completed: [],
+          platforms,
+          estimatedCostsUsd: input.estimatedCostsUsd ?? {}
+        },
+        nextRunAt: deficit === 0 || heldReason ? null : new Date(),
+        steps: { create: steps },
+        events: { create: { action: "START", details: { deficit, mode: channel.automationMode, platforms } } }
+      },
+      include: { steps: { orderBy: [{ platform: "asc" }, { createdAt: "asc" }] } }
+    });
+    if (deficit > 0 && !heldReason) await this.enqueueStage(workspaceId, run.id, channel.id, "COLLECT", null);
     return this.get(workspaceId, run.id);
   }
 
   async get(workspaceId: string, runId: string): Promise<AutomationRunResponse> {
-    const run = await this.prisma.automationRun.findFirst({ where: { id: runId, channel: { workspaceId } }, include: { steps: { orderBy: { createdAt: "asc" } } } });
+    const run = await this.prisma.automationRun.findFirst({
+      where: { id: runId, channel: { workspaceId } },
+      include: { steps: { orderBy: [{ platform: "asc" }, { createdAt: "asc" }] } }
+    });
     if (!run) throw new NotFoundException("AUTOMATION_RUN_NOT_FOUND");
     return this.toResponse(run);
   }
 
   async list(workspaceId: string, channelId?: string): Promise<AutomationRunResponse[]> {
-    const runs = await this.prisma.automationRun.findMany({ where: { channel: { workspaceId, ...(channelId ? { id: channelId } : {}) } }, include: { steps: { orderBy: { createdAt: "asc" } } }, orderBy: { createdAt: "desc" } });
+    const runs = await this.prisma.automationRun.findMany({
+      where: { channel: { workspaceId, ...(channelId ? { id: channelId } : {}) } },
+      include: { steps: { orderBy: [{ platform: "asc" }, { createdAt: "asc" }] } },
+      orderBy: { createdAt: "desc" }
+    });
     return runs.map((run) => this.toResponse(run));
   }
 
   async setBudget(workspaceId: string, userId: string, raw: unknown) {
     const input = AutomationBudgetRequestSchema.parse(raw);
     if (input.channelId) {
-      const channel = await this.prisma.channel.findFirst({ where: { id: input.channelId, workspaceId }, select: { id: true } });
+      const channel = await this.prisma.channel.findFirst({
+        where: { id: input.channelId, workspaceId },
+        select: { id: true }
+      });
       if (!channel) throw new NotFoundException("CHANNEL_NOT_FOUND");
     }
-    const existing = await this.prisma.automationBudget.findFirst({ where: { workspaceId, channelId: input.channelId } });
-    const data = { currency: input.currency.toUpperCase(), dailySoftLimit: input.dailySoftLimit, dailyHardLimit: input.dailyHardLimit, monthlySoftLimit: input.monthlySoftLimit, monthlyHardLimit: input.monthlyHardLimit };
+    const existing = await this.prisma.automationBudget.findFirst({
+      where: { workspaceId, channelId: input.channelId }
+    });
+    const data = {
+      currency: input.currency.toUpperCase(),
+      dailySoftLimit: input.dailySoftLimit,
+      dailyHardLimit: input.dailyHardLimit,
+      monthlySoftLimit: input.monthlySoftLimit,
+      monthlyHardLimit: input.monthlyHardLimit
+    };
     const budget = await this.prisma.$transaction(async (tx) => {
-      const saved = existing ? await tx.automationBudget.update({ where: { id: existing.id }, data }) : await tx.automationBudget.create({ data: { workspaceId, channelId: input.channelId, ...data } });
-      await tx.budgetHistory.create({ data: { automationBudgetId: saved.id, workspaceId, channelId: input.channelId, changedByUserId: userId, before: existing ? { currency: existing.currency, dailySoftLimit: existing.dailySoftLimit?.toString() ?? null, dailyHardLimit: existing.dailyHardLimit?.toString() ?? null, monthlySoftLimit: existing.monthlySoftLimit?.toString() ?? null, monthlyHardLimit: existing.monthlyHardLimit?.toString() ?? null } : undefined, after: { currency: saved.currency, dailySoftLimit: saved.dailySoftLimit?.toString() ?? null, dailyHardLimit: saved.dailyHardLimit?.toString() ?? null, monthlySoftLimit: saved.monthlySoftLimit?.toString() ?? null, monthlyHardLimit: saved.monthlyHardLimit?.toString() ?? null } } });
+      const saved = existing
+        ? await tx.automationBudget.update({ where: { id: existing.id }, data })
+        : await tx.automationBudget.create({ data: { workspaceId, channelId: input.channelId, ...data } });
+      await tx.budgetHistory.create({
+        data: {
+          automationBudgetId: saved.id,
+          workspaceId,
+          channelId: input.channelId,
+          changedByUserId: userId,
+          before: existing ? {
+            currency: existing.currency,
+            dailySoftLimit: existing.dailySoftLimit?.toString() ?? null,
+            dailyHardLimit: existing.dailyHardLimit?.toString() ?? null,
+            monthlySoftLimit: existing.monthlySoftLimit?.toString() ?? null,
+            monthlyHardLimit: existing.monthlyHardLimit?.toString() ?? null
+          } : undefined,
+          after: {
+            currency: saved.currency,
+            dailySoftLimit: saved.dailySoftLimit?.toString() ?? null,
+            dailyHardLimit: saved.dailyHardLimit?.toString() ?? null,
+            monthlySoftLimit: saved.monthlySoftLimit?.toString() ?? null,
+            monthlyHardLimit: saved.monthlyHardLimit?.toString() ?? null
+          }
+        }
+      });
       return saved;
     });
-    await this.operations.audit(workspaceId, userId, "budget.update", "automation_budget", budget.id, { channelId: input.channelId ?? null });
+    await this.operations.audit(workspaceId, userId, "budget.update", "automation_budget", budget.id, {
+      channelId: input.channelId ?? null
+    });
     return budget;
   }
 
   async setSwitch(workspaceId: string, raw: unknown) {
     const input = AutomationSwitchRequestSchema.parse(raw);
-    const existing = await this.prisma.automationSwitch.findFirst({ where: { workspaceId, provider: input.provider } });
+    const existing = await this.prisma.automationSwitch.findFirst({
+      where: { workspaceId, provider: input.provider }
+    });
     const data = { isEnabled: input.isEnabled, reason: input.reason ?? null };
-    return existing ? this.prisma.automationSwitch.update({ where: { id: existing.id }, data }) : this.prisma.automationSwitch.create({ data: { workspaceId, provider: input.provider, ...data } });
+    return existing
+      ? this.prisma.automationSwitch.update({ where: { id: existing.id }, data })
+      : this.prisma.automationSwitch.create({ data: { workspaceId, provider: input.provider, ...data } });
   }
 
   async control(workspaceId: string, runId: string, raw: unknown): Promise<AutomationRunResponse> {
     const input = AutomationControlRequestSchema.parse(raw);
-    const run = await this.prisma.automationRun.findFirst({ where: { id: runId, channel: { workspaceId } }, include: { steps: true } });
+    const run = await this.prisma.automationRun.findFirst({
+      where: { id: runId, channel: { workspaceId } },
+      include: { steps: true }
+    });
     if (!run) throw new NotFoundException("AUTOMATION_RUN_NOT_FOUND");
     if (isTerminal(run.status) && input.action !== "retry") throw new ConflictException("AUTOMATION_RUN_TERMINAL");
-    const stage = input.stage;
+
     if (input.action === "retry") {
-      const step = stage ? run.steps.find((item) => item.stage === stage) : run.steps.find((item) => item.status === "FAILED" || item.status === "HELD");
-      if (!step) throw new ConflictException("NO_RECOVERABLE_AUTOMATION_STEP");
-      await this.prisma.$transaction([this.prisma.automationStep.update({ where: { id: step.id }, data: { status: "PENDING", errorCode: null, errorMessage: null, finishedAt: null } }), this.prisma.automationRun.update({ where: { id: run.id }, data: { status: "QUEUED", pausedReason: null, nextRunAt: new Date(), lastErrorCode: null, lastErrorMessage: null } }), this.prisma.automationEvent.create({ data: { automationRunId: run.id, action: "RETRY", reason: input.reason, details: { stage: step.stage } } })]);
-      await this.enqueueStage(workspaceId, run.id, run.channelId, step.stage as Stage);
+      const recoverable = run.steps.filter((step) =>
+        (!input.stage || step.stage === input.stage)
+        && (!input.platform || step.platform === input.platform)
+        && (step.status === "FAILED" || step.status === "HELD")
+      );
+      if (recoverable.length === 0) throw new ConflictException("NO_RECOVERABLE_AUTOMATION_STEP");
+      await this.prisma.$transaction([
+        this.prisma.automationStep.updateMany({
+          where: { id: { in: recoverable.map((step) => step.id) } },
+          data: { status: "PENDING", errorCode: null, errorMessage: null, finishedAt: null }
+        }),
+        this.prisma.automationRun.update({
+          where: { id: run.id },
+          data: {
+            status: "QUEUED",
+            pausedReason: null,
+            nextRunAt: new Date(),
+            lastErrorCode: null,
+            lastErrorMessage: null
+          }
+        }),
+        this.prisma.automationEvent.create({
+          data: {
+            automationRunId: run.id,
+            action: "RETRY",
+            reason: input.reason,
+            details: {
+              steps: recoverable.map((step) => ({ stage: step.stage, platform: step.platform }))
+            }
+          }
+        })
+      ]);
+      await Promise.all(recoverable.map((step) =>
+        this.enqueueStage(workspaceId, run.id, run.channelId, step.stage as Stage, step.platform)
+      ));
     } else if (input.action === "skip" || input.action === "hold") {
-      if (!stage) throw new ConflictException("AUTOMATION_STAGE_REQUIRED");
-      if (input.action === "skip" && ["POLICY", "PUBLISH"].includes(stage)) throw new ConflictException("AUTOMATION_GATE_CANNOT_BE_SKIPPED");
-      await this.prisma.$transaction([this.prisma.automationStep.update({ where: { automationRunId_stage: { automationRunId: run.id, stage } }, data: { status: input.action === "skip" ? "SKIPPED" : "HELD", errorMessage: input.reason ?? null, finishedAt: new Date() } }), this.prisma.automationRun.update({ where: { id: run.id }, data: { status: input.action === "skip" ? "RUNNING" : "PAUSED", pausedReason: input.action === "hold" ? input.reason ?? "operator hold" : null } }), this.prisma.automationEvent.create({ data: { automationRunId: run.id, action: "HOLD", reason: input.reason, details: { stage, skipped: input.action === "skip" } } })]);
+      if (!input.stage) throw new ConflictException("AUTOMATION_STAGE_REQUIRED");
+      if (input.action === "skip" && ["POLICY", "PUBLISH"].includes(input.stage)) {
+        throw new ConflictException("AUTOMATION_GATE_CANNOT_BE_SKIPPED");
+      }
+      const matching = run.steps.filter((step) =>
+        step.stage === input.stage && (!input.platform || step.platform === input.platform)
+      );
+      if (matching.length === 0) throw new ConflictException("AUTOMATION_STEP_NOT_FOUND");
+      await this.prisma.$transaction([
+        this.prisma.automationStep.updateMany({
+          where: { id: { in: matching.map((step) => step.id) } },
+          data: {
+            status: input.action === "skip" ? "SKIPPED" : "HELD",
+            errorMessage: input.reason ?? null,
+            finishedAt: new Date()
+          }
+        }),
+        this.prisma.automationRun.update({
+          where: { id: run.id },
+          data: { status: "RUNNING", pausedReason: null, nextRunAt: new Date() }
+        }),
+        this.prisma.automationEvent.create({
+          data: {
+            automationRunId: run.id,
+            action: "HOLD",
+            reason: input.reason,
+            details: {
+              stage: input.stage,
+              platform: input.platform ?? null,
+              skipped: input.action === "skip"
+            }
+          }
+        })
+      ]);
     } else {
-      const status = input.action === "pause" ? "PAUSED" : input.action === "drain" ? "DRAINING" : input.action === "kill" ? "CANCELLED" : "QUEUED";
-      const action = input.action === "pause" ? "PAUSE" : input.action === "drain" ? "DRAIN" : input.action === "kill" ? "KILL" : "RESUME";
-      await this.prisma.$transaction([this.prisma.automationRun.update({ where: { id: run.id }, data: { status, pausedReason: input.action === "resume" ? null : input.reason ?? input.action, nextRunAt: input.action === "resume" ? new Date() : null } }), this.prisma.automationStep.updateMany({ where: { automationRunId: run.id, status: "PENDING" }, data: { status: input.action === "kill" ? "CANCELLED" : "PENDING" } }), this.prisma.automationCostReservation.updateMany({ where: { automationRunId: run.id, releasedAt: null, settledAt: null }, data: { releasedAt: input.action === "kill" ? new Date() : undefined } }), this.prisma.automationEvent.create({ data: { automationRunId: run.id, action, reason: input.reason } })]);
+      const status = input.action === "pause"
+        ? "PAUSED"
+        : input.action === "drain"
+          ? "DRAINING"
+          : input.action === "kill"
+            ? "CANCELLED"
+            : "QUEUED";
+      const action = input.action === "pause"
+        ? "PAUSE"
+        : input.action === "drain"
+          ? "DRAIN"
+          : input.action === "kill"
+            ? "KILL"
+            : "RESUME";
+      await this.prisma.$transaction([
+        this.prisma.automationRun.update({
+          where: { id: run.id },
+          data: {
+            status,
+            pausedReason: input.action === "resume" ? null : input.reason ?? input.action,
+            nextRunAt: input.action === "resume" ? new Date() : null
+          }
+        }),
+        this.prisma.automationStep.updateMany({
+          where: { automationRunId: run.id, status: "PENDING" },
+          data: { status: input.action === "kill" ? "CANCELLED" : "PENDING" }
+        }),
+        this.prisma.automationCostReservation.updateMany({
+          where: { automationRunId: run.id, releasedAt: null, settledAt: null },
+          data: { releasedAt: input.action === "kill" ? new Date() : undefined }
+        }),
+        this.prisma.automationEvent.create({
+          data: { automationRunId: run.id, action, reason: input.reason }
+        })
+      ]);
     }
     return this.get(workspaceId, run.id);
   }
 
-  private async enqueueStage(workspaceId: string, runId: string, channelId: string, stage: Stage): Promise<void> {
-    const step = await this.prisma.automationStep.findUnique({ where: { automationRunId_stage: { automationRunId: runId, stage } } });
+  private async enqueueStage(
+    workspaceId: string,
+    runId: string,
+    channelId: string,
+    stage: Stage,
+    platform: BranchPlatform
+  ): Promise<void> {
+    const step = await this.prisma.automationStep.findFirst({
+      where: { automationRunId: runId, stage, branchKey: branchKey(platform) }
+    });
     if (!step || ["SUCCEEDED", "CANCELLED", "SKIPPED"].includes(step.status)) return;
     if (step.productionJobId) {
-      const existingJob = await this.prisma.productionJob.findUnique({ where: { id: step.productionJobId }, select: { status: true } });
+      const existingJob = await this.prisma.productionJob.findUnique({
+        where: { id: step.productionJobId },
+        select: { status: true }
+      });
       if (existingJob && ["FAILED", "NEEDS_REVIEW", "CANCELLED"].includes(existingJob.status)) {
+        if (stage === "PUBLISH") {
+          const output = asObject(step.output);
+          if (typeof output.publishPlanId === "string") {
+            await this.prisma.publishPlan.updateMany({
+              where: { id: output.publishPlanId, status: "FAILED" },
+              data: { status: "SCHEDULED" }
+            });
+          }
+        }
         await this.jobs.recover(workspaceId, step.productionJobId, {});
-        await this.prisma.$transaction([this.prisma.automationStep.update({ where: { id: step.id }, data: { status: "QUEUED", errorCode: null, errorMessage: null, finishedAt: null } }), this.prisma.automationRun.update({ where: { id: runId }, data: { status: "RUNNING", pausedReason: null, heartbeatAt: new Date() } })]);
+        await this.prisma.$transaction([
+          this.prisma.automationStep.update({
+            where: { id: step.id },
+            data: { status: "QUEUED", errorCode: null, errorMessage: null, finishedAt: null }
+          }),
+          this.prisma.automationRun.update({
+            where: { id: runId },
+            data: { status: "RUNNING", pausedReason: null, heartbeatAt: new Date() }
+          })
+        ]);
       }
       return;
     }
+    if (step.status === "QUEUED") {
+      if (!isAbandonedAutomationClaim(step.updatedAt)) return;
+      await this.prisma.automationStep.updateMany({
+        where: { id: step.id, status: "QUEUED", productionJobId: null },
+        data: { status: "PENDING" }
+      });
+    }
+    const claimed = await this.prisma.automationStep.updateMany({
+      where: { id: step.id, status: "PENDING", productionJobId: null },
+      data: { status: "QUEUED" }
+    });
+    if (claimed.count === 0) return;
     if (isCostStage(stage)) {
-      const reserved = await this.reserveCost(workspaceId, runId, channelId, stage);
+      const reserved = await this.reserveCost(workspaceId, runId, channelId, stage, platform);
       if (!reserved) return;
     }
-    const prepared = await this.prepareStage(workspaceId, runId, channelId, stage);
+    const prepared = await this.prepareStage(workspaceId, runId, channelId, stage, platform);
     if (!prepared) return;
-    const job = await this.jobs.create(workspaceId, { type: stage, channelId, contentItemId: prepared.contentItemId, idempotencyKey: `automation:${runId}:${stage.toLowerCase()}`, payload: prepared.payload, runAfter: prepared.runAfter });
-    await this.prisma.$transaction([this.prisma.automationStep.update({ where: { id: step.id }, data: { status: "QUEUED", productionJobId: job.id } }), this.prisma.automationRun.update({ where: { id: runId }, data: { status: "RUNNING", heartbeatAt: new Date(), nextRunAt: null } })]);
+    const platformKey = platform?.toLowerCase() ?? "common";
+    const job = await this.jobs.create(workspaceId, {
+      type: stage,
+      channelId,
+      contentItemId: prepared.contentItemId,
+      idempotencyKey: `automation:${runId}:${platformKey}:${stage.toLowerCase()}`,
+      payload: prepared.payload,
+      runAfter: prepared.runAfter
+    });
+    await this.prisma.$transaction([
+      this.prisma.automationStep.update({
+        where: { id: step.id },
+        data: { status: "QUEUED", productionJobId: job.id }
+      }),
+      this.prisma.automationRun.update({
+        where: { id: runId },
+        data: { status: "RUNNING", heartbeatAt: new Date(), nextRunAt: null }
+      })
+    ]);
   }
 
-  private async prepareStage(workspaceId: string, runId: string, channelId: string, stage: Stage): Promise<{ payload: Record<string, unknown>; contentItemId?: string; runAfter?: string } | null> {
-    const automation = { runId, stage };
-    const channel = await this.prisma.channel.findFirst({ where: { id: channelId, workspaceId }, include: { collectionRules: { where: { isActive: true }, orderBy: { version: "desc" }, take: 1 }, templates: { where: { isActive: true }, orderBy: { version: "desc" }, take: 1 }, outputProfiles: { where: { isActive: true }, orderBy: { version: "desc" } }, scheduleRules: { where: { isActive: true } }, platformAccounts: { where: { status: "CONNECTED" }, include: { credential: true } } } });
-    if (!channel) { await this.holdStep(runId, stage, "CHANNEL_NOT_AVAILABLE"); return null; }
-    const priorOutput = async (priorStage: Stage): Promise<Record<string, unknown>> => {
-      const prior = await this.prisma.automationStep.findUnique({ where: { automationRunId_stage: { automationRunId: runId, stage: priorStage } }, select: { output: true } });
-      return prior?.output && typeof prior.output === "object" && !Array.isArray(prior.output) ? prior.output : {};
+  private async prepareStage(
+    workspaceId: string,
+    runId: string,
+    channelId: string,
+    stage: Stage,
+    platform: BranchPlatform
+  ): Promise<{ payload: Record<string, unknown>; contentItemId?: string; runAfter?: string } | null> {
+    const automation = { runId, stage, platform };
+    const channel = await this.prisma.channel.findFirst({
+      where: { id: channelId, workspaceId },
+      include: {
+        collectionRules: { where: { isActive: true }, orderBy: { version: "desc" }, take: 1 },
+        templates: { where: { isActive: true }, orderBy: { version: "desc" }, take: 1 },
+        outputProfiles: { where: { isActive: true }, orderBy: { version: "desc" } },
+        scheduleRules: { where: { isActive: true } },
+        platformAccounts: {
+          where: { status: "CONNECTED" },
+          include: { credential: true }
+        }
+      }
+    });
+    if (!channel) {
+      await this.holdStep(runId, stage, platform, "CHANNEL_NOT_AVAILABLE");
+      return null;
+    }
+    const priorOutput = async (priorStage: Stage, priorPlatform: BranchPlatform): Promise<Record<string, unknown>> => {
+      const prior = await this.prisma.automationStep.findFirst({
+        where: {
+          automationRunId: runId,
+          stage: priorStage,
+          branchKey: branchKey(priorPlatform)
+        },
+        select: { output: true }
+      });
+      return asObject(prior?.output ?? null);
     };
+
     if (stage === "COLLECT") {
       const rule = channel.collectionRules[0];
-      if (!rule) { await this.holdStep(runId, stage, "COLLECTION_RULE_REQUIRED"); return null; }
-      const list = (value: Prisma.JsonValue | null): string[] => Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
-      return { payload: { automation, collect: { channelId, topic: channel.topic ?? channel.name, language: channel.language, keywords: list(rule.keywords), allowedSources: list(rule.allowedSources), excludedSources: list(rule.excludedSources), excludedKeywords: list(rule.excludedKeywords), excludedTopics: list(channel.excludedTopics), recencyHours: rule.recencyHours, idempotencyKey: `automation:${runId}:collect` } } };
+      if (!rule) {
+        await this.holdStep(runId, stage, null, "COLLECTION_RULE_REQUIRED");
+        return null;
+      }
+      const list = (value: Prisma.JsonValue | null): string[] =>
+        Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+      return {
+        payload: {
+          automation,
+          collect: {
+            channelId,
+            topic: channel.topic ?? channel.name,
+            language: channel.language,
+            keywords: list(rule.keywords),
+            allowedSources: list(rule.allowedSources),
+            excludedSources: list(rule.excludedSources),
+            excludedKeywords: list(rule.excludedKeywords),
+            excludedTopics: list(channel.excludedTopics),
+            recencyHours: rule.recencyHours,
+            idempotencyKey: `automation:${runId}:collect`
+          }
+        }
+      };
+    }
+
+    if (!platform) {
+      await this.holdStep(runId, stage, null, "PLATFORM_REQUIRED");
+      return null;
     }
     if (stage === "SCRIPT") {
-      const idea = (await priorOutput("COLLECT")).idea;
-      if (!idea || typeof idea !== "object" || Array.isArray(idea) || typeof (idea as Record<string, unknown>).id !== "string") { await this.holdStep(runId, stage, "COLLECT_OUTPUT_REQUIRED"); return null; }
-      return { payload: { automation, generation: { request: { ideaId: (idea as Record<string, unknown>).id, platform: channel.outputProfiles[0]?.platform ?? null, idempotencyKey: `automation:${runId}:script`, partial: "full" }, idea } } };
+      const idea = (await priorOutput("COLLECT", null)).idea;
+      if (!idea || typeof idea !== "object" || Array.isArray(idea) || typeof (idea as Record<string, unknown>).id !== "string") {
+        await this.holdStep(runId, stage, platform, "COLLECT_OUTPUT_REQUIRED");
+        return null;
+      }
+      return {
+        payload: {
+          automation,
+          generation: {
+            request: {
+              ideaId: (idea as Record<string, unknown>).id,
+              platform,
+              idempotencyKey: `automation:${runId}:${platform.toLowerCase()}:script`,
+              partial: "full"
+            },
+            idea
+          }
+        }
+      };
     }
-    const scriptOutput = await priorOutput("SCRIPT");
+
+    const scriptOutput = await priorOutput("SCRIPT", platform);
     const contentItemId = typeof scriptOutput.contentItemId === "string" ? scriptOutput.contentItemId : null;
-    if (!contentItemId) { await this.holdStep(runId, stage, "SCRIPT_OUTPUT_REQUIRED"); return null; }
+    const sceneVersionId = typeof scriptOutput.sceneVersionId === "string" ? scriptOutput.sceneVersionId : null;
+    if (!contentItemId) {
+      await this.holdStep(runId, stage, platform, "SCRIPT_OUTPUT_REQUIRED");
+      return null;
+    }
     if (stage === "ASSET") {
-      const item = await this.prisma.contentItem.findUnique({ where: { id: contentItemId }, select: { title: true, summary: true } });
-      return { contentItemId, payload: { automation, assetPreparation: { channelId, contentItemId, prompt: `${item?.title ?? "Short-form explainer"}. ${item?.summary ?? ""}`.trim(), idempotencyKey: `automation:${runId}:asset` } } };
+      if (!sceneVersionId) {
+        await this.holdStep(runId, stage, platform, "SCENE_VERSION_REQUIRED");
+        return null;
+      }
+      const item = await this.prisma.contentItem.findUnique({
+        where: { id: contentItemId },
+        select: { title: true, summary: true }
+      });
+      return {
+        contentItemId,
+        payload: {
+          automation,
+          assetPreparation: {
+            channelId,
+            contentItemId,
+            sceneVersionId,
+            platform,
+            prompt: `${item?.title ?? "Short-form explainer"}. ${item?.summary ?? ""}`.trim(),
+            idempotencyKey: `automation:${runId}:${platform.toLowerCase()}:asset`
+          }
+        }
+      };
     }
     if (stage === "TTS") {
-      const script = await this.prisma.scriptVersion.findFirst({ where: { contentItemId }, orderBy: { version: "desc" } });
-      if (!script) { await this.holdStep(runId, stage, "SCRIPT_VERSION_REQUIRED"); return null; }
-      return { contentItemId, payload: { automation, ttsPreparation: { channelId, contentItemId, text: [script.hook, script.body, script.callToAction].filter(Boolean).join(" "), voice: channel.templates[0]?.voiceProfile ?? "default", idempotencyKey: `automation:${runId}:tts` } } };
+      if (!sceneVersionId) {
+        await this.holdStep(runId, stage, platform, "SCENE_VERSION_REQUIRED");
+        return null;
+      }
+      const script = await this.prisma.scriptVersion.findFirst({
+        where: { contentItemId, platform },
+        orderBy: { version: "desc" }
+      });
+      if (!script) {
+        await this.holdStep(runId, stage, platform, "SCRIPT_VERSION_REQUIRED");
+        return null;
+      }
+      return {
+        contentItemId,
+        payload: {
+          automation,
+          ttsPreparation: {
+            channelId,
+            contentItemId,
+            sceneVersionId,
+            platform,
+            text: [script.hook, script.body, script.callToAction].filter(Boolean).join(" "),
+            voice: channel.templates[0]?.voiceProfile ?? "default",
+            idempotencyKey: `automation:${runId}:${platform.toLowerCase()}:tts`
+          }
+        }
+      };
     }
     if (stage === "RENDER") {
-      const sceneVersionId = typeof scriptOutput.sceneVersionId === "string" ? scriptOutput.sceneVersionId : null;
-      if (!sceneVersionId) { await this.holdStep(runId, stage, "SCENE_VERSION_REQUIRED"); return null; }
-      return { contentItemId, payload: { automation, render: { channelId, contentItemId, sceneVersionId, idempotencyKey: `automation:${runId}:render` } } };
+      if (!sceneVersionId) {
+        await this.holdStep(runId, stage, platform, "SCENE_VERSION_REQUIRED");
+        return null;
+      }
+      return {
+        contentItemId,
+        payload: {
+          automation,
+          render: {
+            channelId,
+            contentItemId,
+            sceneVersionId,
+            idempotencyKey: `automation:${runId}:${platform.toLowerCase()}:render`
+          }
+        }
+      };
     }
     if (stage === "POLICY") {
-      const platform = channel.platformAccounts[0]?.platform ?? channel.outputProfiles[0]?.platform;
-      if (!platform) { await this.holdStep(runId, stage, "PLATFORM_OUTPUT_REQUIRED"); return null; }
-      return { contentItemId, payload: { automation, policy: { contentItemId, platform, region: "GLOBAL" } } };
+      return {
+        contentItemId,
+        payload: {
+          automation,
+          policy: { contentItemId, platform, region: "GLOBAL" }
+        }
+      };
     }
-    const item = await this.prisma.contentItem.findUnique({ where: { id: contentItemId }, include: { policyChecks: { orderBy: { checkedAt: "desc" }, take: 1 }, sceneVersions: { orderBy: { version: "desc" }, take: 1 }, sourceReferences: true, assetUsages: { include: { asset: { include: { licenses: { orderBy: { checkedAt: "desc" }, take: 1 } } } } } } });
-    if (!item || item.status !== "APPROVED") { await this.holdStep(runId, stage, channel.automationMode === "APPROVAL" ? "AWAITING_APPROVAL" : "AUTO_APPROVAL_GATE_FAILED"); return null; }
-    const rightsVerified = item.assetUsages.length > 0 && item.assetUsages.every((usage) => usage.asset.licenses[0]?.status === "VERIFIED" && usage.asset.licenses[0]?.commercialUseAllowed === true);
-    if (item.policyChecks[0]?.status !== "PASS" || item.sourceReferences.length === 0 || !rightsVerified || !item.sceneVersions[0]?.renderManifest) { await this.holdStep(runId, stage, "PUBLISH_SAFETY_GATE_FAILED"); return null; }
-    const account = channel.platformAccounts.find((candidate) => candidate.platform === item.policyChecks[0]?.platform);
-    if (!account) { await this.holdStep(runId, stage, "CONNECTED_PLATFORM_ACCOUNT_REQUIRED"); return null; }
-    const scheduledAt = this.nextSchedule(channel.scheduleRules.filter((rule) => rule.platform === null || rule.platform === account.platform), new Date());
-    if (!scheduledAt) { await this.holdStep(runId, stage, "SCHEDULE_SLOT_REQUIRED"); return null; }
-    const idempotencyKey = `automation:${runId}:publish-plan:${account.platform.toLowerCase()}`;
+
+    const [item, policyCheck, scene, sourceCount, usages] = await Promise.all([
+      this.prisma.contentItem.findUnique({ where: { id: contentItemId } }),
+      this.prisma.policyCheck.findFirst({
+        where: { contentItemId, platform },
+        orderBy: { checkedAt: "desc" }
+      }),
+      this.prisma.sceneVersion.findFirst({
+        where: { contentItemId, platform },
+        orderBy: { version: "desc" }
+      }),
+      this.prisma.sourceReference.count({ where: { contentItemId } }),
+      this.prisma.assetUsage.findMany({
+        where: { contentItemId, sceneVersionId },
+        include: { asset: { include: { licenses: { orderBy: { checkedAt: "desc" }, take: 1 } } } }
+      })
+    ]);
+    const publishableStatuses = ["APPROVED", "SCHEDULED", "PUBLISHING", "PUBLISHED"];
+    if (!item || !publishableStatuses.includes(item.status)) {
+      await this.holdStep(
+        runId,
+        stage,
+        platform,
+        channel.automationMode === "APPROVAL" ? "AWAITING_APPROVAL" : "AUTO_APPROVAL_GATE_FAILED"
+      );
+      return null;
+    }
+    const rightsVerified = usages.length > 0 && usages.every((usage) =>
+      usage.asset.licenses[0]?.status === "VERIFIED"
+      && usage.asset.licenses[0]?.commercialUseAllowed === true
+    );
+    if (policyCheck?.status !== "PASS" || sourceCount === 0 || !rightsVerified || !scene?.renderManifest) {
+      await this.holdStep(runId, stage, platform, "PUBLISH_SAFETY_GATE_FAILED");
+      return null;
+    }
+    const account = channel.platformAccounts.find((candidate) => candidate.platform === platform);
+    if (!account) {
+      await this.holdStep(runId, stage, platform, "CONNECTED_PLATFORM_ACCOUNT_REQUIRED");
+      return null;
+    }
+    const scheduledAt = this.nextSchedule(
+      channel.scheduleRules.filter((rule) => rule.platform === null || rule.platform === platform),
+      new Date()
+    );
+    if (!scheduledAt) {
+      await this.holdStep(runId, stage, platform, "SCHEDULE_SLOT_REQUIRED");
+      return null;
+    }
+    const idempotencyKey = `automation:${runId}:publish-plan:${platform.toLowerCase()}`;
     let plan = await this.prisma.publishPlan.findUnique({ where: { idempotencyKey } });
-    if (!plan) plan = await this.prisma.publishPlan.create({ data: { contentItemId, platform: account.platform, platformAccountId: account.id, sceneVersionId: item.sceneVersions[0]?.id, status: "SCHEDULED", scheduledAt, idempotencyKey, title: item.title, description: item.summary } });
-    await this.prisma.contentItem.update({ where: { id: contentItemId }, data: { status: "SCHEDULED" } });
-    return { contentItemId, runAfter: plan.scheduledAt.toISOString(), payload: { automation, publish: { publishPlanId: plan.id } } };
+    if (!plan) {
+      plan = await this.prisma.publishPlan.create({
+        data: {
+          contentItemId,
+          platform,
+          platformAccountId: account.id,
+          sceneVersionId: scene.id,
+          status: "SCHEDULED",
+          scheduledAt,
+          idempotencyKey,
+          title: item.title,
+          description: item.summary
+        }
+      });
+    }
+    if (item.status !== "PUBLISHED") {
+      await this.prisma.contentItem.update({
+        where: { id: contentItemId },
+        data: { status: "SCHEDULED" }
+      });
+    }
+    return {
+      contentItemId,
+      runAfter: plan.scheduledAt.toISOString(),
+      payload: { automation, publish: { publishPlanId: plan.id } }
+    };
   }
 
   private nextSchedule(rules: Array<{ dayOfWeek: number; timeOfDayUtc: string }>, after: Date): Date | null {
     const minimum = new Date(after.getTime() + 1_000);
     const candidates: Date[] = [];
     for (let offset = 0; offset <= 8; offset += 1) {
-      const day = new Date(Date.UTC(minimum.getUTCFullYear(), minimum.getUTCMonth(), minimum.getUTCDate() + offset));
+      const day = new Date(Date.UTC(
+        minimum.getUTCFullYear(),
+        minimum.getUTCMonth(),
+        minimum.getUTCDate() + offset
+      ));
       for (const rule of rules) {
         if (day.getUTCDay() !== rule.dayOfWeek) continue;
         const [hours, minutes, seconds] = rule.timeOfDayUtc.split(":").map(Number);
-        const candidate = new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), hours ?? 0, minutes ?? 0, seconds ?? 0));
+        const candidate = new Date(Date.UTC(
+          day.getUTCFullYear(),
+          day.getUTCMonth(),
+          day.getUTCDate(),
+          hours ?? 0,
+          minutes ?? 0,
+          seconds ?? 0
+        ));
         if (candidate > minimum) candidates.push(candidate);
       }
     }
     return candidates.sort((left, right) => left.getTime() - right.getTime())[0] ?? null;
   }
 
-  private async reserveCost(workspaceId: string, runId: string, channelId: string, stage: Stage): Promise<boolean> {
-    const run = await this.prisma.automationRun.findUnique({ where: { id: runId }, select: { checkpoint: true } });
-    const estimates = run?.checkpoint && typeof run.checkpoint === "object" && !Array.isArray(run.checkpoint) ? (run.checkpoint as Record<string, unknown>).estimatedCostsUsd : null;
-    const value = estimates && typeof estimates === "object" && !Array.isArray(estimates) ? (estimates as Record<string, unknown>)[stage] : null;
+  private async reserveCost(
+    workspaceId: string,
+    runId: string,
+    channelId: string,
+    stage: Stage,
+    platform: BranchPlatform
+  ): Promise<boolean> {
+    if (!platform || !isCostStage(stage)) return true;
+    const run = await this.prisma.automationRun.findUnique({
+      where: { id: runId },
+      select: { checkpoint: true }
+    });
+    const estimates = asObject(run?.checkpoint ?? null).estimatedCostsUsd;
+    const value = estimates && typeof estimates === "object" && !Array.isArray(estimates)
+      ? (estimates as Record<string, unknown>)[stage]
+      : null;
     const estimate = typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
-    const reservationKey = `automation:${runId}:${stage.toLowerCase()}:cost`;
-    const budget = await this.prisma.automationBudget.findFirst({ where: { workspaceId, OR: [{ channelId }, { channelId: null }] }, orderBy: { channelId: "desc" } });
+    const budget = await this.prisma.automationBudget.findFirst({
+      where: { workspaceId, OR: [{ channelId }, { channelId: null }] },
+      orderBy: { channelId: "desc" }
+    });
     if (!budget || estimate === null) {
-      await this.holdStep(runId, stage, "COST_ESTIMATE_OR_BUDGET_REQUIRED");
+      await this.holdStep(runId, stage, platform, "COST_ESTIMATE_OR_BUDGET_REQUIRED");
       return false;
     }
-    const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
-    const monthStart = new Date(Date.UTC(dayStart.getUTCFullYear(), dayStart.getUTCMonth(), 1));
-    const result = await this.prisma.$transaction(async (tx) => {
-      const existing = await tx.automationCostReservation.findUnique({ where: { idempotencyKey: reservationKey } });
-      if (existing) return true;
-      const [daily, monthly, reserved] = await Promise.all([
-        tx.costLedger.aggregate({ where: { occurredAt: { gte: dayStart } }, _sum: { amount: true } }),
-        tx.costLedger.aggregate({ where: { occurredAt: { gte: monthStart } }, _sum: { amount: true } }),
-        tx.automationCostReservation.aggregate({ where: { automationRun: { channel: { workspaceId } }, releasedAt: null, settledAt: null }, _sum: { amount: true } })
-      ]);
-      const reservedAmount = Number(reserved._sum.amount?.toString() ?? "0");
-      const dailyDecision = evaluateBudget({ spent: Number(daily._sum.amount?.toString() ?? "0"), reserved: reservedAmount, softLimit: budget.dailySoftLimit ? Number(budget.dailySoftLimit) : null, hardLimit: budget.dailyHardLimit ? Number(budget.dailyHardLimit) : null }, estimate);
-      const monthlyDecision = evaluateBudget({ spent: Number(monthly._sum.amount?.toString() ?? "0"), reserved: reservedAmount, softLimit: budget.monthlySoftLimit ? Number(budget.monthlySoftLimit) : null, hardLimit: budget.monthlyHardLimit ? Number(budget.monthlyHardLimit) : null }, estimate);
-      if (dailyDecision === "HOLD" || monthlyDecision === "HOLD") return false;
-      await tx.automationCostReservation.create({ data: { automationRunId: runId, stage, idempotencyKey: reservationKey, amount: new Prisma.Decimal(estimate.toFixed(6)), currency: budget.currency } });
-      await tx.automationRun.update({ where: { id: runId }, data: { budgetReserved: { increment: new Prisma.Decimal(estimate.toFixed(6)) } } });
-      return true;
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-    if (!result) {
-      await this.holdStep(runId, stage, "BUDGET_HARD_LIMIT");
-      await this.operations.notify(workspaceId, { eventKey: "budget.hard_limit", severity: "CRITICAL", channelId, cooldownMinutes: 30, payload: { automationRunId: runId, stage } });
+    const costStage = stage as "SCRIPT" | "ASSET" | "TTS" | "RENDER";
+    const result = await reserveAutomationCost({
+      prisma: this.prisma,
+      budget,
+      runId,
+      stage: costStage,
+      platform,
+      estimate
+    });
+    if (result === "HARD_LIMIT" || result === "UNATTRIBUTED_COST") {
+      const reason = result === "HARD_LIMIT" ? "BUDGET_HARD_LIMIT" : "BUDGET_UNATTRIBUTED_COST";
+      await this.holdStep(runId, stage, platform, reason);
+      await this.operations.notify(workspaceId, {
+        eventKey: result === "HARD_LIMIT" ? "budget.hard_limit" : "budget.unattributed_cost",
+        severity: "CRITICAL",
+        channelId,
+        cooldownMinutes: 30,
+        payload: { automationRunId: runId, stage, platform }
+      });
+      return false;
     }
-    return result;
+    return true;
   }
 
-  private async holdStep(runId: string, stage: Stage, reason: string): Promise<void> {
+  private async holdStep(
+    runId: string,
+    stage: Stage,
+    platform: BranchPlatform,
+    reason: string
+  ): Promise<void> {
+    const step = await this.prisma.automationStep.findFirst({
+      where: { automationRunId: runId, stage, branchKey: branchKey(platform) },
+      select: { id: true }
+    });
+    if (!step) return;
     await this.prisma.$transaction([
-      this.prisma.automationStep.update({ where: { automationRunId_stage: { automationRunId: runId, stage } }, data: { status: "HELD", errorCode: reason, errorMessage: reason, finishedAt: new Date() } }),
-      this.prisma.automationRun.update({ where: { id: runId }, data: { status: "PAUSED", pausedReason: reason } }),
-      this.prisma.automationEvent.create({ data: { automationRunId: runId, action: "HOLD", reason, details: { stage } } })
+      this.prisma.automationStep.update({
+        where: { id: step.id },
+        data: {
+          status: "HELD",
+          errorCode: reason,
+          errorMessage: reason,
+          finishedAt: new Date()
+        }
+      }),
+      this.prisma.automationRun.update({
+        where: { id: runId },
+        data: { status: "RUNNING", pausedReason: null, nextRunAt: new Date() }
+      }),
+      this.prisma.automationEvent.create({
+        data: {
+          automationRunId: runId,
+          action: "HOLD",
+          reason,
+          details: { stage, platform }
+        }
+      })
     ]);
   }
 
   private async scheduleDueRuns(): Promise<void> {
+    if (this.scheduling) return;
+    this.scheduling = true;
+    try {
     const now = new Date();
     const channels = await this.prisma.channel.findMany({
       where: { status: "ACTIVE" },
-      select: { id: true, workspaceId: true, collectionRules: { where: { isActive: true }, orderBy: { version: "desc" }, take: 1 } }
+      select: {
+        id: true,
+        workspaceId: true,
+        collectionRules: {
+          where: { isActive: true },
+          orderBy: { version: "desc" },
+          take: 1
+        }
+      }
     });
     await Promise.all(channels.map(async (channel) => {
       const rule = channel.collectionRules[0];
@@ -252,29 +855,96 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
       const intervalMs = rule.collectionFrequencyMinutes * 60_000;
       const bucket = Math.floor(now.getTime() / intervalMs);
       try {
-        await this.start(channel.workspaceId, { channelId: channel.id, idempotencyKey: `scheduler:${channel.id}:${bucket}` });
+        await this.start(channel.workspaceId, {
+          channelId: channel.id,
+          idempotencyKey: `scheduler:${channel.id}:${bucket}`
+        });
       } catch {
         // A channel failure must not prevent scheduling independent channels.
       }
     }));
     const activeRuns = await this.prisma.automationRun.findMany({
       where: { status: { in: ["QUEUED", "RUNNING"] } },
-      include: { steps: true, channel: { select: { workspaceId: true } } }
+      include: {
+        steps: true,
+        channel: { select: { workspaceId: true } }
+      }
     });
-    await Promise.all(activeRuns.map((run) => this.resumeNextStep(run)));
+    for (const run of activeRuns) {
+      try {
+        await this.resumeNextStep(run);
+      } catch {
+        // A transient/deadlock failure is retried on the next scheduler tick.
+      }
+    }
+    } finally {
+      this.scheduling = false;
+    }
   }
 
-  private async resumeNextStep(run: { id: string; channelId: string; status: string; channel: { workspaceId: string }; steps: Array<{ stage: string; status: string }> }): Promise<void> {
-    const completed = run.steps.every((step) => step.status === "SUCCEEDED" || step.status === "SKIPPED");
-    if (completed) {
-      await this.prisma.automationRun.update({ where: { id: run.id }, data: { status: "SUCCEEDED", nextRunAt: null } });
+  private async resumeNextStep(run: {
+    id: string;
+    channelId: string;
+    status: string;
+    channel: { workspaceId: string };
+    steps: Array<{ id: string; stage: string; platform: Platform | null; status: string; errorCode: string | null }>;
+  }): Promise<void> {
+    const decision = evaluateAutomationBranches(run.steps);
+    if (decision.status !== "RUNNING") {
+      const failure = run.steps.find((step) => step.status === "FAILED");
+      const held = run.steps.find((step) => step.status === "HELD");
+      await this.prisma.automationRun.update({
+        where: { id: run.id },
+        data: {
+          status: decision.status,
+          pausedReason: decision.status === "PAUSED" ? held?.errorCode ?? "BRANCH_HELD" : null,
+          lastErrorCode: decision.status === "FAILED" ? failure?.errorCode ?? "BRANCH_FAILED" : null,
+          nextRunAt: null
+        }
+      });
       return;
     }
-    const next = automationStages.find((stage, index) => run.steps.find((step) => step.stage === stage)?.status === "PENDING" && (index === 0 || run.steps.find((step) => step.stage === automationStages[index - 1])?.status === "SUCCEEDED"));
-    if (next) await this.enqueueStage(run.channel.workspaceId, run.id, run.channelId, next);
+    for (const { stage, platform } of decision.runnable) {
+      await this.enqueueStage(run.channel.workspaceId, run.id, run.channelId, stage, platform);
+    }
   }
 
-  private toResponse(run: { id: string; channelId: string; status: string; idempotencyKey: string; checkpoint: Prisma.JsonValue | null; failureCount: number; pausedReason: string | null; nextRunAt: Date | null; heartbeatAt: Date | null; lastErrorCode: string | null; lastErrorMessage: string | null; steps: Array<{ stage: string; status: string; attemptCount: number; maxAttempts: number; productionJobId: string | null; errorCode: string | null; errorMessage: string | null }> }): AutomationRunResponse {
-    return AutomationRunResponseSchema.parse({ id: run.id, channelId: run.channelId, status: run.status, idempotencyKey: run.idempotencyKey, checkpoint: run.checkpoint, failureCount: run.failureCount, pausedReason: run.pausedReason, nextRunAt: run.nextRunAt?.toISOString() ?? null, heartbeatAt: run.heartbeatAt?.toISOString() ?? null, lastErrorCode: run.lastErrorCode, lastErrorMessage: run.lastErrorMessage, steps: run.steps });
+  private toResponse(run: {
+    id: string;
+    channelId: string;
+    status: string;
+    idempotencyKey: string;
+    checkpoint: Prisma.JsonValue | null;
+    failureCount: number;
+    pausedReason: string | null;
+    nextRunAt: Date | null;
+    heartbeatAt: Date | null;
+    lastErrorCode: string | null;
+    lastErrorMessage: string | null;
+    steps: Array<{
+      stage: string;
+      platform: Platform | null;
+      status: string;
+      attemptCount: number;
+      maxAttempts: number;
+      productionJobId: string | null;
+      errorCode: string | null;
+      errorMessage: string | null;
+    }>;
+  }): AutomationRunResponse {
+    return AutomationRunResponseSchema.parse({
+      id: run.id,
+      channelId: run.channelId,
+      status: run.status,
+      idempotencyKey: run.idempotencyKey,
+      checkpoint: run.checkpoint,
+      failureCount: run.failureCount,
+      pausedReason: run.pausedReason,
+      nextRunAt: run.nextRunAt?.toISOString() ?? null,
+      heartbeatAt: run.heartbeatAt?.toISOString() ?? null,
+      lastErrorCode: run.lastErrorCode,
+      lastErrorMessage: run.lastErrorMessage,
+      steps: run.steps
+    });
   }
 }

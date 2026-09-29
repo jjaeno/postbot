@@ -62,6 +62,13 @@ const automationRunId = (payload: Record<string, unknown>): string | null => {
   return automation && typeof automation === "object" && !Array.isArray(automation) && typeof (automation as Record<string, unknown>).runId === "string" ? String((automation as Record<string, unknown>).runId) : null;
 };
 
+const automationPlatform = (payload: Record<string, unknown>): "YOUTUBE" | "INSTAGRAM" | "TIKTOK" | null => {
+  const automation = payload.automation;
+  if (!automation || typeof automation !== "object" || Array.isArray(automation)) return null;
+  const platform = (automation as Record<string, unknown>).platform;
+  return platform === "YOUTUBE" || platform === "INSTAGRAM" || platform === "TIKTOK" ? platform : null;
+};
+
 const providerForJobType = (type: EnqueueJobInput["type"]): string | null => {
   const providers: Partial<Record<EnqueueJobInput["type"], string>> = {
     SCRIPT: "llm",
@@ -229,7 +236,8 @@ export class DeterministicJobProcessor {
     const runId = automationRunId(payload);
     if (!runId) return { skipped: true };
     const now = new Date(); const periodStart = new Date(now.getTime() - 7 * 24 * 60 * 60_000);
-    const sync = await this.prisma.analyticsSync.upsert({ where: { idempotencyKey: `automation:${runId}:analytics` }, update: {}, create: { channelId: plan.contentItem.channelId, platform: plan.platform, status: "RUNNING", idempotencyKey: `automation:${runId}:analytics`, periodStart, periodEnd: now, timezone: "UTC" } });
+    const key = `automation:${runId}:${plan.platform.toLowerCase()}:analytics`;
+    const sync = await this.prisma.analyticsSync.upsert({ where: { idempotencyKey: key }, update: {}, create: { channelId: plan.contentItem.channelId, platform: plan.platform, status: "RUNNING", idempotencyKey: key, periodStart, periodEnd: now, timezone: "UTC" } });
     return this.analytics.process({ analytics: { syncId: sync.id } });
   }
 
@@ -287,7 +295,7 @@ export class DeterministicJobProcessor {
       const previousCheckpoint = run?.checkpoint && typeof run.checkpoint === "object" && !Array.isArray(run.checkpoint) ? run.checkpoint : {};
       await this.prisma.$transaction([
         this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "SUCCEEDED", attemptCount: attemptNumber, output: result as Prisma.InputJsonObject, finishedAt: now } }),
-        this.prisma.automationRun.update({ where: { id: runId }, data: { status: job.type === "PUBLISH" ? "SUCCEEDED" : "RUNNING", heartbeatAt: now, checkpoint: { ...previousCheckpoint, stage: job.type.toLowerCase(), lastJobId: jobId, completedAt: now.toISOString() } } })
+        this.prisma.automationRun.update({ where: { id: runId }, data: { status: "RUNNING", heartbeatAt: now, checkpoint: { ...previousCheckpoint, stage: job.type.toLowerCase(), platform: automationPlatform(job.payload as Record<string, unknown>), lastJobId: jobId, completedAt: now.toISOString() } } })
       ]);
       await this.settleReservation(runId, jobId, job.type, false);
     }
@@ -309,8 +317,8 @@ export class DeterministicJobProcessor {
     if (!runId) return;
     await this.prisma.$transaction([
       this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "HELD", errorCode: "PROVIDER_SWITCH_DISABLED", errorMessage: "The provider kill switch is enabled.", finishedAt: new Date() } }),
-      this.prisma.automationRun.update({ where: { id: runId }, data: { status: "PAUSED", pausedReason: `${providerForJobType(type) ?? "provider"}_SWITCH_DISABLED` } }),
-      this.prisma.automationEvent.create({ data: { automationRunId: runId, action: "HOLD", reason: "PROVIDER_SWITCH_DISABLED", details: { provider: providerForJobType(type) } } })
+      this.prisma.automationRun.update({ where: { id: runId }, data: { status: "RUNNING", pausedReason: null, nextRunAt: new Date() } }),
+      this.prisma.automationEvent.create({ data: { automationRunId: runId, action: "HOLD", reason: "PROVIDER_SWITCH_DISABLED", details: { provider: providerForJobType(type), platform: automationPlatform(job?.payload as Record<string, unknown>) } } })
     ]);
   }
 
@@ -331,7 +339,7 @@ export class DeterministicJobProcessor {
       const now = new Date();
       await this.prisma.$transaction([
         this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "FAILED", attemptCount: attemptNumber, errorCode, errorMessage, finishedAt: now } }),
-        this.prisma.automationRun.update({ where: { id: runId }, data: { status: "FAILED", failureCount: { increment: 1 }, heartbeatAt: now, lastErrorCode: errorCode, lastErrorMessage: errorMessage } })
+        this.prisma.automationRun.update({ where: { id: runId }, data: { status: "RUNNING", failureCount: { increment: 1 }, heartbeatAt: now, nextRunAt: now, lastErrorCode: errorCode, lastErrorMessage: errorMessage } })
       ]);
       await this.settleReservation(runId, jobId, job.type, true);
       const run = await this.prisma.automationRun.findUnique({ where: { id: runId }, select: { failureCount: true } });
@@ -353,7 +361,10 @@ export class DeterministicJobProcessor {
   }
 
   private async settleReservation(runId: string, jobId: string, type: EnqueueJobInput["type"], release: boolean): Promise<void> {
-    const key = `automation:${runId}:${type.toLowerCase()}:cost`;
+    const job = await this.prisma.productionJob.findUnique({ where: { id: jobId }, select: { payload: true } });
+    const platform = job ? automationPlatform(job.payload as Record<string, unknown>) : null;
+    if (!platform) return;
+    const key = `automation:${runId}:${type.toLowerCase()}:${platform.toLowerCase()}:cost`;
     const reservation = await this.prisma.automationCostReservation.findUnique({ where: { idempotencyKey: key } });
     if (!reservation || reservation.releasedAt || reservation.settledAt) return;
     const usage = release ? null : await this.prisma.providerUsage.aggregate({ where: { productionJobId: jobId }, _sum: { actualCost: true } });
@@ -388,7 +399,7 @@ export class DeterministicJobProcessor {
     const runId = job ? automationRunId(job.payload as Record<string, unknown>) : null;
     if (runId) await this.prisma.$transaction([
       this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "HELD", attemptCount: attemptNumber, output: result as Prisma.InputJsonObject, errorCode, errorMessage: "Manual review is required.", finishedAt: new Date() } }),
-      this.prisma.automationRun.update({ where: { id: runId }, data: { status: "PAUSED", pausedReason: errorCode, heartbeatAt: new Date() } })
+      this.prisma.automationRun.update({ where: { id: runId }, data: { status: "RUNNING", pausedReason: null, heartbeatAt: new Date(), nextRunAt: new Date() } })
     ]);
   }
 
