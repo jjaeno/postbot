@@ -30,7 +30,7 @@ RUN set -eu; \
 FROM node:20-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
   ffmpeg \
   openssl \
   libasound2 \
@@ -48,6 +48,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libxfixes3 \
   libxrandr2 \
   xdg-utils \
+  && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=deploy --chown=node:node /deploy /app
 ARG APP=api
