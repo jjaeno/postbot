@@ -2,7 +2,7 @@
 
 Postbot is an AI-assisted short-form content automation product for YouTube Shorts, Instagram Reels, and TikTok.
 
-This repository has completed stages 0–10 and is currently preparing **11단계 정책 검사·검수·승인 UX**. Real-provider validation remains pending for OpenAI, image/TTS providers, and the local FFmpeg/ffprobe smoke render because the required credentials or binaries are not available in this environment.
+The v1 implementation covers the stage 0–19 local/Fake scope: source collection, generation, assets/TTS, rendering, policy/review, approval and full automation, scheduled social publishing, analytics/optimization, operations, backup/recovery, and production containers. Real-provider credentials, platform app review, and a selected production infrastructure remain external verification work; Fake success is not presented as real-provider success.
 
 ## Requirements
 
@@ -33,18 +33,25 @@ cp .env.example .env
 
 The example values are local placeholders only. Do not commit real API keys, OAuth tokens, or secrets.
 
-OAuth-related variables:
+Provider selection is explicit. The complete, validated list is in `.env.example`; common local selectors are:
 
 ```text
 OAUTH_ENCRYPTION_KEY=replace-with-32-byte-base64-key
 OAUTH_ENCRYPTION_KEY_VERSION=1
 YOUTUBE_OAUTH_PROVIDER=fake
-YOUTUBE_CLIENT_ID=
-YOUTUBE_CLIENT_SECRET=
-WEB_BASE_URL=http://localhost:5173
+INSTAGRAM_OAUTH_PROVIDER=fake
+TIKTOK_OAUTH_PROVIDER=fake
+YOUTUBE_ANALYTICS_PROVIDER=fake
+INSTAGRAM_ANALYTICS_PROVIDER=fake
+TIKTOK_ANALYTICS_PROVIDER=fake
+LLM_PROVIDER=fake
+IMAGE_PROVIDER=fake
+TTS_PROVIDER=fake
+STORAGE_PROVIDER=s3
+TOPIC_SOURCE_PROVIDER=fixture
 ```
 
-Use `YOUTUBE_OAUTH_PROVIDER=fake` for local E2E without real Google credentials. Use `google` only with a real client ID, client secret, and registered redirect URI.
+Use real selectors only with credentials and registered callback URIs. See `docs/external-verification-checklist.md`.
 
 ## Local Infrastructure
 
@@ -54,10 +61,11 @@ Start MySQL, Redis, and MinIO:
 docker compose up -d
 ```
 
-Apply the Prisma schema:
+Apply migrations and seed data:
 
 ```bash
-pnpm --filter @postbot/database exec prisma migrate dev --schema prisma/schema.prisma
+pnpm --filter @postbot/database exec prisma migrate deploy --schema prisma/schema.prisma
+pnpm --filter @postbot/database db:seed
 ```
 
 Local endpoints:
@@ -101,7 +109,7 @@ POST /auth/register
 POST /auth/login
 POST /auth/refresh
 POST /auth/logout
-GET /platform-accounts/youtube/callback
+GET /platform-accounts/{youtube|instagram|tiktok}/callback
 ```
 
 Authenticated:
@@ -117,13 +125,15 @@ POST /channels/:channelId/pause
 POST /channels/:channelId/resume
 PUT /channels/:channelId/platform-accounts/:platformAccountId
 GET /platform-accounts
-POST /platform-accounts/youtube/connect
+POST /platform-accounts/{youtube|instagram|tiktok}/connect
 POST /platform-accounts/:platformAccountId/disconnect
 ```
 
+Generation, jobs/SSE, review, automation, publishing, analytics, optimization, operations and data lifecycle endpoints are listed in `docs/openapi.md` and generated at `/openapi`.
+
 Authentication uses short-lived JWT access tokens and rotating refresh tokens in `HttpOnly`, `SameSite=Lax` cookies. Mutating authenticated requests must send `x-csrf-token` with the value from the `postbot_csrf` cookie. In production, cookies are also marked `Secure`.
 
-YouTube OAuth uses state + PKCE, required scope validation, encrypted access/refresh token storage, and one-time callback state consumption. Uploading videos is intentionally not implemented in this stage.
+OAuth uses one-time state, PKCE where supported, required scope validation, encrypted access/refresh token storage, refresh rotation and provider revoke where available. Publishing is always driven by a gated `PublishPlan` and protects ambiguous retries from duplicate upload.
 
 ## Validation
 
@@ -134,6 +144,17 @@ pnpm test
 pnpm --filter @postbot/web e2e
 pnpm build
 ```
+
+Full local acceptance and performance baseline use the isolated Docker stack:
+
+```bash
+docker compose -f docker-compose.acceptance.yml build api worker migrate acceptance
+docker compose -f docker-compose.acceptance.yml up -d --wait api worker
+docker compose -f docker-compose.acceptance.yml run --rm acceptance
+pnpm baseline:local
+```
+
+The baseline output is `LOCAL_BASELINE`, not a production SLO.
 
 Example focused validation set:
 
@@ -172,3 +193,9 @@ infra/
 ```
 
 Apps must depend on packages through public package exports. Apps must not import another app's internal source.
+
+## Production and recovery
+
+`Dockerfile` builds production-only, non-root images for `web`, `api`, `worker`, and `renderer`. The worker/renderer images include FFmpeg/ffprobe and the pinned Remotion browser at build time. `docker-compose.production.yml` runs migrations before application rollout and separates render queues from the general worker.
+
+Use `pnpm backup:mysql`, `pnpm backup:verify -- <dump.sql>`, `pnpm backup:restore -- <dump.sql>`, and `pnpm recover:queues` according to `docs/deployment-runbook.md`. Never run restore against an unverified production target.

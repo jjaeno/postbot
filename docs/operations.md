@@ -10,10 +10,10 @@ v1 알림 채널은 in-app이다. 이벤트 키·채널·30분 bucket으로 dedu
 
 ## 관측성과 보안
 
-API는 `x-correlation-id`를 수락 또는 생성해 응답에 반환한다. 로그는 access/refresh token, cookie, password, API key, 암호화된 OAuth token 및 provider 원문 응답을 redaction한다. `/health`는 liveness, `/ready`는 MySQL 의존성 readiness다. production에서는 HSTS, CSP, nosniff, referrer/permissions policy를 적용하고 CORS origin은 `WEB_BASE_URL`만 허용한다.
+API는 `x-correlation-id`를 수락 또는 생성해 응답에 반환하고 BullMQ job payload를 통해 worker/provider 로그까지 전파한다. 로그는 access/refresh token, cookie, password, API key, 암호화된 OAuth token 및 provider 원문 응답을 redaction한다. Sentry는 DSN이 없으면 no-op이다. `/health`는 liveness, `/ready`는 MySQL·Redis·storage readiness다. production에서는 HSTS, CSP, nosniff, referrer/permissions policy를 적용하고 CORS origin은 `WEB_BASE_URL`만 허용한다.
 
 ## 보존·삭제와 복구
 
-OAuth credential·원본 Provider 응답·렌더 파일은 사용자 요청 또는 운영 보존 정책에 따라 비동기 삭제 job으로 처리해야 하며, 감사·비용 원장은 운영상 필요한 기간 동안 별도 보존한다. MySQL은 UTC 백업을 암호화해 별도 접근 제어 저장소에 두고, 복원은 격리 DB에서 checksum과 행 수를 확인한 뒤 실행한다. Redis queue 유실 시 MySQL `ProductionJob`의 `QUEUED`/`RETRY_WAIT` 상태를 기준으로 재enqueue한다.
+`POST /operations/data-lifecycle`은 retention, workspace 삭제, 현재 사용자 삭제 요청을 `DataLifecycleRequest`에 먼저 저장하고 maintenance queue에서 비동기로 수행한다. 원본/렌더 object를 먼저 지우고 workspace graph 또는 만료 데이터를 transaction으로 삭제하며 `GET /operations/data-lifecycle/:id`로 결과를 추적한다. 감사·비용 원장은 승인된 보존 정책에 따라 처리한다. MySQL은 UTC 백업을 암호화해 별도 접근 제어 저장소에 두고, 복원은 격리 DB에서 checksum과 행 수를 확인한 뒤 실행한다. Redis queue 유실 시 `pnpm recover:queues`가 MySQL `ProductionJob`의 대기/재시도/오래된 실행 상태를 기준으로 재enqueue한다.
 
 장애 대응 순서: Provider 장애는 provider switch와 retry/dead-letter를 확인하고, DB/Redis/MinIO 장애는 `/ready`와 컨테이너 healthcheck로 범위를 식별한다. credential 노출 의심 시 해당 플랫폼 계정을 disconnect하고 credential을 회전한다. 게시 중복 의심 시 `PublishPlan` idempotency key와 `PlatformPost`를 먼저 대조한다.

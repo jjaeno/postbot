@@ -1,6 +1,8 @@
 # Postbot 자동 운영 시스템
 
-15단계 자동화는 API 요청에서 작업을 수행하지 않는다. 운영자가 `POST /automation/runs`로 실행을 만들면 MySQL에 `AutomationRun`과 단계별 `AutomationStep`을 먼저 기록하고, 첫 BullMQ 작업만 생성한다. 모든 API는 workspace 소유 채널로 범위를 제한한다.
+15단계 자동화는 API 요청에서 장시간 작업을 수행하지 않는다. 운영자가 `POST /automation/runs`로 실행을 만들면 MySQL에 `AutomationRun`과 단계별 `AutomationStep`을 먼저 기록하고, 첫 BullMQ 작업만 생성한다. 모든 API는 workspace 소유 채널로 범위를 제한한다.
+
+실제 흐름은 `COLLECT → SCRIPT → ASSET → TTS → RENDER → POLICY → PUBLISH`이다. 각 processor output을 `AutomationStep.output`에 저장하고 다음 단계가 content idea, content item, scene version, asset, render manifest, immutable policy snapshot을 다시 조회·검증한다. PUBLISH 준비 단계는 연결 계정과 다음 예약 슬롯을 결정하고 `PublishPlan`을 만든 뒤에만 `publishPlanId`를 worker에 전달한다. 성공한 게시 후 동일 실행 idempotency key로 analytics sync를 enqueue한다.
 
 ## 상태와 복구
 
@@ -12,7 +14,7 @@
 
 재고는 `GENERATING`, `REVIEW_REQUIRED`, `APPROVED`, `SCHEDULED` 콘텐츠를 한 번씩만 합산하여 `minInventoryCount`와 비교한다. 부족분이 없으면 실행은 즉시 성공한다. 완전 자동 채널은 연결된 플랫폼 계정과 활성 게시 규칙이 없으면 새 생성 작업을 시작하지 않고 `PAUSED` 실행과 `NO_CONNECTED_ACCOUNT_OR_SCHEDULE` 사유를 남긴다.
 
-정책·권리·사실 검증은 기존 review/publishing gate를 우회하지 않는다. 특히 `PASS` policy, 렌더 결과, `APPROVED` 상태와 연결된 플랫폼 계정이 없으면 게시 계획을 만들 수 없다.
+정책·권리·사실 검증은 review/publishing gate를 우회하지 않는다. 특히 사실-출처 연결, 신뢰도/충돌, verified commercial license, originality, 민감 주제, 플랫폼/AI disclosure 검사와 렌더 결과가 모두 통과하지 않으면 게시 계획을 만들 수 없다. `APPROVAL`은 사용자 승인 전 PUBLISH를 `AWAITING_APPROVAL`로 보류하고, `FULL_AUTO`도 forced-review finding이 있으면 자동 승인하지 않는다.
 
 ## 운영 제어
 
@@ -34,4 +36,4 @@
 
 ## Fake Provider 검증
 
-`apps/api/src/automation/automation-simulator.spec.ts`는 가상 시간/입력 기반으로 재고 부족분, hard limit 사전 차단, 정책·권리 gate, 연결 계정·게시 슬롯 gate, 연속 실패 circuit breaker를 검증한다. 실제 외부 계정이나 API 키가 없는 환경에서는 이 검증이 provider 계약과 자동화 안전장치를 대체하며, 실제 SNS 게시 검증은 별도 자격 증명 환경에서 수행한다.
+`apps/api/src/automation/automation-simulator.spec.ts`는 가상 시간/입력 기반 안전장치를 검증한다. `apps/api/src/release/fake-journey.e2e.spec.ts`는 별도 API/worker/MySQL/Redis/MinIO 프로세스를 사용해 APPROVAL과 FULL_AUTO를 실제 renderer, Fake 외부 provider, PublishPlan/PlatformPost, analytics, optimization까지 연결한다. 실제 SNS 게시 검증은 별도 자격 증명 환경에서 수행한다.

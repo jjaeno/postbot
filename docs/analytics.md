@@ -19,3 +19,5 @@
 `POST /analytics/sync`는 즉시 외부 호출을 하지 않고 `ANALYTICS` BullMQ job을 만든다. worker가 pagination을 끝까지 처리하고 `AnalyticsSync`에 sync 시각·data delay·부분 실패를 기록한다. 과거 기간을 같은 방식으로 요청하면 backfill이며, 동일 idempotency key는 같은 sync를 재사용한다. 저장은 UTC이고, 요청 timezone은 기간 경계와 UI 표시를 위해 보존한다.
 
 `GET /analytics/report`는 channel, UTC period, 선택 platform으로 조회하며 원본 snapshot에서 정규화 metric까지 mapping version을 추적할 수 있다.
+
+worker factory는 `YOUTUBE_ANALYTICS_PROVIDER`, `INSTAGRAM_ANALYTICS_PROVIDER`, `TIKTOK_ANALYTICS_PROVIDER`를 각각 선택한다. Fake는 local/contract 전용이며 real selector는 저장된 OAuth credential을 복호화·refresh한 뒤 플랫폼 API pagination을 수행한다. 한 page/metric 실패는 partial failure로 기록하고 이미 저장한 snapshot을 삭제하지 않는다.

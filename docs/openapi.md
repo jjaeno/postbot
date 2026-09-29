@@ -6,11 +6,12 @@ The NestJS API exposes the generated OpenAPI UI at:
 http://localhost:3000/openapi
 ```
 
-Current stage 5 endpoints:
+Current v1 endpoint summary (the generated Swagger document is authoritative for schemas):
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
 | GET | `/health` | No | API health check |
+| GET | `/ready` | No | MySQL, Redis, and storage readiness |
 | POST | `/auth/register` | No | Create user, default workspace, and secure session cookies |
 | POST | `/auth/login` | No | Verify email/password and issue secure session cookies |
 | POST | `/auth/refresh` | CSRF cookie/header | Rotate refresh token and issue a new access token |
@@ -27,13 +28,21 @@ Current stage 5 endpoints:
 | GET | `/platform-accounts` | Access cookie | List platform accounts for the authenticated workspace |
 | POST | `/platform-accounts/youtube/connect` | Access cookie + CSRF | Create a YouTube OAuth state with PKCE and return the provider authorization URL |
 | GET | `/platform-accounts/youtube/callback` | OAuth state | Consume a YouTube OAuth callback and connect the platform account |
+| POST | `/platform-accounts/instagram/connect` | Access cookie + CSRF | Start Meta Instagram OAuth |
+| GET | `/platform-accounts/instagram/callback` | OAuth state | Complete Instagram OAuth and profile validation |
+| POST | `/platform-accounts/tiktok/connect` | Access cookie + CSRF | Start TikTok PKCE OAuth |
+| GET | `/platform-accounts/tiktok/callback` | OAuth state | Complete TikTok OAuth and scope validation |
 | POST | `/platform-accounts/:platformAccountId/disconnect` | Access cookie + CSRF | Revoke provider tokens when possible and disconnect the account |
+| POST | `/ideas/collect` | Access cookie + CSRF | Collect and deduplicate manual, fixture, or configured RSS ideas |
 | POST | `/generation/script-scene` | Access cookie + CSRF | Validate an owned idea and enqueue a `SCRIPT` generation job; returns the job immediately |
+| POST | `/jobs` | Access cookie + CSRF | Enqueue a validated production stage job |
 | GET | `/jobs/:jobId` | Access cookie | Read current generation job state and result |
 | GET | `/jobs/:jobId/events` | Access cookie | Subscribe to generation progress via SSE |
 | GET | `/content/:contentItemId/review` | Access cookie | Read a workspace-scoped content preview, sources, asset rights, and latest policy result |
 | POST | `/content/:contentItemId/review/policy-check` | Access cookie + CSRF | Evaluate the effective versioned policy rule and preserve an immutable snapshot |
 | POST | `/content/:contentItemId/review/action` | Access cookie + CSRF | Approve, hold, discard, or mark content scheduled; approval requires a passing policy check |
+| PATCH | `/content/:contentItemId/review/metadata` | Access cookie + CSRF | Create a new platform metadata version |
+| GET | `/content/:contentItemId/review/preview` | Access cookie | Return a short-lived render preview/direct recovery URL |
 | GET | `/content` | Access cookie | List up to 100 workspace-scoped content items for operational status and calendar workflows |
 | POST | `/publishing/plans` | Access cookie + CSRF | Create or return an idempotent YouTube publish plan after policy, account, and render gates pass |
 | GET | `/automation/runs` | Access cookie | List workspace-scoped automation runs and step states |
@@ -44,6 +53,11 @@ Current stage 5 endpoints:
 | POST | `/automation/switches` | Access cookie + CSRF | Set workspace or provider kill switches |
 | POST | `/analytics/sync` | Access cookie + CSRF | Create an idempotent ANALYTICS sync job for one channel/platform/period |
 | GET | `/analytics/report` | Access cookie | Return normalized metrics, availability, mapping version, and latest sync state |
+| POST | `/optimization/suggestions/generate` | Access cookie + CSRF | Generate an evidence/sample-aware optimization suggestion |
+| GET | `/operations/costs` | Access cookie | Return usage/cost reconciliation |
+| GET | `/operations/notifications` | Access cookie | List deduplicated in-app notifications |
+| POST | `/operations/data-lifecycle` | Access cookie + CSRF | Enqueue retention, workspace deletion, or current-user deletion |
+| GET | `/operations/data-lifecycle/:requestId` | Access cookie | Read asynchronous deletion/retention status |
 
 Authenticated mutating requests must include:
 
@@ -78,16 +92,16 @@ Selected platforms without OAuth credentials are returned in `platformConnection
 - granted `scopes`
 - `expiresAt`, `connectedAt`, `disconnectedAt`
 
-`POST /platform-accounts/youtube/connect` accepts an optional `channelId` and returns:
+Each `POST /platform-accounts/<youtube|instagram|tiktok>/connect` accepts an optional `channelId` and returns:
 
 - `authorizationUrl`
 - `stateExpiresAt`
-- `provider`: `fake` or `google`
+- `provider`: the configured Fake or real provider
 - `requiredScopes`
 
-The callback validates OAuth `state`, consumes it once, uses the stored PKCE verifier, validates required YouTube scopes, encrypts access/refresh tokens at application level, records the encryption key version, and links the external account to at most one workspace/channel.
+The callback validates OAuth `state`, consumes it once, uses the stored PKCE verifier where supported, validates platform scopes, encrypts access/refresh tokens at application level, records the encryption key version, and links the external account within one workspace/channel.
 
-The stage 5 API does not upload videos and does not fake successful Google behavior when real credentials or scopes are missing.
+Real selectors fail closed when credentials or scopes are missing. Fake selectors remain explicit local/test providers.
 
 ## Generation Contract
 
