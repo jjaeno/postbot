@@ -1,8 +1,13 @@
 # Postbot v1 Acceptance Report
 
-검증일: 2026-09-29 (Asia/Seoul)  
-검증 코드 SHA: `a45b552046cd3e2fedb2179120d97fe134557f23`  
-기준 브랜치: `main` (작업 시작 기준 `98f296db40610a595f78c579b8266780a8d9ae35`)
+검증일: 2026-09-29 (Asia/Seoul)
+
+Validated implementation SHA: `a2b6103e93e532ef1f164e2dd98b6c9bd5061777`
+
+Final repository SHA: 최종 빈 release marker는 자기 SHA를 이 파일에 포함할 수 없으므로 최종 인계 보고의 `final commit SHA`로 기록한다.
+
+Post-validation changes: 이 보고서와 요구사항 추적성 문서 갱신 및 빈 release marker뿐이며, 검증 대상 구현 변경은 없다.
+기준 브랜치: `main` (이번 blocker 수정 작업 시작 기준 `b4440d1c9a2bf2956472511696c5ed4ab257b68c`)
 
 ## 판정
 
@@ -26,7 +31,7 @@
 | `pnpm install --frozen-lockfile` | PASS |
 | `pnpm lint` | PASS — 25/25 tasks |
 | `pnpm typecheck` | PASS — 25/25 tasks |
-| `pnpm test` | PASS — 25/25 tasks; API 54 passed/3 release tests skipped, DB 5 passed, worker 기본 실행 2 passed/14 환경 통합 tests skipped |
+| `pnpm test` | PASS — 25/25 tasks; API 60 passed/9 skipped, DB 5 passed, worker 환경 의존 통합 tests는 별도 실행 |
 | Provider S3 통합 테스트 | PASS — 13/13 |
 | Asset repository DB 통합 테스트 | PASS — 3/3 |
 | worker DB 통합 테스트 | PASS — 16/16 |
@@ -42,18 +47,19 @@
 
 | 여정 | 결과 | 로컬 측정 |
 | --- | --- | ---: |
-| 가입→로그인→수집→대본/장면→asset→TTS→render→승인→게시→분석 | PASS | 136,137ms |
-| APPROVAL 자동화→검수 승인→게시→분석→최적화 | PASS | 141,533ms |
-| FULL_AUTO 자동화→정책 gate→게시→분석→최적화 | PASS | 179,715ms |
+| 가입→로그인→수집→대본/장면→asset→TTS→render→승인→게시→분석 | PASS | 177,112ms |
+| 3-platform APPROVAL 자동화→플랫폼별 제작/검수→게시→분석→최적화 | PASS | 413,004ms |
+| 3-platform FULL_AUTO 자동화→플랫폼별 정책 gate→게시→분석→최적화 | PASS | 400,874ms |
 
-총 Vitest E2E 실행은 458.12초였다. 최초 성능 probe는 운영용 60회/분 rate limit과 충돌했으며, liveness/readiness를 일반 API rate limit에서 제외해 모니터링과 측정이 429를 유발하지 않도록 수정한 뒤 재실행했다.
+세 여정은 분리 실행했으며 모두 통과했다. 최초 성능 probe는 운영용 60회/분 rate limit과 충돌했으며, liveness/readiness를 일반 API rate limit에서 제외해 모니터링과 측정이 429를 유발하지 않도록 수정한 뒤 재실행했다.
 
 ## Migration, 데이터 및 복구
 
 | 검증 | 결과 |
 | --- | --- |
-| 빈 DB `prisma migrate deploy` + seed + status | PASS — 10 migrations, pending 0 |
-| 기존 DB forward upgrade + status | PASS — 10 migrations, pending 0 |
+| 빈 DB `prisma migrate deploy` + status | PASS — 11 migrations, pending 0 |
+| 기존 DB forward upgrade + status | PASS — 11 migrations, pending 0 |
+| automation platform fan-out forward migration | PASS — 공통 `branchKey=COMMON`, 플랫폼별 branch unique/index 적용 |
 | workspace 범위 platform account unique migration | PASS |
 | 비동기 retention/workspace/user lifecycle 및 object 삭제 | PASS — DB integration |
 | Redis/queue 복구 명령 | PASS — stale reset 0, enqueue 0인 정상 수렴 상태 |
@@ -66,6 +72,7 @@
 
 - Redis 재연결, stale job 복구, worker 재시작과 실패 단계 재개
 - Provider timeout/rate limit, storage/renderer 실패, OAuth 만료·refresh
+- workspace/channel authoritative relation scope, 통화 분리, orphan fail-closed, 동시 예약 직렬화
 - 예산 초과 fail-closed, 예약 비용 확정/해제
 - semantic idempotency key, 동시 요청 race, 중복 비용·asset·게시 방지
 - ambiguous publish timeout 이후 상태 조회와 재게시 방지
@@ -95,6 +102,8 @@ smoke fixture는 의도적으로 무음이어서 `hasAudio=false`이며, 음성 
 - security workflow는 pnpm audit, Gitleaks, Trivy filesystem 및 api/worker/renderer/web image scan을 실행
 
 GitHub-hosted workflow와 registry push/digest 승격은 원격 저장소 push 및 production 배포 계약 후 실행한다. 동일 commit SHA의 image digest를 staging에서 production으로 승격하고, 재빌드는 하지 않는다.
+
+이번 blocker 수정의 production Compose build는 첫 시도에서 Docker BuildKit 연결 EOF가 발생했으나 Docker engine 정상 상태를 확인한 뒤 동일 명령을 재실행해 api/migrate/renderer/web/worker 5개 이미지를 모두 완성했다.
 
 ## 의존성 보안
 
@@ -135,6 +144,19 @@ GitHub-hosted workflow와 registry push/digest 승격은 원격 저장소 push �
 - Node.js 20은 현재 지원되지만 AWS SDK가 2027년 1월 이후 발행 버전부터 Node.js 22를 요구한다고 경고한다. Node 22 승격을 별도 운영 업그레이드로 계획한다.
 - production 성능·RPO/RTO 수치는 배포 대상이 확정되기 전이므로 임의 목표를 선언하지 않았다.
 - 플랫폼 정책·scope·quota는 사업자 변경 가능성이 있어 실제 smoke 시점에 다시 확인해야 한다.
+
+## 2026-09-29 P0 blocker 해소 증거
+
+| 내부 blocker | 구현 및 검증 | 결과 |
+| --- | --- | --- |
+| 멀티플랫폼 자동화 fan-out | 공통 COLLECT 뒤 YOUTUBE/INSTAGRAM/TIKTOK별 SCRIPT→ASSET→TTS→RENDER→POLICY→PUBLISH branch, 플랫폼별 version/plan/post, 전체 branch terminal 집계 | PASS |
+| 플랫폼 부분 실패와 재개 | Instagram publish만 실패시 YouTube/TikTok 결과 유지, Instagram만 retry, 최종 SUCCEEDED; queued duplicate와 stale claim recovery 회귀 포함 | PASS |
+| 플랫폼별 policy/rights gate | block된 플랫폼만 publish 금지하고 다른 branch는 독립 진행 | PASS |
+| workspace budget 격리 | 다른 workspace의 $500 비용을 제외하고 동일 workspace의 여러 channel 비용은 합산 | PASS |
+| channel budget 격리 | 대상 channel 비용과 활성 reservation만 포함하고 sibling channel 비용 제외 | PASS |
+| 예산 보수성 | currency별 계산, 귀속 불가 ledger fail-closed, serializable transaction과 row lock으로 동시 overspend 방지 | PASS |
+
+직접 증거는 `automation-branching.integration.spec.ts` 1/1, `automation-budget.integration.spec.ts` 5/5, worker DB integration 16/16, 3-platform APPROVAL/FULL_AUTO release E2E 각 1/1이다. 동일 automation idempotency key 재호출 후 `PlatformPost`는 3개로 유지되고 외부 post ID도 모두 고유했다.
 
 ## 최종 blocker
 
