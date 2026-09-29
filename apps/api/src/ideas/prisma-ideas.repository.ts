@@ -95,7 +95,9 @@ export class PrismaIdeasRepository implements IdeasRepository {
             expectedValueScore: new Prisma.Decimal(candidate.expectedValueScore.toFixed(6)),
             rawSnapshot: {
               url: candidate.url,
-              bodyHash: candidate.contentHash
+              bodyHash: candidate.contentHash,
+              eventAt: candidate.eventAt ?? null,
+              reliability: candidate.reliabilityMetadata ? JSON.parse(JSON.stringify(candidate.reliabilityMetadata)) as Prisma.InputJsonObject : null
             }
           }
         });

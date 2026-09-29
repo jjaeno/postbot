@@ -1,5 +1,7 @@
 import type { Prisma, PrismaClient } from "@postbot/database";
-import { FakeAnalyticsProvider } from "@postbot/providers";
+import { loadConfig } from "@postbot/config";
+import { FakeAnalyticsProvider, InstagramAnalyticsProvider, TikTokAnalyticsProvider, YouTubeAnalyticsProvider, type AnalyticsProvider } from "@postbot/providers";
+import { resolveOAuthAccessToken } from "./oauth-token.js";
 
 const syncIdFromPayload = (payload: Record<string, unknown>): string | null => {
   const analytics = payload.analytics;
@@ -7,18 +9,18 @@ const syncIdFromPayload = (payload: Record<string, unknown>): string | null => {
 };
 
 export class AnalyticsProcessor {
-  private readonly provider = new FakeAnalyticsProvider();
   constructor(private readonly prisma: PrismaClient) {}
   async process(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
     const syncId = syncIdFromPayload(payload);
     if (!syncId) return { skipped: true };
     const sync = await this.prisma.analyticsSync.findUnique({ where: { id: syncId } });
     if (!sync) throw new Error("ANALYTICS_SYNC_NOT_FOUND");
+    const provider = await this.provider(sync.channelId, sync.platform);
     const posts = await this.prisma.platformPost.findMany({ where: { platform: sync.platform, publishPlan: { contentItem: { channelId: sync.channelId } } }, select: { id: true, externalPostId: true } });
     let token: string | null = null;
     let count = 0;
     do {
-      const page = await this.provider.fetchPage({ platform: sync.platform, postIds: posts.map((post) => post.externalPostId), periodStart: sync.periodStart.toISOString(), periodEnd: sync.periodEnd.toISOString(), pageToken: token });
+      const page = await provider.fetchPage({ platform: sync.platform, postIds: posts.map((post) => post.externalPostId), periodStart: sync.periodStart.toISOString(), periodEnd: sync.periodEnd.toISOString(), pageToken: token });
       for (const post of page.posts) {
         const target = posts.find((item) => item.externalPostId === post.externalPostId);
         if (!target) continue;
@@ -30,5 +32,18 @@ export class AnalyticsProcessor {
     } while (token);
     await this.prisma.analyticsSync.update({ where: { id: sync.id }, data: { status: "SUCCEEDED", syncedAt: new Date() } });
     return { syncId, posts: count };
+  }
+
+  private async provider(channelId: string, platform: "YOUTUBE" | "INSTAGRAM" | "TIKTOK"): Promise<AnalyticsProvider> {
+    const config = loadConfig();
+    const useFake = platform === "YOUTUBE" ? config.YOUTUBE_ANALYTICS_PROVIDER === "fake" : platform === "INSTAGRAM" ? config.INSTAGRAM_ANALYTICS_PROVIDER === "fake" : config.TIKTOK_ANALYTICS_PROVIDER === "fake";
+    if (useFake) return new FakeAnalyticsProvider();
+    const account = await this.prisma.platformAccount.findFirst({ where: { channelId, platform, status: "CONNECTED" }, include: { credential: true } });
+    if (!account) throw new Error("ANALYTICS_PLATFORM_ACCOUNT_NOT_CONNECTED");
+    const accessToken = await resolveOAuthAccessToken(this.prisma, account);
+    const options = { accessToken, timeoutMs: config.PROVIDER_HTTP_TIMEOUT_MS };
+    if (platform === "INSTAGRAM") return new InstagramAnalyticsProvider({ ...options, graphVersion: config.INSTAGRAM_GRAPH_VERSION });
+    if (platform === "TIKTOK") return new TikTokAnalyticsProvider(options);
+    return new YouTubeAnalyticsProvider(options);
   }
 }

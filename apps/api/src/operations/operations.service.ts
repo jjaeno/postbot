@@ -1,13 +1,38 @@
-import { ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, OnModuleDestroy } from "@nestjs/common";
 import { Prisma, type PrismaClient } from "@postbot/database";
-import { AuditLogResponseSchema, CostReportQuerySchema, CostReportResponseSchema, NotificationResponseSchema, type AuditLogResponse, type CostReportResponse, type NotificationResponse } from "@postbot/contracts";
+import { AuditLogResponseSchema, CostReportQuerySchema, CostReportResponseSchema, CreateDataLifecycleRequestSchema, DataLifecycleRequestResponseSchema, NotificationResponseSchema, type AuditLogResponse, type CostReportResponse, type DataLifecycleRequestResponse, type NotificationResponse } from "@postbot/contracts";
+import type { MaintenanceQueueAdapter } from "@postbot/jobs";
 import { OAuthCryptoService } from "../oauth/oauth-crypto.service.js";
 
 const number = (value: Prisma.Decimal | null | undefined): number => Number(value?.toString() ?? "0");
+export const MAINTENANCE_QUEUE = Symbol("MAINTENANCE_QUEUE");
+
+const lifecycleResponse = (request: {
+  id: string; workspaceId: string | null; requestedByUserId: string | null; type: string; status: string;
+  retentionBefore: Date | null; result: Prisma.JsonValue | null; errorCode: string | null; errorMessage: string | null;
+  startedAt: Date | null; finishedAt: Date | null; createdAt: Date; updatedAt: Date;
+}, duplicate?: boolean): DataLifecycleRequestResponse => DataLifecycleRequestResponseSchema.parse({
+  ...request,
+  retentionBefore: request.retentionBefore?.toISOString() ?? null,
+  startedAt: request.startedAt?.toISOString() ?? null,
+  finishedAt: request.finishedAt?.toISOString() ?? null,
+  createdAt: request.createdAt.toISOString(),
+  updatedAt: request.updatedAt.toISOString(),
+  result: request.result ?? null,
+  duplicate
+});
 
 @Injectable()
-export class OperationsService {
-  constructor(@Inject("PRISMA_CLIENT") private readonly prisma: PrismaClient, private readonly crypto: OAuthCryptoService) {}
+export class OperationsService implements OnModuleDestroy {
+  constructor(
+    @Inject("PRISMA_CLIENT") private readonly prisma: PrismaClient,
+    private readonly crypto: OAuthCryptoService,
+    @Inject(MAINTENANCE_QUEUE) private readonly maintenanceQueue: MaintenanceQueueAdapter
+  ) {}
+
+  onModuleDestroy(): Promise<void> {
+    return this.maintenanceQueue.close();
+  }
 
   async costReport(workspaceId: string, raw: unknown): Promise<CostReportResponse> {
     const input = CostReportQuerySchema.parse(raw);
@@ -70,5 +95,42 @@ export class OperationsService {
     }
     await this.audit(workspaceId, userId, "oauth.key_rotation", "oauth_credential", null, { rotated });
     return { rotated };
+  }
+
+  async createLifecycleRequest(workspaceId: string, userId: string, role: string, raw: unknown): Promise<DataLifecycleRequestResponse> {
+    if (role !== "OWNER") throw new ForbiddenException("OWNER_ROLE_REQUIRED");
+    const input = CreateDataLifecycleRequestSchema.parse(raw);
+    const existing = await this.prisma.dataLifecycleRequest.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
+    if (existing) {
+      const sameIntent = existing.workspaceId === workspaceId && existing.requestedByUserId === userId && existing.type === input.type &&
+        (existing.retentionBefore?.toISOString() ?? null) === (input.retentionBefore ?? null);
+      if (!sameIntent) throw new ConflictException("IDEMPOTENCY_CONFLICT");
+      return lifecycleResponse(existing, true);
+    }
+    const request = await this.prisma.dataLifecycleRequest.create({
+      data: {
+        workspaceId,
+        requestedByUserId: userId,
+        type: input.type,
+        retentionBefore: input.retentionBefore ? new Date(input.retentionBefore) : null,
+        idempotencyKey: input.idempotencyKey
+      }
+    });
+    await this.audit(workspaceId, userId, "data_lifecycle.request", "data_lifecycle_request", request.id, { type: request.type, retentionBefore: input.retentionBefore ?? null });
+    try {
+      await this.maintenanceQueue.enqueue({ requestId: request.id });
+    } catch (error) {
+      await this.prisma.dataLifecycleRequest.update({ where: { id: request.id }, data: { status: "FAILED", errorCode: "QUEUE_UNAVAILABLE", errorMessage: error instanceof Error ? error.message.slice(0, 2_000) : "Maintenance queue unavailable.", finishedAt: new Date() } });
+      throw error;
+    }
+    return lifecycleResponse(request, false);
+  }
+
+  async getLifecycleRequest(workspaceId: string, userId: string, requestId: string): Promise<DataLifecycleRequestResponse> {
+    const request = await this.prisma.dataLifecycleRequest.findFirst({
+      where: { id: requestId, OR: [{ workspaceId }, { requestedByUserId: userId }] }
+    });
+    if (!request) throw new NotFoundException("DATA_LIFECYCLE_REQUEST_NOT_FOUND");
+    return lifecycleResponse(request);
   }
 }

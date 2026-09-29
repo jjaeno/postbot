@@ -4,11 +4,15 @@ import { NestFactory } from "@nestjs/core";
 import { loadConfig } from "@postbot/config";
 import { createLogger } from "@postbot/logger";
 import { WorkerModule } from "./worker.module.js";
+import * as Sentry from "@sentry/node";
 
 const keepAlive = (): NodeJS.Timeout => setInterval(() => undefined, 60_000);
 
 const bootstrap = async (): Promise<void> => {
   const config = loadConfig();
+  if (config.SENTRY_DSN) {
+    Sentry.init({ dsn: config.SENTRY_DSN, environment: config.SENTRY_ENVIRONMENT });
+  }
   const logger = createLogger("postbot-worker");
   const app = await NestFactory.createApplicationContext(WorkerModule, { bufferLogs: true });
   const interval = keepAlive();

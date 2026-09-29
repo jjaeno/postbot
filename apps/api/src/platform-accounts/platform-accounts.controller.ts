@@ -30,10 +30,32 @@ export class PlatformAccountsController {
     return this.accounts.startYouTube(req.auth.workspaceId, body);
   }
 
+  @Post("instagram/connect")
+  @UseGuards(AccessTokenGuard)
+  startInstagram(@Req() req: AuthenticatedRequest, @Body() body: unknown): Promise<StartOAuthConnectionResponse> {
+    return this.accounts.startInstagram(req.auth.workspaceId, body);
+  }
+
+  @Post("tiktok/connect")
+  @UseGuards(AccessTokenGuard)
+  startTikTok(@Req() req: AuthenticatedRequest, @Body() body: unknown): Promise<StartOAuthConnectionResponse> {
+    return this.accounts.startTikTok(req.auth.workspaceId, body);
+  }
+
   @Get("youtube/callback")
   @ApiOkResponse({ description: "Complete YouTube OAuth callback." })
   completeYouTube(@Query() query: unknown): Promise<OAuthCallbackResult> {
     return this.accounts.completeYouTube(query);
+  }
+
+  @Get("instagram/callback")
+  completeInstagram(@Query() query: unknown): Promise<OAuthCallbackResult> {
+    return this.accounts.completeInstagram(query);
+  }
+
+  @Get("tiktok/callback")
+  completeTikTok(@Query() query: unknown): Promise<OAuthCallbackResult> {
+    return this.accounts.completeTikTok(query);
   }
 
   @Post(":platformAccountId/disconnect")

@@ -79,7 +79,7 @@ export class IdeasService {
             provider: "manual",
             candidates: input.manualCandidates
           }
-        : await this.collectFromProvider(this.providers.fixture(), settings, input);
+        : await this.collectFromProvider(this.providers.automatic(), settings, input);
 
     const scored = providerResult.candidates.map((candidate) => this.scoreCandidate(candidate, settings));
     const saved = await this.repository.saveCandidates(settings.channelId, providerResult.provider, scored);

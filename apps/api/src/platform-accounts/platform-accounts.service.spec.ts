@@ -119,6 +119,14 @@ class TestProviderFactory {
   youtube(): PublisherProvider {
     return this.provider;
   }
+
+  instagram(): PublisherProvider {
+    return this.provider;
+  }
+
+  tiktok(): PublisherProvider {
+    return this.provider;
+  }
 }
 
 class InsufficientScopeProvider extends FakeYouTubePublisherProvider {

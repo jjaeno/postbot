@@ -37,6 +37,9 @@ import {
   CreateChannelRequestSchema,
   OAuthCallbackResultSchema,
   OptimizationSuggestionResponseSchema,
+  ProductionJobResponseSchema,
+  PublishPlanResponseSchema,
+  ReviewPreviewResponseSchema,
   CostReportResponseSchema,
   NotificationResponseSchema,
   PlatformAccountListResponseSchema,
@@ -484,7 +487,7 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
         <IdeasPanel channels={channels.data ?? []} onError={setError} />
         <ContentPanel content={content.data ?? []} isLoading={content.isLoading} onError={setError} />
         <CalendarPanel channels={channels.data ?? []} />
-        <ReviewPanel onError={setError} />
+        <ReviewPanel accounts={platformAccounts.data ?? []} onError={setError} />
       </section>
       {wizardOpen ? <ChannelWizard onClose={() => setWizardOpen(false)} onError={setError} /> : null}
     </main>
@@ -539,25 +542,61 @@ const CalendarPanel = ({ channels }: { channels: ChannelResponse[] }): ReactElem
   {channels.length === 0 ? <p className="mt-4 rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">Create a channel to see its publishing schedule.</p> : <div className="mt-4 grid gap-3 md:grid-cols-7">{weekdayLabels.map((day, index) => <article className="min-h-32 rounded-md border border-border p-3" key={day}><h3 className="text-sm font-semibold">{day}</h3><div className="mt-3 space-y-2">{channels.flatMap((channel) => channel.scheduleRules.filter((rule) => rule.dayOfWeek === index).map((rule) => ({ channel, rule }))).map(({ channel, rule }) => <div className="rounded bg-muted p-2 text-xs" key={`${channel.id}-${rule.platform}-${rule.timeOfDayLocal}`}><p className="font-medium">{rule.timeOfDayLocal}</p><p className="mt-1">{channel.name}</p><p className="text-muted-foreground">{rule.platform} · max {rule.maxPosts}</p></div>)}</div></article>)}</div>}
 </section>;
 
-const ReviewPanel = ({ onError }: { onError: (error: string) => void }): ReactElement => {
+const ReviewPanel = ({ accounts, onError }: { accounts: PlatformAccountResponse[]; onError: (error: string) => void }): ReactElement => {
   const queryClient = useQueryClient();
   const [contentItemId, setContentItemId] = useState("");
+  const [platform, setPlatform] = useState<Platform>("YOUTUBE");
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [hashtags, setHashtags] = useState("");
+  const [scheduledAt, setScheduledAt] = useState(() => new Date(Date.now() + 10 * 60_000).toISOString().slice(0, 16));
   const review = useQuery({ queryKey: ["content-review", contentItemId], queryFn: () => fetchReview(contentItemId), enabled: contentItemId.length > 0, retry: false });
+  const preview = useQuery({ queryKey: ["content-preview", contentItemId, platform], queryFn: () => request(`/content/${contentItemId}/review/preview?platform=${platform}`, { method: "GET" }, ReviewPreviewResponseSchema), enabled: Boolean(contentItemId && review.data?.outputs.some((output) => output.platform === platform && output.videoReady)), retry: false });
   const policyCheck = useMutation({
     mutationFn: (platform: Platform) => request(`/content/${contentItemId}/review/policy-check`, { method: "POST", body: JSON.stringify({ platform }) }, ContentReviewResponseSchema),
     onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["content-review", contentItemId] }); },
     onError: (error) => onError(error instanceof Error ? error.message : "Policy check failed.")
   });
   const action = useMutation({
-    mutationFn: (nextAction: "approve" | "hold" | "discard" | "schedule") => request(`/content/${contentItemId}/review/action`, { method: "POST", body: JSON.stringify({ action: nextAction }) }, ContentReviewResponseSchema),
+    mutationFn: (nextAction: "approve" | "hold" | "discard") => request(`/content/${contentItemId}/review/action`, { method: "POST", body: JSON.stringify({ action: nextAction }) }, ContentReviewResponseSchema),
     onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["content-review", contentItemId] }); },
     onError: (error) => onError(error instanceof Error ? error.message : "Review action failed.")
   });
   const data = review.data;
+  const output = data?.outputs.find((candidate) => candidate.platform === platform) ?? data?.outputs[0];
+  useEffect(() => {
+    if (!data) return;
+    setTitle(data.title);
+    setDescription(output?.metadata.description ?? data.description);
+    setHashtags(output?.metadata.hashtags.join(" ") ?? "");
+  }, [data, output?.scriptVersionId]);
+  const metadata = useMutation({
+    mutationFn: () => request(`/content/${contentItemId}/review/metadata`, { method: "PATCH", body: JSON.stringify({ platform, title, description, hashtags: hashtags.split(/[\s,]+/).map((tag) => tag.trim()).filter(Boolean) }) }, ContentReviewResponseSchema),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["content-review", contentItemId] }); },
+    onError: (error) => onError(error instanceof Error ? error.message : "Metadata update failed.")
+  });
+  const regenerate = useMutation({
+    mutationFn: (partial: "full" | "hook" | "body" | "metadata" | "scene") => {
+      if (!data?.ideaId) throw new Error("The originating idea is not available for regeneration.");
+      return request("/generation/script-scene", { method: "POST", body: JSON.stringify({ ideaId: data.ideaId, platform, partial, idempotencyKey: `review:${contentItemId}:${platform}:${partial}:${Date.now()}` }) }, ProductionJobResponseSchema);
+    },
+    onSuccess: () => onError("Regeneration job queued. Refresh the review after it completes."),
+    onError: (error) => onError(error instanceof Error ? error.message : "Regeneration failed.")
+  });
+  const schedule = useMutation({
+    mutationFn: () => {
+      const account = accounts.find((candidate) => candidate.channelId === data?.channelId && candidate.platform === platform && candidate.status === "CONNECTED");
+      if (!account) throw new Error(`Connect a ${platform} account before scheduling.`);
+      return request("/publishing/plans", { method: "POST", body: JSON.stringify({ contentItemId, platformAccountId: account.id, scheduledAt: new Date(scheduledAt).toISOString(), idempotencyKey: `review:${contentItemId}:${platform}:${new Date(scheduledAt).toISOString()}` }) }, PublishPlanResponseSchema);
+    },
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["content-review", contentItemId] }); void queryClient.invalidateQueries({ queryKey: ["content"] }); },
+    onError: (error) => onError(error instanceof Error ? error.message : "Scheduling failed.")
+  });
   return <section className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="review-panel">
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-lg font-semibold">Content review</h2><p className="mt-1 text-sm text-muted-foreground">Check sources, rights, policy findings, then approve or hold.</p></div><div className="flex gap-2"><input aria-label="Content item ID" className="h-10 rounded-md border border-border px-3 text-sm" onChange={(event) => setContentItemId(event.target.value.trim())} placeholder="Content item ID" value={contentItemId} /><Button disabled={!contentItemId || policyCheck.isPending} onClick={() => policyCheck.mutate("YOUTUBE")}>Run policy check</Button></div></div>
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-lg font-semibold">Content review</h2><p className="mt-1 text-sm text-muted-foreground">Review each platform output, render, sources, rights, metadata, and policy gate.</p></div><div className="flex gap-2"><input aria-label="Content item ID" className="h-10 rounded-md border border-border px-3 text-sm" onChange={(event) => setContentItemId(event.target.value.trim())} placeholder="Content item ID" value={contentItemId} /><Button disabled={!contentItemId || policyCheck.isPending} onClick={() => policyCheck.mutate(platform)}>Run policy check</Button></div></div>
+    <div className="mt-4 flex gap-2" role="tablist">{(["YOUTUBE", "INSTAGRAM", "TIKTOK"] as const).map((candidate) => <Button className={platform === candidate ? "" : "bg-foreground"} key={candidate} onClick={() => setPlatform(candidate)} type="button">{candidate}</Button>)}</div>
     {review.isLoading ? <p className="mt-4 text-sm text-muted-foreground">Loading review.</p> : null}
-    {data ? <div className="mt-4 grid gap-4 lg:grid-cols-2"><article className="rounded-md border border-border p-4"><div className="flex items-center justify-between"><h3 className="font-medium">{data.title}</h3><span className="rounded bg-muted px-2 py-1 text-xs">{data.status}</span></div><p className="mt-3 text-sm">{data.description}</p><p className="mt-2 text-sm text-muted-foreground">Duration: {data.durationSeconds ?? "unknown"} seconds</p><h4 className="mt-4 text-sm font-semibold">Sources</h4><ul className="mt-2 space-y-1 text-sm">{data.sources.map((source) => <li key={source.url}><a className="text-primary" href={source.url} rel="noreferrer" target="_blank">{source.sourceName}: {source.title}</a></li>)}</ul><h4 className="mt-4 text-sm font-semibold">Asset rights</h4><ul className="mt-2 space-y-1 text-sm">{data.assets.map((asset) => <li key={`${asset.id}-${asset.purpose}`}>{asset.purpose}: {asset.licenseStatus}</li>)}</ul></article><article className="rounded-md border border-border p-4"><h3 className="font-medium">Policy</h3><p className="mt-2 text-sm">{data.policy ? data.policy.status : "Not checked"}</p><ul className="mt-3 space-y-2 text-sm">{data.policy?.findings.map((finding) => <li key={finding.code} className="rounded bg-muted p-2">{finding.severity}: {finding.message}</li>)}</ul><div className="mt-5 flex flex-wrap gap-2"><Button disabled={action.isPending} onClick={() => action.mutate("approve")}>Approve</Button><Button className="bg-foreground" disabled={action.isPending} onClick={() => action.mutate("hold")}>Hold</Button><Button className="bg-foreground" disabled={action.isPending} onClick={() => action.mutate("discard")}>Discard</Button><Button disabled={action.isPending} onClick={() => action.mutate("schedule")}>Schedule</Button></div></article></div> : null}
+    {data ? <div className="mt-4 grid gap-4 lg:grid-cols-2"><article className="rounded-md border border-border p-4"><div className="flex items-center justify-between"><h3 className="font-medium">{platform} output</h3><span className="rounded bg-muted px-2 py-1 text-xs">{data.status}</span></div><p className="mt-2 text-xs text-muted-foreground">Script: {output?.scriptStatus ?? "missing"} · Scene: {output?.sceneVersionId ? "ready" : "missing"} · Render: {output?.renderStatus ?? "pending"}</p>{preview.data ? <video className="mt-3 aspect-[9/16] max-h-[480px] w-full rounded bg-black" controls src={preview.data.url} /> : <p className="mt-3 rounded bg-muted p-4 text-sm">Rendered video preview is not available for this platform output.</p>}<label className="mt-4 block text-sm font-medium">Title<input className="mt-1 h-10 w-full rounded border border-border px-3" onChange={(event) => setTitle(event.target.value)} value={title} /></label><label className="mt-3 block text-sm font-medium">Description<textarea className="mt-1 min-h-24 w-full rounded border border-border p-3" onChange={(event) => setDescription(event.target.value)} value={description} /></label><label className="mt-3 block text-sm font-medium">Hashtags<input className="mt-1 h-10 w-full rounded border border-border px-3" onChange={(event) => setHashtags(event.target.value)} value={hashtags} /></label><div className="mt-3 flex flex-wrap gap-2"><Button disabled={metadata.isPending || !output} onClick={() => metadata.mutate()}>Save metadata</Button><Button className="bg-foreground" disabled={regenerate.isPending} onClick={() => regenerate.mutate("scene")}>Partial regenerate</Button><Button className="bg-foreground" disabled={regenerate.isPending} onClick={() => regenerate.mutate("full")}>Full regenerate</Button></div><h4 className="mt-4 text-sm font-semibold">Sources</h4><ul className="mt-2 space-y-1 text-sm">{data.sources.map((source) => <li key={source.url}><a className="text-primary" href={source.url} rel="noreferrer" target="_blank">{source.sourceName}: {source.title}</a></li>)}</ul><h4 className="mt-4 text-sm font-semibold">Asset rights</h4><ul className="mt-2 space-y-1 text-sm">{data.assets.map((asset) => <li key={`${asset.id}-${asset.purpose}`}>{asset.purpose}: {asset.licenseStatus}</li>)}</ul></article><article className="rounded-md border border-border p-4"><h3 className="font-medium">Policy findings</h3><p className="mt-2 text-sm">{data.policy ? data.policy.status : "Not checked"}</p><ul className="mt-3 space-y-2 text-sm">{data.policy?.findings.map((finding) => <li key={`${finding.code}-${finding.message}`} className="rounded bg-muted p-2">{finding.severity}: {finding.message}</li>)}</ul><div className="mt-5 flex flex-wrap gap-2"><Button disabled={action.isPending} onClick={() => action.mutate("approve")}>Approve</Button><Button className="bg-foreground" disabled={action.isPending} onClick={() => action.mutate("hold")}>Hold</Button><Button className="bg-foreground" disabled={action.isPending} onClick={() => action.mutate("discard")}>Discard</Button></div><div className="mt-5 border-t border-border pt-4"><label className="block text-sm font-medium">Schedule time<input className="mt-1 h-10 w-full rounded border border-border px-3" min={new Date().toISOString().slice(0, 16)} onChange={(event) => setScheduledAt(event.target.value)} type="datetime-local" value={scheduledAt} /></label><Button className="mt-3" disabled={schedule.isPending || data.status !== "APPROVED" || !output?.videoReady} onClick={() => schedule.mutate()}>Create publish plan</Button></div></article></div> : null}
   </section>;
 };
 
@@ -748,12 +787,6 @@ const ChannelCard = ({
   onError: (error: string) => void;
 }): ReactElement => {
   const queryClient = useQueryClient();
-  const youtubeAccount = accounts.find((account) => account.platform === "YOUTUBE" && account.channelId === channel.id);
-  const youtubeConnected = youtubeAccount?.status === "CONNECTED";
-  const youtubeExpired = youtubeAccount?.status === "EXPIRED";
-  const youtubeScopeMissing =
-    youtubeAccount?.status === "CONNECTED" &&
-    !youtubeAccount.scopes.includes("https://www.googleapis.com/auth/youtube.readonly");
   const statusMutation = useMutation({
     mutationFn: (action: "pause" | "resume") =>
       request(`/channels/${channel.id}/${action}`, { method: "POST" }, ChannelResponseSchema),
@@ -763,9 +796,9 @@ const ChannelCard = ({
     onError: (error) => onError(error instanceof Error ? error.message : "채널 상태를 변경하지 못했습니다.")
   });
   const connectMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (platform: Platform) => {
       const started = await request(
-        "/platform-accounts/youtube/connect",
+        `/platform-accounts/${platform.toLowerCase()}/connect`,
         { method: "POST", body: JSON.stringify({ channelId: channel.id }) },
         StartOAuthConnectionResponseSchema
       );
@@ -779,20 +812,15 @@ const ChannelCard = ({
       void queryClient.invalidateQueries({ queryKey: ["channels"] });
       void queryClient.invalidateQueries({ queryKey: ["platform-accounts"] });
     },
-    onError: (error) => onError(error instanceof Error ? error.message : "YouTube 계정을 연결하지 못했습니다.")
+    onError: (error) => onError(error instanceof Error ? error.message : "플랫폼 계정을 연결하지 못했습니다.")
   });
   const disconnectMutation = useMutation({
-    mutationFn: () => {
-      if (!youtubeAccount) {
-        throw new Error("연결된 YouTube 계정이 없습니다.");
-      }
-      return request(`/platform-accounts/${youtubeAccount.id}/disconnect`, { method: "POST" }, { parse: () => ({ ok: true }) });
-    },
+    mutationFn: (platformAccountId: string) => request(`/platform-accounts/${platformAccountId}/disconnect`, { method: "POST" }, { parse: () => ({ ok: true }) }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["channels"] });
       void queryClient.invalidateQueries({ queryKey: ["platform-accounts"] });
     },
-    onError: (error) => onError(error instanceof Error ? error.message : "YouTube 계정 연결을 해제하지 못했습니다.")
+    onError: (error) => onError(error instanceof Error ? error.message : "플랫폼 계정 연결을 해제하지 못했습니다.")
   });
 
   return (
@@ -825,11 +853,15 @@ const ChannelCard = ({
         </div>
       </div>
       <div className="mt-4 grid gap-3 md:grid-cols-3">
-        {channel.platformConnections.map((connection) => (
-          <div key={connection.platform} className="rounded-md border border-border bg-muted px-3 py-2">
+        {channel.platformConnections.map((connection) => {
+          const account = accounts.find((candidate) => candidate.platform === connection.platform && candidate.channelId === channel.id);
+          const connected = account?.status === "CONNECTED";
+          const expired = account?.status === "EXPIRED";
+          const scopeMissing = connected && (connection.platform === "YOUTUBE" ? !account.scopes.includes("https://www.googleapis.com/auth/youtube.readonly") : connection.platform === "INSTAGRAM" ? !account.scopes.includes("instagram_business_content_publish") : !account.scopes.includes("video.publish"));
+          return <div key={connection.platform} className="rounded-md border border-border bg-muted px-3 py-2">
             <p className="text-sm font-medium">{platforms.find((item) => item.value === connection.platform)?.label}</p>
             <p className="mt-1 text-xs text-muted-foreground">
-              {connection.platform === "YOUTUBE" && youtubeScopeMissing
+              {scopeMissing
                 ? "권한 부족"
                 : connection.status === "PLANNED"
                   ? "연결 예정"
@@ -837,24 +869,23 @@ const ChannelCard = ({
                     ? "만료"
                     : connection.status}
             </p>
-            {connection.platform === "YOUTUBE" ? (
               <div className="mt-3 flex flex-wrap gap-2">
-                {youtubeConnected || youtubeExpired ? (
+                {connected || expired ? (
                   <>
                     <Button
                       className="h-9 gap-2"
-                      data-testid={`connect-youtube-${channel.id}`}
+                      data-testid={`connect-${connection.platform.toLowerCase()}-${channel.id}`}
                       disabled={connectMutation.isPending}
-                      onClick={() => connectMutation.mutate()}
+                      onClick={() => connectMutation.mutate(connection.platform)}
                     >
                       <RefreshCw aria-hidden="true" className="h-4 w-4" />
                       재연결
                     </Button>
                     <Button
                       className="h-9 gap-2 bg-foreground"
-                      data-testid={`disconnect-youtube-${channel.id}`}
+                      data-testid={`disconnect-${connection.platform.toLowerCase()}-${channel.id}`}
                       disabled={disconnectMutation.isPending}
-                      onClick={() => disconnectMutation.mutate()}
+                      onClick={() => account && disconnectMutation.mutate(account.id)}
                     >
                       <Unplug aria-hidden="true" className="h-4 w-4" />
                       해제
@@ -863,18 +894,17 @@ const ChannelCard = ({
                 ) : (
                   <Button
                     className="h-9 gap-2"
-                    data-testid={`connect-youtube-${channel.id}`}
+                    data-testid={`connect-${connection.platform.toLowerCase()}-${channel.id}`}
                     disabled={connectMutation.isPending}
-                    onClick={() => connectMutation.mutate()}
+                    onClick={() => connectMutation.mutate(connection.platform)}
                   >
                     <Plus aria-hidden="true" className="h-4 w-4" />
                     연결
                   </Button>
                 )}
               </div>
-            ) : null}
           </div>
-        ))}
+        })}
       </div>
       <div className="mt-4 flex flex-wrap gap-3 text-sm text-muted-foreground">
         <span className="inline-flex items-center gap-1">

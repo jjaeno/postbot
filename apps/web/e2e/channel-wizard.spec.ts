@@ -15,7 +15,11 @@ const session = {
   }
 };
 
-const channel = (name: string, connected = false) => ({
+const channel = (
+  name: string,
+  connected = false,
+  automationMode: "APPROVAL" | "FULL_AUTO" = "APPROVAL"
+) => ({
   id: "channel-1",
   workspaceId: "workspace-1",
   name,
@@ -26,7 +30,7 @@ const channel = (name: string, connected = false) => ({
   excludedTopics: ["politics"],
   language: "ko-KR",
   status: "ACTIVE",
-  automationMode: "APPROVAL",
+  automationMode,
   minInventoryCount: 5,
   dailyPublishLimit: 2,
   errorAction: {
@@ -100,6 +104,19 @@ const account = {
 const mockApi = async (page: Page): Promise<void> => {
   let connected = false;
   let channels = [channel("Science Today", connected)];
+  let review = {
+    id: "content-1",
+    channelId: "channel-1",
+    status: "REVIEW_REQUIRED",
+    title: "Reusable rocket",
+    description: "Verified science content",
+    durationSeconds: 30,
+    sources: [
+      { title: "Reusable rocket", url: "https://example.com/rocket", sourceName: "Example" }
+    ],
+    assets: [{ id: "asset-1", licenseStatus: "VERIFIED", purpose: "image" }],
+    policy: null as { status: "pass"; findings: never[]; snapshotId: string } | null
+  };
 
   await page.route("**/auth/me", async (route) => {
     await route.fulfill({ json: session });
@@ -108,7 +125,8 @@ const mockApi = async (page: Page): Promise<void> => {
   await page.route("**/platform-accounts/youtube/connect", async (route) => {
     await route.fulfill({
       json: {
-        authorizationUrl: "http://localhost:3000/platform-accounts/youtube/callback?state=fake-state-123456789012345678901234&code=fake-code",
+        authorizationUrl:
+          "http://localhost:3000/platform-accounts/youtube/callback?state=fake-state-123456789012345678901234&code=fake-code",
         stateExpiresAt: "2026-08-28T01:00:00.000Z",
         provider: "fake",
         requiredScopes: ["https://www.googleapis.com/auth/youtube.readonly"]
@@ -133,14 +151,56 @@ const mockApi = async (page: Page): Promise<void> => {
   });
 
   await page.route("**/content", async (route) => {
-    await route.fulfill({ json: { items: [{ id: "content-1", channelId: "channel-1", title: "Reusable rocket", status: "REVIEW_REQUIRED", updatedAt: "2026-09-21T00:00:00.000Z", sceneVersionId: "scene-1", renderReady: true }] } });
+    await route.fulfill({
+      json: {
+        items: [
+          {
+            id: "content-1",
+            channelId: "channel-1",
+            title: "Reusable rocket",
+            status: "REVIEW_REQUIRED",
+            updatedAt: "2026-09-21T00:00:00.000Z",
+            sceneVersionId: "scene-1",
+            renderReady: true
+          }
+        ]
+      }
+    });
+  });
+
+  await page.route("**/content/content-1/review", async (route) => {
+    await route.fulfill({ json: review });
+  });
+
+  await page.route("**/content/content-1/review/policy-check", async (route) => {
+    review = { ...review, policy: { status: "pass", findings: [], snapshotId: "snapshot-1" } };
+    await route.fulfill({ json: review });
+  });
+
+  await page.route("**/content/content-1/review/action", async (route) => {
+    const action = route.request().postDataJSON() as {
+      action: "approve" | "hold" | "discard" | "schedule";
+    };
+    review = {
+      ...review,
+      status:
+        action.action === "approve"
+          ? "APPROVED"
+          : action.action === "schedule"
+            ? "SCHEDULED"
+            : "HELD"
+    };
+    await route.fulfill({ json: review });
   });
 
   await page.route("**/channels", async (route) => {
     const request = route.request();
     if (request.method() === "POST") {
-      const body = request.postDataJSON() as { name: string };
-      channels = [channel(body.name, connected)];
+      const body = request.postDataJSON() as {
+        name: string;
+        automation?: { mode?: "APPROVAL" | "FULL_AUTO" };
+      };
+      channels = [channel(body.name, connected, body.automation?.mode)];
       await route.fulfill({ status: 201, json: channels[0] });
       return;
     }
@@ -213,4 +273,39 @@ test("restores the operating dashboard and calendar after refresh", async ({ pag
   await expect(page.getByText("Reusable rocket")).toBeVisible();
   await page.reload();
   await expect(page.getByTestId("calendar-panel")).toContainText("Science Today");
+});
+
+test("approves reviewed content through the fake API", async ({ page }) => {
+  await mockApi(page);
+
+  await page.goto("/");
+  await page.getByLabel("Content item ID").fill("content-1");
+  await page.getByRole("button", { name: "Run policy check" }).click();
+  await expect(page.getByText("pass", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Approve", exact: true }).click();
+  await expect(page.getByText("APPROVED", { exact: true })).toBeVisible();
+});
+
+test("creates a full-auto channel through the fake API", async ({ page }) => {
+  await mockApi(page);
+
+  await page.goto("/");
+  await page.getByTestId("create-channel").click();
+  await page.locator('input[name="name"]').fill("Auto Science");
+
+  for (let index = 0; index < 6; index += 1) {
+    await page.getByTestId("wizard-next").click();
+  }
+
+  await page.locator('select[name="automationMode"]').selectOption("FULL_AUTO");
+  await page.getByTestId("wizard-next").click();
+
+  const createButton = page.getByTestId("wizard-create");
+  if ((await createButton.count()) > 0) {
+    await createButton.click();
+  }
+
+  await expect(page.getByTestId("channel-card-channel-1")).toContainText("Auto Science");
+  await expect(page.getByTestId("channel-card-channel-1")).toContainText("완전 자동형");
 });

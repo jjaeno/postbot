@@ -3,7 +3,8 @@ import "reflect-metadata";
 import { NestFactory } from "@nestjs/core";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import { loadConfig } from "@postbot/config";
-import { createLogger } from "@postbot/logger";
+import { createLogger, runWithLogContext } from "@postbot/logger";
+import * as Sentry from "@sentry/node";
 import cookieParser from "cookie-parser";
 import type { NextFunction, Request, Response } from "express";
 import { AppModule } from "./app.module.js";
@@ -11,6 +12,9 @@ import { HttpExceptionResponseFilter } from "./http-exception.filter.js";
 
 const bootstrap = async (): Promise<void> => {
   const config = loadConfig();
+  if (config.SENTRY_DSN) {
+    Sentry.init({ dsn: config.SENTRY_DSN, environment: config.SENTRY_ENVIRONMENT });
+  }
   const logger = createLogger("postbot-api");
   const app = await NestFactory.create(AppModule, { bufferLogs: true });
 
@@ -25,7 +29,7 @@ const bootstrap = async (): Promise<void> => {
       res.setHeader("strict-transport-security", "max-age=31536000; includeSubDomains");
       res.setHeader("content-security-policy", "default-src 'self'; frame-ancestors 'none'; base-uri 'self'");
     }
-    next();
+    runWithLogContext({ correlationId }, next);
   });
   app.useGlobalFilters(new HttpExceptionResponseFilter());
   app.setGlobalPrefix("");

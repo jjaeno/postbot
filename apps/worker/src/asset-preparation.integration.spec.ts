@@ -29,7 +29,7 @@ enabled("asset and TTS worker integration", () => {
     await processor.process({ id: fallbackJob.id, type: "ASSET", queueName: "asset", runAfter: null, payload: fallbackJob.payload as Record<string, unknown> } satisfies EnqueueJobInput);
     await processor.process({ id: ttsJob.id, type: "TTS", queueName: "tts", runAfter: null, payload: ttsJob.payload as Record<string, unknown> } satisfies EnqueueJobInput);
     await expect(prisma.productionJob.findUniqueOrThrow({ where: { id: imageJob.id } })).resolves.toMatchObject({ status: "SUCCEEDED", result: { fallback: false } });
-    await expect(prisma.asset.count({ where: { channelId: channel.id } })).resolves.toBe(2);
+    await expect(prisma.assetUsage.count({ where: { contentItemId: contentItem.id } })).resolves.toBe(3);
     await expect(prisma.productionJob.findUniqueOrThrow({ where: { id: fallbackJob.id } })).resolves.toMatchObject({ status: "SUCCEEDED", result: { fallback: true } });
     await expect(prisma.providerUsage.count({ where: { contentItemId: contentItem.id, operation: "speech-synthesis" } })).resolves.toBe(1);
     await expect(prisma.costLedger.count({ where: { contentItemId: contentItem.id, category: "tts" } })).resolves.toBe(1);

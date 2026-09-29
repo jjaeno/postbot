@@ -18,6 +18,27 @@ const jsonObject = (value: Prisma.JsonValue): Record<string, unknown> =>
 const nullableJsonObject = (value: Prisma.JsonValue | null): Record<string, unknown> | null =>
   value === null ? null : jsonObject(value);
 
+const payloadWithoutTrace = (value: Prisma.JsonValue | Record<string, unknown>): Record<string, unknown> => {
+  const payload = jsonObject(value as Prisma.JsonValue);
+  return Object.fromEntries(Object.entries(payload).filter(([key]) => key !== "_trace"));
+};
+
+const canonicalJson = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, nested]) => [key, canonicalJson(nested)]));
+  }
+  return value;
+};
+
+const hasSameJobIntent = (job: JobWithAttempts, input: CreateJobRecordInput): boolean =>
+  job.channelId === input.channelId &&
+  job.contentItemId === (input.contentItemId ?? null) &&
+  job.type === input.type &&
+  job.queueName === input.queueName &&
+  (job.runAfter?.toISOString() ?? null) === (input.runAfterDate?.toISOString() ?? null) &&
+  JSON.stringify(canonicalJson(payloadWithoutTrace(job.payload))) === JSON.stringify(canonicalJson(payloadWithoutTrace(input.payload)));
+
 const toAttemptResponse = (attempt: JobWithAttempts["attempts"][number]): JobAttemptResponse => ({
   id: attempt.id,
   attemptNumber: attempt.attemptNumber,
@@ -54,51 +75,65 @@ export class PrismaJobsRepository implements JobsRepository {
   constructor(@Inject("PRISMA_CLIENT") private readonly prisma: PrismaClient) {}
 
   async createOrFind(workspaceId: string, input: CreateJobRecordInput): Promise<CreateJobRecordResult> {
-    return this.prisma.$transaction(async (tx) => {
-      const channel = await tx.channel.findFirst({
-        where: { id: input.channelId, workspaceId }
-      });
-      if (!channel) {
-        throw new Error("CHANNEL_NOT_FOUND");
-      }
-      if (input.contentItemId) {
-        const contentItem = await tx.contentItem.findFirst({
-          where: { id: input.contentItemId, channelId: input.channelId }
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const channel = await tx.channel.findFirst({
+          where: { id: input.channelId, workspaceId }
         });
-        if (!contentItem) {
-          throw new Error("CONTENT_ITEM_NOT_FOUND");
+        if (!channel) {
+          throw new Error("CHANNEL_NOT_FOUND");
         }
-      }
+        if (input.contentItemId) {
+          const contentItem = await tx.contentItem.findFirst({
+            where: { id: input.contentItemId, channelId: input.channelId }
+          });
+          if (!contentItem) {
+            throw new Error("CONTENT_ITEM_NOT_FOUND");
+          }
+        }
 
-      const existing = await tx.productionJob.findUnique({
+        const existing = await tx.productionJob.findUnique({
+          where: { idempotencyKey: input.idempotencyKey },
+          include: { attempts: { orderBy: { attemptNumber: "asc" } } }
+        });
+        if (existing) {
+          if (!hasSameJobIntent(existing, input)) {
+            throw new Error("IDEMPOTENCY_CONFLICT");
+          }
+          return { job: toJobResponse(existing, true), created: false };
+        }
+
+        const created = await tx.productionJob.create({
+          data: {
+            channelId: input.channelId,
+            contentItemId: input.contentItemId,
+            type: input.type,
+            status: "QUEUED",
+            queueName: input.queueName,
+            idempotencyKey: input.idempotencyKey,
+            payload: input.payload as Prisma.InputJsonObject,
+            runAfter: input.runAfterDate
+          }
+        });
+        const createdWithAttempts = await tx.productionJob.findUniqueOrThrow({
+          where: { id: created.id },
+          include: { attempts: { orderBy: { attemptNumber: "asc" } } }
+        });
+        return { job: toJobResponse(createdWithAttempts, false), created: true };
+      });
+    } catch (error) {
+      if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002") {
+        throw error;
+      }
+      const existing = await this.prisma.productionJob.findUnique({
         where: { idempotencyKey: input.idempotencyKey },
         include: { attempts: { orderBy: { attemptNumber: "asc" } } }
       });
-      if (existing) {
-        if (existing.channelId !== input.channelId) {
-          throw new Error("IDEMPOTENCY_CONFLICT");
-        }
-        return { job: toJobResponse(existing, true), created: false };
+      if (!existing || !hasSameJobIntent(existing, input)) {
+        throw new Error("IDEMPOTENCY_CONFLICT");
       }
-
-      const created = await tx.productionJob.create({
-        data: {
-          channelId: input.channelId,
-          contentItemId: input.contentItemId,
-          type: input.type,
-          status: "QUEUED",
-          queueName: input.queueName,
-          idempotencyKey: input.idempotencyKey,
-          payload: input.payload as Prisma.InputJsonObject,
-          runAfter: input.runAfterDate
-        }
-      });
-      const createdWithAttempts = await tx.productionJob.findUniqueOrThrow({
-        where: { id: created.id },
-        include: { attempts: { orderBy: { attemptNumber: "asc" } } }
-      });
-      return { job: toJobResponse(createdWithAttempts, false), created: true };
-    });
+      return { job: toJobResponse(existing, true), created: false };
+    }
   }
 
   async findForWorkspace(workspaceId: string, jobId: string): Promise<ProductionJobResponse | null> {

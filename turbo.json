@@ -1,5 +1,12 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "globalPassThroughEnv": [
+    "DATABASE_URL", "REDIS_URL", "RUN_*", "S3_*", "STORAGE_PROVIDER",
+    "LLM_PROVIDER", "IMAGE_PROVIDER", "TTS_PROVIDER", "API_BASE_URL",
+    "TOPIC_SOURCE_*", "YOUTUBE_*", "INSTAGRAM_*", "TIKTOK_*",
+    "OAUTH_ENCRYPTION_*", "PROVIDER_*", "SOCIAL_PUBLISH_*",
+    "AUTOMATION_*", "WORKER_QUEUES", "MAINTENANCE_WORKER_ENABLED", "QUEUE_RECOVERY_STALE_AFTER_MS", "RENDER_TIMEOUT_MS", "SENTRY_*"
+  ],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
@@ -16,7 +23,8 @@
       "dependsOn": ["^build"]
     },
     "test": {
-      "dependsOn": ["^build"]
+      "dependsOn": ["^build"],
+      "cache": false
     }
   }
 }

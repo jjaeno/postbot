@@ -1,6 +1,10 @@
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus } from "@nestjs/common";
 import type { Response } from "express";
 import type { ErrorResponse } from "@postbot/contracts";
+import * as Sentry from "@sentry/node";
+import { createLogger } from "@postbot/logger";
+
+const logger = createLogger("postbot-api-http");
 
 const codeFromStatus = (status: HttpStatus): string => {
   switch (status) {
@@ -43,6 +47,10 @@ export class HttpExceptionResponseFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost): void {
     const response = host.switchToHttp().getResponse<Response>();
     const status = exception instanceof HttpException ? exception.getStatus() : HttpStatus.INTERNAL_SERVER_ERROR;
+    if (status >= 500) {
+      Sentry.captureException(exception);
+      logger.error({ err: exception }, "Unhandled API exception");
+    }
     const body: ErrorResponse = {
       message: messageFromException(exception),
       code: codeFromStatus(status)

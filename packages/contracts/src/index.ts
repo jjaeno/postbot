@@ -213,7 +213,7 @@ export const StartOAuthConnectionRequestSchema = z.object({
 export const StartOAuthConnectionResponseSchema = z.object({
   authorizationUrl: z.string().url(),
   stateExpiresAt: z.string().datetime(),
-  provider: z.enum(["fake", "google"]),
+  provider: z.enum(["fake", "google", "meta", "tiktok"]),
   requiredScopes: z.array(z.string())
 });
 
@@ -528,24 +528,63 @@ export const RenderJobPayloadSchema = z.object({
   })
 });
 
+export const AutomationJobContextSchema = z.object({
+  automation: z.object({ runId: z.string().min(1), stage: z.enum(["COLLECT", "SCRIPT", "ASSET", "TTS", "RENDER", "POLICY", "PUBLISH"]) })
+});
+
+export const CollectAutomationJobPayloadSchema = AutomationJobContextSchema.extend({
+  collect: z.object({
+    channelId: z.string().min(1),
+    topic: z.string().min(1),
+    language: z.string().min(2).max(16),
+    keywords: z.array(z.string()),
+    allowedSources: z.array(z.string()),
+    excludedSources: z.array(z.string()),
+    excludedKeywords: z.array(z.string()),
+    excludedTopics: z.array(z.string()),
+    recencyHours: z.number().int().positive(),
+    idempotencyKey: z.string().min(8).max(191)
+  })
+});
+
+export const PolicyAutomationJobPayloadSchema = AutomationJobContextSchema.extend({
+  policy: z.object({ contentItemId: z.string().min(1), platform: PlatformSchema, region: z.string().min(2).max(32).default("GLOBAL") })
+});
+
 export type AssetPreparationJobPayload = z.infer<typeof AssetPreparationJobPayloadSchema>;
 export type TtsPreparationJobPayload = z.infer<typeof TtsPreparationJobPayloadSchema>;
 export type RenderJobPayload = z.infer<typeof RenderJobPayloadSchema>;
+export type CollectAutomationJobPayload = z.infer<typeof CollectAutomationJobPayloadSchema>;
+export type PolicyAutomationJobPayload = z.infer<typeof PolicyAutomationJobPayloadSchema>;
 
 export const PolicyVerdictSchema = z.enum(["pass", "warning", "review", "block"]);
 export const ReviewActionSchema = z.enum(["approve", "hold", "discard", "schedule"]);
 export const RunPolicyCheckRequestSchema = z.object({ platform: PlatformSchema, region: z.string().min(2).max(32).default("GLOBAL") });
 export const ReviewActionRequestSchema = z.object({ action: ReviewActionSchema });
+export const UpdateReviewMetadataRequestSchema = z.object({
+  platform: PlatformSchema.nullable().default(null),
+  title: z.string().min(1).max(255),
+  description: z.string().min(1).max(2_000),
+  hashtags: z.array(z.string().min(1).max(80)).max(20)
+});
 export const PolicyFindingSchema = z.object({ code: z.string(), severity: PolicyVerdictSchema, message: z.string() });
 export const ContentReviewResponseSchema = z.object({
   id: z.string(), channelId: z.string(), status: z.enum(["REVIEW_REQUIRED", "APPROVED", "SCHEDULED", "HELD", "FAILED"]), title: z.string(),
   description: z.string(), durationSeconds: z.number().positive().nullable(), sources: z.array(z.object({ title: z.string(), url: z.string(), sourceName: z.string() })),
   assets: z.array(z.object({ id: z.string(), licenseStatus: z.string(), purpose: z.string() })),
-  policy: z.object({ status: PolicyVerdictSchema, findings: z.array(PolicyFindingSchema), snapshotId: z.string().nullable() }).nullable()
+  policy: z.object({ status: PolicyVerdictSchema, findings: z.array(PolicyFindingSchema), snapshotId: z.string().nullable() }).nullable(),
+  ideaId: z.string().nullable().default(null),
+  outputs: z.array(z.object({
+    platform: PlatformSchema.nullable(), scriptVersionId: z.string(), sceneVersionId: z.string().nullable(),
+    scriptStatus: z.enum(["ready", "missing"]), renderStatus: z.enum(["ready", "pending"]), videoReady: z.boolean(),
+    metadata: GeneratedMetadataSchema
+  })).default([])
 });
+export const ReviewPreviewResponseSchema = z.object({ url: z.string().url(), expiresInSeconds: z.number().int().positive() });
 export type PolicyVerdict = z.infer<typeof PolicyVerdictSchema>;
 export type RunPolicyCheckRequest = z.infer<typeof RunPolicyCheckRequestSchema>;
 export type ReviewActionRequest = z.infer<typeof ReviewActionRequestSchema>;
+export type UpdateReviewMetadataRequest = z.infer<typeof UpdateReviewMetadataRequestSchema>;
 export type ContentReviewResponse = z.infer<typeof ContentReviewResponseSchema>;
 
 export const ContentItemSummarySchema = z.object({
@@ -567,12 +606,13 @@ export const AutomationStepStatusSchema = z.enum(["PENDING", "QUEUED", "RUNNING"
 export const AutomationRunRequestSchema = z.object({
   channelId: z.string().min(1),
   idempotencyKey: z.string().min(8).max(191),
-  estimatedCostsUsd: z.record(AutomationStageSchema, z.number().nonnegative().finite()).optional()
+  estimatedCostsUsd: z.partialRecord(AutomationStageSchema, z.number().nonnegative().finite()).optional()
 });
 export const AutomationControlRequestSchema = z.object({ action: z.enum(["pause", "resume", "drain", "kill", "retry", "hold", "skip"]), reason: z.string().max(500).optional(), stage: AutomationStageSchema.optional() });
 export const AutomationRunResponseSchema = z.object({
   id: z.string(), channelId: z.string(), status: AutomationRunStatusSchema, idempotencyKey: z.string(),
   checkpoint: z.record(z.string(), z.unknown()).nullable(), failureCount: z.number().int(),
+  pausedReason: z.string().nullable(),
   nextRunAt: z.string().datetime().nullable(), heartbeatAt: z.string().datetime().nullable(),
   lastErrorCode: z.string().nullable(), lastErrorMessage: z.string().nullable(),
   steps: z.array(z.object({ stage: AutomationStageSchema, status: AutomationStepStatusSchema, attemptCount: z.number().int(), maxAttempts: z.number().int(), productionJobId: z.string().nullable(), errorCode: z.string().nullable(), errorMessage: z.string().nullable() }))
@@ -620,9 +660,30 @@ export const CostReportQuerySchema = z.object({ periodStart: z.string().datetime
 export const CostReportResponseSchema = z.object({ currency: z.string(), periodStart: z.string().datetime(), periodEnd: z.string().datetime(), estimated: z.number(), actual: z.number(), credit: z.number(), reconciled: z.boolean(), discrepancy: z.number(), byProvider: z.array(z.object({ provider: z.string(), estimated: z.number(), actual: z.number(), credit: z.number() })) });
 export const NotificationResponseSchema = z.object({ id: z.string(), eventKey: z.string(), severity: z.enum(["INFO", "WARNING", "CRITICAL"]), payload: z.unknown(), acknowledgedAt: z.string().datetime().nullable(), createdAt: z.string().datetime() });
 export const AuditLogResponseSchema = z.object({ id: z.string(), action: z.string(), targetType: z.string(), targetId: z.string().nullable(), metadata: z.unknown().nullable(), createdAt: z.string().datetime() });
+export const DataLifecycleRequestTypeSchema = z.enum(["WORKSPACE_DELETE", "USER_DELETE", "RETENTION"]);
+export const DataLifecycleRequestStatusSchema = z.enum(["QUEUED", "RUNNING", "SUCCEEDED", "FAILED"]);
+export const CreateDataLifecycleRequestSchema = z.object({
+  type: DataLifecycleRequestTypeSchema,
+  idempotencyKey: z.string().min(8).max(191),
+  retentionBefore: z.string().datetime().optional()
+}).superRefine((value, ctx) => {
+  if (value.type === "RETENTION" && !value.retentionBefore) {
+    ctx.addIssue({ code: "custom", path: ["retentionBefore"], message: "retentionBefore is required for retention work." });
+  }
+});
+export const DataLifecycleRequestResponseSchema = z.object({
+  id: z.string(), workspaceId: z.string().nullable(), requestedByUserId: z.string().nullable(),
+  type: DataLifecycleRequestTypeSchema, status: DataLifecycleRequestStatusSchema,
+  retentionBefore: z.string().datetime().nullable(), result: z.unknown().nullable(),
+  errorCode: z.string().nullable(), errorMessage: z.string().nullable(),
+  startedAt: z.string().datetime().nullable(), finishedAt: z.string().datetime().nullable(),
+  createdAt: z.string().datetime(), updatedAt: z.string().datetime(), duplicate: z.boolean().optional()
+});
 export type CostReportResponse = z.infer<typeof CostReportResponseSchema>;
 export type NotificationResponse = z.infer<typeof NotificationResponseSchema>;
 export type AuditLogResponse = z.infer<typeof AuditLogResponseSchema>;
+export type CreateDataLifecycleRequest = z.infer<typeof CreateDataLifecycleRequestSchema>;
+export type DataLifecycleRequestResponse = z.infer<typeof DataLifecycleRequestResponseSchema>;
 export type FactSourceLink = z.infer<typeof FactSourceLinkSchema>;
 export type GeneratedMetadata = z.infer<typeof GeneratedMetadataSchema>;
 export type GeneratedScript = z.infer<typeof GeneratedScriptSchema>;

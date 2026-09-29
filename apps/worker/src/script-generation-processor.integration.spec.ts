@@ -8,6 +8,7 @@ const databaseUrl = process.env.DATABASE_URL;
 const runIntegration = process.env.RUN_DB_INTEGRATION === "1" && databaseUrl?.includes("_test") === true;
 const describeIntegration = runIntegration ? describe : describe.skip;
 const prisma = new PrismaClient();
+const redisUrl = process.env.REDIS_URL ?? "redis://localhost:6379";
 
 const waitForCompletion = async (jobId: string): Promise<void> => {
   const deadline = Date.now() + 10_000;
@@ -53,8 +54,8 @@ describeIntegration("SCRIPT generation worker integration", () => {
       }
     });
     const input: EnqueueJobInput = { id: job.id, type: "SCRIPT", queueName: "script", runAfter: null, payload: job.payload as Record<string, unknown> };
-    const queue = new BullMqQueueAdapter("redis://localhost:6379");
-    const workers = createBullMqWorkers("redis://localhost:6379", (bullJob) => new DeterministicJobProcessor(prisma).process(bullJob.data));
+    const queue = new BullMqQueueAdapter(redisUrl);
+    const workers = createBullMqWorkers(redisUrl, (bullJob) => new DeterministicJobProcessor(prisma).process(bullJob.data));
     try {
       await queue.enqueue(input);
       await waitForCompletion(job.id);
@@ -84,8 +85,8 @@ describeIntegration("SCRIPT generation worker integration", () => {
     const idempotencyKey = `cancel-${suffix}`;
     const payload = { deterministicBehavior: "timeout", timeoutMs: 250, generation: { request: { ideaId: idea.id, idempotencyKey, platform: "YOUTUBE", partial: "full" }, idea: { id: idea.id, channelId: channel.id, title: idea.title, summary: idea.summary ?? "", canonicalUrl: idea.canonicalUrl, sourceName: idea.sourceName, sourceKind: idea.sourceKind, publishedAt: null, topic: "science", language: "en" } } };
     const job = await prisma.productionJob.create({ data: { channelId: channel.id, type: "SCRIPT", queueName: "script", idempotencyKey, payload } });
-    const queue = new BullMqQueueAdapter("redis://localhost:6379");
-    const workers = createBullMqWorkers("redis://localhost:6379", (bullJob) => new DeterministicJobProcessor(prisma).process(bullJob.data));
+    const queue = new BullMqQueueAdapter(redisUrl);
+    const workers = createBullMqWorkers(redisUrl, (bullJob) => new DeterministicJobProcessor(prisma).process(bullJob.data));
     try {
       await queue.enqueue({ id: job.id, type: "SCRIPT", queueName: "script", runAfter: null, payload });
       await waitForStatus(job.id, "RUNNING");

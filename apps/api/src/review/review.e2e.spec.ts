@@ -12,12 +12,15 @@ import { REVIEW_REPOSITORY, type PolicyRuleRecord, type ReviewRepository } from 
 import { ReviewService } from "./review.service.js";
 
 const rule: PolicyRuleRecord = { id: "rule-1", platform: "YOUTUBE", region: "GLOBAL", version: 1, effectiveAt: new Date("2026-01-01"), checkedAt: new Date("2026-01-01"), durationRule: { maxDurationSeconds: 60 }, originalityRule: {}, aiDisclosureRule: {}, rightsRule: { requireVerifiedAssets: true }, restrictedTopics: { terms: [] } };
-const content = (): ContentReviewResponse => ({ id: "content-1", channelId: "channel-1", status: "REVIEW_REQUIRED", title: "Review", description: "verified content", durationSeconds: 30, sources: [{ title: "Source", url: "https://example.com", sourceName: "Example" }], assets: [{ id: "asset-1", licenseStatus: "VERIFIED", purpose: "image" }], policy: null });
+const content = (): ContentReviewResponse => ({ id: "content-1", channelId: "channel-1", status: "REVIEW_REQUIRED", title: "Review", description: "verified content", durationSeconds: 30, sources: [{ title: "Source", url: "https://example.com", sourceName: "Example" }], assets: [{ id: "asset-1", licenseStatus: "VERIFIED", purpose: "image" }], policy: null, ideaId: "idea-1", outputs: [] });
 class Guard implements CanActivate { canActivate(context: ExecutionContext): boolean { context.switchToHttp().getRequest<{ auth: { workspaceId: string } }>().auth = { workspaceId: "workspace-1" }; return true; } }
 class Repository implements ReviewRepository {
   current = content();
   get = (): Promise<ContentReviewResponse> => Promise.resolve(this.current);
   getRule = (): Promise<PolicyRuleRecord> => Promise.resolve(rule);
+  getEvidence = () => Promise.resolve({ factsHaveSources: true, sourceCount: 1, minimumSourceReliability: 0.9, conflictingSources: false, assetsVerified: true, commercialUseVerified: true, duplicateRisk: false, originalityScore: 1, sensitiveTopic: false, forcedReview: false, platformRuleViolations: [] });
+  updateMetadata = (): Promise<ContentReviewResponse> => Promise.resolve(this.current);
+  getPreviewKey = (): Promise<string | null> => Promise.resolve(null);
   saveCheck = (_workspace: string, _item: string, _rule: PolicyRuleRecord, status: "pass" | "warning" | "review" | "block", findings: readonly { code: string; severity: "pass" | "warning" | "review" | "block"; message: string }[]): Promise<ContentReviewResponse> => { this.current = { ...this.current, policy: { status, findings: [...findings], snapshotId: "snapshot-1" } }; return Promise.resolve(this.current); };
   act = (_workspace: string, _item: string, action: "approve" | "hold" | "discard" | "schedule"): Promise<ContentReviewResponse | "POLICY_GATE" | "INVALID_TRANSITION"> => { if (action === "approve" && this.current.policy?.status !== "pass") return Promise.resolve("POLICY_GATE"); this.current = { ...this.current, status: action === "approve" ? "APPROVED" : action === "schedule" ? "SCHEDULED" : "HELD" }; return Promise.resolve(this.current); };
 }

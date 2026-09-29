@@ -24,9 +24,18 @@ export default tseslint.config(
       "@typescript-eslint/consistent-type-imports": [
         "error",
         {
-          "prefer": "type-imports"
+          prefer: "type-imports"
         }
       ]
+    }
+  },
+  {
+    files: ["apps/renderer/scripts/**/*.mjs", "apps/web/scripts/**/*.mjs"],
+    extends: [tseslint.configs.disableTypeChecked],
+    languageOptions: {
+      parserOptions: {
+        projectService: false
+      }
     }
   }
 );

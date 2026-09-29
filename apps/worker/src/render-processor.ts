@@ -63,6 +63,8 @@ export class RenderProcessor {
     const narration = usages.find((usage) => usage.purpose === "tts-narration");
     const background = usages.find((usage) => usage.purpose === "bgm" || usage.purpose === "sfx");
     const captions = narration ? readCaptions(narration.usageSnapshot) : [];
+    const expectedDuration = sceneDocument.durationInFrames / sceneDocument.fps;
+    if (captions.some((caption) => caption.startSeconds < 0 || caption.endSeconds <= caption.startSeconds || caption.endSeconds > expectedDuration + 0.25 || caption.text.length > 160)) throw new Error("SUBTITLE_SAFE_AREA_OR_TIMING_INVALID");
     const directory = await mkdtemp(join(tmpdir(), `postbot-render-${jobId}-`));
     try {
       const draftPath = join(directory, "draft.mp4");
@@ -76,7 +78,7 @@ export class RenderProcessor {
       await this.withTimeout(this.postProcessor.postprocess({ videoInput: draftPath, output: outputPath, narrationInput: narrationPath, backgroundInput: backgroundPath }));
       await this.withTimeout(this.postProcessor.thumbnail(outputPath, thumbnailPath));
       const qa = await this.withTimeout(this.postProcessor.probe(outputPath));
-      if (qa.width !== 1080 || qa.height !== 1920 || qa.durationSeconds <= 0) throw new Error("RENDER_QA_FAILED");
+      if (qa.width !== 1080 || qa.height !== 1920 || qa.durationSeconds <= 0 || Math.abs(qa.durationSeconds - expectedDuration) > 1 || (narration && qa.hasAudio === false) || (narration && qa.meanVolumeDb !== undefined && (qa.meanVolumeDb === null || qa.meanVolumeDb < -60)) || (qa.blackFrameRatio ?? 0) > 0.98) throw new Error("RENDER_QA_FAILED");
       const videoKey = `renders/${input.contentItemId}/${jobId}.mp4`;
       const thumbnailKey = `renders/${input.contentItemId}/${jobId}.jpg`;
       await this.storage.upload({ key: videoKey, body: await readFile(outputPath), mimeType: "video/mp4" });

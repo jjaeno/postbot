@@ -21,6 +21,101 @@ export class FakeAnalyticsProvider implements AnalyticsProvider {
   }
 }
 
+type AnalyticsHttpOptions = { readonly accessToken: string; readonly timeoutMs?: number; readonly fetchImplementation?: typeof fetch; readonly graphVersion?: string };
+
+const analyticsFetchJson = async <Body>(url: string, options: AnalyticsHttpOptions, init: RequestInit = {}): Promise<Body> => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 30_000);
+  try {
+    const response = await (options.fetchImplementation ?? fetch)(url, { ...init, headers: { authorization: `Bearer ${options.accessToken}`, ...init.headers }, signal: controller.signal });
+    if (response.status === 429) throw new Error("PROVIDER_RATE_LIMITED");
+    if (response.status === 401) throw new Error("OAUTH_ACCESS_TOKEN_EXPIRED");
+    if (!response.ok) throw new Error(`Analytics provider request failed with status ${response.status}.`);
+    return await response.json() as Body;
+  } finally { clearTimeout(timeout); }
+};
+
+const unavailableMetric = (metric: AnalyticsMetric, reason: string): AnalyticsMetricValue => ({ metric, value: null, unit: null, aggregation: null, unavailableReason: reason });
+
+export class YouTubeAnalyticsProvider implements AnalyticsProvider {
+  constructor(private readonly options: AnalyticsHttpOptions) {}
+
+  async fetchPage(input: Parameters<AnalyticsProvider["fetchPage"]>[0]): Promise<AnalyticsPage> {
+    if (input.pageToken || input.postIds.length === 0) return { posts: [], nextPageToken: null, dataDelayHours: 48 };
+    const url = new URL("https://youtubeanalytics.googleapis.com/v2/reports");
+    url.searchParams.set("ids", "channel==MINE");
+    url.searchParams.set("startDate", input.periodStart.slice(0, 10));
+    url.searchParams.set("endDate", input.periodEnd.slice(0, 10));
+    url.searchParams.set("metrics", "views,averageViewDuration,averageViewPercentage");
+    url.searchParams.set("dimensions", "video");
+    url.searchParams.set("filters", `video==${input.postIds.join(",")}`);
+    const raw = await analyticsFetchJson<{ columnHeaders?: Array<{ name?: string }>; rows?: Array<Array<string | number>> }>(url.toString(), this.options);
+    const headers = raw.columnHeaders?.map((header) => header.name ?? "") ?? [];
+    const index = (name: string): number => headers.indexOf(name);
+    const observedAt = input.periodEnd;
+    const rows = new Map((raw.rows ?? []).map((row) => [String(row[index("video")]), row]));
+    const posts = input.postIds.map((externalPostId): AnalyticsPostResult => {
+      const row = rows.get(externalPostId);
+      const number = (name: string): number | null => row && index(name) >= 0 && Number.isFinite(Number(row[index(name)])) ? Number(row[index(name)]) : null;
+      const views = number("views");
+      const averageSeconds = number("averageViewDuration");
+      const completion = number("averageViewPercentage");
+      return { externalPostId, observedAt, raw: { headers, row: row ?? null }, metrics: [
+        views === null ? unavailableMetric("views", "NOT_RETURNED_BY_YOUTUBE") : { metric: "views", value: views, unit: "count", aggregation: "sum", unavailableReason: null },
+        averageSeconds === null ? unavailableMetric("average_watch_seconds", "NOT_RETURNED_BY_YOUTUBE") : { metric: "average_watch_seconds", value: averageSeconds, unit: "seconds", aggregation: "average", unavailableReason: null },
+        completion === null ? unavailableMetric("completion_rate", "NOT_RETURNED_BY_YOUTUBE") : { metric: "completion_rate", value: completion / 100, unit: "ratio", aggregation: "ratio", unavailableReason: null },
+        unavailableMetric("impressions", "REQUIRES_SEPARATE_YOUTUBE_REPORT"), unavailableMetric("engagement_rate", "PLATFORM_METRIC_NOT_EQUIVALENT")
+      ] };
+    });
+    return { posts, nextPageToken: null, dataDelayHours: 48 };
+  }
+}
+
+export class InstagramAnalyticsProvider implements AnalyticsProvider {
+  constructor(private readonly options: AnalyticsHttpOptions) {}
+
+  async fetchPage(input: Parameters<AnalyticsProvider["fetchPage"]>[0]): Promise<AnalyticsPage> {
+    if (input.pageToken) return { posts: [], nextPageToken: null, dataDelayHours: 24 };
+    const posts = await Promise.all(input.postIds.map(async (externalPostId): Promise<AnalyticsPostResult> => {
+      const url = new URL(`https://graph.instagram.com/${this.options.graphVersion ?? "v24.0"}/${encodeURIComponent(externalPostId)}/insights`);
+      url.searchParams.set("metric", "views,reach,total_interactions,ig_reels_avg_watch_time");
+      const raw = await analyticsFetchJson<{ data?: Array<{ name?: string; values?: Array<{ value?: number }> }> }>(url.toString(), this.options);
+      const values = new Map((raw.data ?? []).map((entry) => [entry.name ?? "", entry.values?.[0]?.value ?? null]));
+      const metric = (name: string): number | null => typeof values.get(name) === "number" ? values.get(name) as number : null;
+      const views = metric("views"); const reach = metric("reach"); const interactions = metric("total_interactions"); const watchMs = metric("ig_reels_avg_watch_time");
+      return { externalPostId, observedAt: input.periodEnd, raw, metrics: [
+        views === null ? unavailableMetric("views", "NOT_RETURNED_BY_INSTAGRAM") : { metric: "views", value: views, unit: "count", aggregation: "sum", unavailableReason: null },
+        reach === null ? unavailableMetric("impressions", "NOT_RETURNED_BY_INSTAGRAM") : { metric: "impressions", value: reach, unit: "count", aggregation: "sum", unavailableReason: null },
+        watchMs === null ? unavailableMetric("average_watch_seconds", "NOT_RETURNED_BY_INSTAGRAM") : { metric: "average_watch_seconds", value: watchMs / 1_000, unit: "seconds", aggregation: "average", unavailableReason: null },
+        reach && interactions !== null ? { metric: "engagement_rate", value: interactions / reach, unit: "ratio", aggregation: "ratio", unavailableReason: null } : unavailableMetric("engagement_rate", "REACH_OR_INTERACTIONS_UNAVAILABLE"),
+        unavailableMetric("completion_rate", "NOT_PROVIDED_BY_INSTAGRAM")
+      ] };
+    }));
+    return { posts, nextPageToken: null, dataDelayHours: 24 };
+  }
+}
+
+export class TikTokAnalyticsProvider implements AnalyticsProvider {
+  constructor(private readonly options: AnalyticsHttpOptions) {}
+
+  async fetchPage(input: Parameters<AnalyticsProvider["fetchPage"]>[0]): Promise<AnalyticsPage> {
+    if (input.pageToken || input.postIds.length === 0) return { posts: [], nextPageToken: null, dataDelayHours: 24 };
+    const raw = await analyticsFetchJson<{ data?: { videos?: Array<{ id?: string; view_count?: number; like_count?: number; comment_count?: number; share_count?: number }> }; error?: { code?: string } }>("https://open.tiktokapis.com/v2/video/query/?fields=id,view_count,like_count,comment_count,share_count", this.options, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ filters: { video_ids: input.postIds } }) });
+    if (raw.error?.code && raw.error.code !== "ok") throw new Error(`TikTok analytics failed: ${raw.error.code}.`);
+    const rows = new Map((raw.data?.videos ?? []).flatMap((video) => video.id ? [[video.id, video] as const] : []));
+    const posts = input.postIds.map((externalPostId): AnalyticsPostResult => {
+      const video = rows.get(externalPostId); const views = video?.view_count;
+      const engagement = views && video ? ((video.like_count ?? 0) + (video.comment_count ?? 0) + (video.share_count ?? 0)) / views : null;
+      return { externalPostId, observedAt: input.periodEnd, raw: video ? { ...video } : {}, metrics: [
+        typeof views === "number" ? { metric: "views", value: views, unit: "count", aggregation: "sum", unavailableReason: null } : unavailableMetric("views", "NOT_RETURNED_BY_TIKTOK"),
+        engagement === null ? unavailableMetric("engagement_rate", "VIEWS_UNAVAILABLE") : { metric: "engagement_rate", value: engagement, unit: "ratio", aggregation: "ratio", unavailableReason: null },
+        unavailableMetric("impressions", "NOT_PROVIDED_BY_TIKTOK"), unavailableMetric("average_watch_seconds", "NOT_PROVIDED_BY_TIKTOK"), unavailableMetric("completion_rate", "NOT_PROVIDED_BY_TIKTOK")
+      ] };
+    });
+    return { posts, nextPageToken: null, dataDelayHours: 24 };
+  }
+}
+
 export type TopicSourceKind = "NEWS" | "OFFICIAL" | "PAPER" | "RSS" | "PUBLIC_DATA" | "MANUAL";
 
 export type TopicSourceCandidate = {
@@ -30,8 +125,11 @@ export type TopicSourceCandidate = {
   readonly sourceName: string;
   readonly sourceKind: TopicSourceKind;
   readonly publishedAt: string | null;
+  readonly eventAt?: string | null;
   readonly body: string;
   readonly reliabilityScore: number;
+  readonly contentHash?: string;
+  readonly reliabilityMetadata?: Readonly<Record<string, unknown>>;
 };
 
 export type TopicSourceRequest = {
@@ -118,6 +216,128 @@ export class FixtureTopicSourceProvider implements TopicSourceProvider {
   }
 }
 
+type RssTopicSourceProviderOptions = {
+  readonly feedUrls: readonly string[];
+  readonly timeoutMs?: number;
+  readonly maxRetries?: number;
+  readonly fetchImplementation?: typeof fetch;
+  readonly now?: () => Date;
+};
+
+const decodeXml = (value: string): string => value
+  .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+  .replace(/<[^>]+>/g, " ")
+  .replace(/&amp;/g, "&")
+  .replace(/&lt;/g, "<")
+  .replace(/&gt;/g, ">")
+  .replace(/&quot;/g, '"')
+  .replace(/&#39;|&apos;/g, "'")
+  .replace(/\s+/g, " ")
+  .trim();
+
+const firstXmlValue = (xml: string, names: readonly string[]): string | null => {
+  for (const name of names) {
+    const match = new RegExp(`<${name}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${name}>`, "i").exec(xml);
+    if (match?.[1]) return decodeXml(match[1]);
+  }
+  return null;
+};
+
+const rssLink = (xml: string, baseUrl: string): string | null => {
+  const atom = /<link\b[^>]*\bhref=["']([^"']+)["'][^>]*>/i.exec(xml)?.[1];
+  const raw = atom ?? firstXmlValue(xml, ["link", "guid"]);
+  if (!raw) return null;
+  try { return new URL(raw, baseUrl).toString(); } catch { return null; }
+};
+
+const sha256Text = async (value: string): Promise<string> => {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((part) => part.toString(16).padStart(2, "0")).join("");
+};
+
+export class RssTopicSourceProvider implements TopicSourceProvider {
+  private readonly timeoutMs: number;
+  private readonly maxRetries: number;
+  private readonly fetchImplementation: typeof fetch;
+  private readonly now: () => Date;
+
+  constructor(private readonly options: RssTopicSourceProviderOptions) {
+    if (options.feedUrls.length === 0) throw new Error("At least one RSS feed URL is required.");
+    this.timeoutMs = options.timeoutMs ?? 15_000;
+    this.maxRetries = options.maxRetries ?? 2;
+    this.fetchImplementation = options.fetchImplementation ?? fetch;
+    this.now = options.now ?? (() => new Date());
+  }
+
+  async collect(request: TopicSourceRequest): Promise<TopicSourceResult> {
+    const feeds = this.options.feedUrls.filter((url) => {
+      try {
+        const parsed = new URL(url);
+        return parsed.protocol === "https:" || parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
+      } catch { return false; }
+    });
+    const settled = await Promise.allSettled(feeds.map((url) => this.collectFeed(url, request)));
+    const candidates = settled.flatMap((result) => result.status === "fulfilled" ? result.value : []);
+    if (settled.length > 0 && settled.every((result) => result.status === "rejected")) {
+      throw new Error("All configured RSS feeds failed.");
+    }
+    const unique = new Map<string, TopicSourceCandidate>();
+    for (const candidate of candidates) {
+      const key = candidate.contentHash ?? candidate.url;
+      if (!unique.has(key)) unique.set(key, candidate);
+    }
+    return { provider: "rss-topic-source", idempotencyKey: request.idempotencyKey, createdAt: this.now().toISOString(), candidates: [...unique.values()] };
+  }
+
+  private async collectFeed(feedUrl: string, request: TopicSourceRequest): Promise<TopicSourceCandidate[]> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+      try {
+        const response = await this.fetchImplementation(feedUrl, { headers: { accept: "application/atom+xml, application/rss+xml, application/xml, text/xml" }, signal: controller.signal });
+        if (!response.ok) throw new Error(`RSS request failed with status ${response.status}.`);
+        return this.parse(await response.text(), feedUrl, request);
+      } catch (error) {
+        lastError = error;
+        if (attempt < this.maxRetries) await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, 100 * 2 ** attempt)));
+      } finally { clearTimeout(timeout); }
+    }
+    throw lastError instanceof Error ? lastError : new Error("RSS request failed.");
+  }
+
+  private async parse(xml: string, feedUrl: string, request: TopicSourceRequest): Promise<TopicSourceCandidate[]> {
+    const blocks = [...xml.matchAll(/<(item|entry)\b[^>]*>([\s\S]*?)<\/\1>/gi)].map((match) => match[2] ?? "");
+    const feedName = firstXmlValue(xml, ["title"]) ?? new URL(feedUrl).hostname;
+    const terms = [request.topic, ...request.keywords].map((term) => term.trim().toLowerCase()).filter(Boolean);
+    const cutoff = this.now().getTime() - request.recencyHours * 3_600_000;
+    const results: TopicSourceCandidate[] = [];
+    for (const block of blocks) {
+      const title = firstXmlValue(block, ["title"]);
+      const url = rssLink(block, feedUrl);
+      if (!title || !url) continue;
+      const summary = firstXmlValue(block, ["description", "summary"]) ?? "";
+      const body = firstXmlValue(block, ["content:encoded", "content", "description", "summary"]) ?? summary;
+      const publishedRaw = firstXmlValue(block, ["pubDate", "published", "updated", "dc:date"]);
+      const published = publishedRaw ? new Date(publishedRaw) : null;
+      if (published && (Number.isNaN(published.getTime()) || published.getTime() < cutoff)) continue;
+      const haystack = `${title} ${summary} ${body}`.toLowerCase();
+      if (terms.length > 0 && !terms.some((term) => haystack.includes(term))) continue;
+      const candidate: TopicSourceCandidate = {
+        title, summary, body, url, sourceName: feedName, sourceKind: "RSS",
+        publishedAt: published?.toISOString() ?? null,
+        eventAt: published?.toISOString() ?? null,
+        reliabilityScore: request.allowedSources.length > 0 ? 0.9 : 0.75,
+        contentHash: await sha256Text(`${title}\n${summary}\n${body}`.toLowerCase().trim()),
+        reliabilityMetadata: { transport: "https", feedUrl, allowlisted: request.allowedSources.length > 0 }
+      };
+      if (sourceAllowed(candidate, request.allowedSources, request.excludedSources)) results.push(candidate);
+    }
+    return results;
+  }
+}
+
 export type LlmGenerationSource = {
   readonly title: string;
   readonly url: string;
@@ -164,7 +384,7 @@ const fakeStructuredOutput = (request: LlmGenerationRequest): Record<string, unk
       title: request.title,
       summary: request.summary,
       metadata: {
-        description: `${request.summary}\n\nSource: ${source.url}`,
+        description: `AI generated explainer. ${request.summary}\n\nSource: ${source.url}`,
         hashtags: ["postbot", "shorts", request.topic.toLowerCase().replaceAll(" ", "-").slice(0, 40)]
       }
     },
@@ -489,23 +709,67 @@ export class FakeTtsProvider implements TtsProvider {
     if (request.text.includes("provider-failure")) throw new Error("TTS_PROVIDER_FAILED");
     const words = request.text.trim().split(/\s+/).filter(Boolean);
     const timings = words.map((text, index) => ({ text, startSeconds: index * 0.3, endSeconds: (index + 1) * 0.3 }));
-    return Promise.resolve({ provider: "fake-tts", idempotencyKey: request.idempotencyKey, createdAt: new Date().toISOString(), model: request.model, mimeType: "audio/wav", bytes: new TextEncoder().encode(`fake-audio:${request.voice}:${request.text}`), durationSeconds: timings.length * 0.3, timings, estimatedCostUsd: "0.000000" });
+    // A fake provider still has to honor its media contract: FFmpeg must be
+    // able to decode the audio in an otherwise real rendering pipeline.
+    const sampleRate = 16_000;
+    const durationSeconds = Math.max(0.3, timings.length * 0.3);
+    const dataSize = Math.round(durationSeconds * sampleRate) * 2;
+    const bytes = Buffer.alloc(44 + dataSize);
+    bytes.write("RIFF", 0);
+    bytes.writeUInt32LE(36 + dataSize, 4);
+    bytes.write("WAVEfmt ", 8);
+    bytes.writeUInt32LE(16, 16);
+    bytes.writeUInt16LE(1, 20);
+    bytes.writeUInt16LE(1, 22);
+    bytes.writeUInt32LE(sampleRate, 24);
+    bytes.writeUInt32LE(sampleRate * 2, 28);
+    bytes.writeUInt16LE(2, 32);
+    bytes.writeUInt16LE(16, 34);
+    bytes.write("data", 36);
+    bytes.writeUInt32LE(dataSize, 40);
+    for (let sample = 0; sample < dataSize / 2; sample += 1) {
+      const value = Math.round(Math.sin(2 * Math.PI * 440 * sample / sampleRate) * 4_000);
+      bytes.writeInt16LE(value, 44 + sample * 2);
+    }
+    return Promise.resolve({ provider: "fake-tts", idempotencyKey: request.idempotencyKey, createdAt: new Date().toISOString(), model: request.model, mimeType: "audio/wav", bytes, durationSeconds, timings, estimatedCostUsd: "0.000000" });
   }
 }
 
 export class ElevenLabsTtsProvider implements TtsProvider {
-  constructor(private readonly options: { apiKey: string; timeoutMs: number }) {}
+  constructor(private readonly options: { apiKey: string; timeoutMs: number; fetchImplementation?: typeof fetch }) {}
   async synthesize(request: TtsRequest): Promise<TtsResult> {
     if (!this.options.apiKey) throw new Error("ELEVENLABS_API_KEY is required when TTS_PROVIDER=elevenlabs.");
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
     try {
-      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(request.voice)}`, { method: "POST", headers: { "xi-api-key": this.options.apiKey, "Content-Type": "application/json" }, body: JSON.stringify({ text: request.text, model_id: request.model }), signal: controller.signal });
+      const response = await (this.options.fetchImplementation ?? fetch)(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(request.voice)}/with-timestamps`, { method: "POST", headers: { "xi-api-key": this.options.apiKey, "Content-Type": "application/json" }, body: JSON.stringify({ text: request.text, model_id: request.model }), signal: controller.signal });
       if (!response.ok) throw new Error(`ElevenLabs TTS API failed with status ${response.status}.`);
-      const bytes = new Uint8Array(await response.arrayBuffer()); const words = request.text.trim().split(/\s+/).filter(Boolean); const timings = words.map((text, index) => ({ text, startSeconds: index * 0.3, endSeconds: (index + 1) * 0.3 }));
-      return { provider: "elevenlabs", idempotencyKey: request.idempotencyKey, createdAt: new Date().toISOString(), model: request.model, mimeType: response.headers.get("content-type") ?? "audio/mpeg", bytes, durationSeconds: timings.length * 0.3, timings, estimatedCostUsd: "0.000000" };
+      const body = await response.json() as { audio_base64?: string; alignment?: CharacterAlignment | null; normalized_alignment?: CharacterAlignment | null };
+      if (!body.audio_base64) throw new Error("ElevenLabs TTS response did not include audio.");
+      const alignment = body.normalized_alignment ?? body.alignment;
+      if (!alignment) throw new Error("ElevenLabs TTS response did not include timing alignment.");
+      const timings = wordTimingsFromAlignment(alignment);
+      if (timings.length === 0) throw new Error("ElevenLabs TTS alignment did not contain words.");
+      const bytes = new Uint8Array(Buffer.from(body.audio_base64, "base64"));
+      const durationSeconds = Math.max(...alignment.character_end_times_seconds);
+      return { provider: "elevenlabs", idempotencyKey: request.idempotencyKey, createdAt: new Date().toISOString(), model: request.model, mimeType: "audio/mpeg", bytes, durationSeconds, timings, estimatedCostUsd: "0.000000" };
     } finally { clearTimeout(timer); }
   }
 }
+
+type CharacterAlignment = { characters: string[]; character_start_times_seconds: number[]; character_end_times_seconds: number[] };
+const wordTimingsFromAlignment = (alignment: CharacterAlignment): Array<{ text: string; startSeconds: number; endSeconds: number }> => {
+  if (alignment.characters.length !== alignment.character_start_times_seconds.length || alignment.characters.length !== alignment.character_end_times_seconds.length) throw new Error("ElevenLabs TTS alignment arrays have inconsistent lengths.");
+  const timings: Array<{ text: string; startSeconds: number; endSeconds: number }> = [];
+  let text = ""; let start = 0; let end = 0;
+  const flush = (): void => { if (text) timings.push({ text, startSeconds: start, endSeconds: end }); text = ""; };
+  alignment.characters.forEach((character, index) => {
+    if (/\s/u.test(character)) { flush(); return; }
+    if (!text) start = alignment.character_start_times_seconds[index] ?? 0;
+    text += character; end = alignment.character_end_times_seconds[index] ?? start;
+  });
+  flush();
+  return timings;
+};
 import { createHash } from "node:crypto";
 import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";

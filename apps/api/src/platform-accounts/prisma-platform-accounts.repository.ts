@@ -113,7 +113,8 @@ export class PrismaPlatformAccountsRepository implements PlatformAccountsReposit
 
       const existing = await tx.platformAccount.findUnique({
         where: {
-          platform_externalAccountId: {
+          workspaceId_platform_externalAccountId: {
+            workspaceId: input.workspaceId,
             platform: input.platform,
             externalAccountId: input.externalAccountId
           }
@@ -121,9 +122,6 @@ export class PrismaPlatformAccountsRepository implements PlatformAccountsReposit
         include: { credential: true }
       });
 
-      if (existing && existing.workspaceId !== input.workspaceId) {
-        return { ok: false, reason: "ACCOUNT_OWNED_BY_OTHER_WORKSPACE" };
-      }
       if (existing?.channelId && existing.channelId !== input.channelId) {
         return { ok: false, reason: "ACCOUNT_ASSIGNED_TO_OTHER_CHANNEL" };
       }

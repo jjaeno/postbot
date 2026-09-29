@@ -10,7 +10,27 @@
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
+    "backup:mysql": "node --env-file=.env scripts/backup-mysql.mjs",
+    "backup:verify": "node scripts/verify-mysql-backup.mjs",
+    "backup:restore": "node --env-file=.env scripts/restore-mysql.mjs",
+    "recover:queues": "pnpm --filter @postbot/worker recover:queues",
+    "baseline:local": "node scripts/local-performance-baseline.mjs",
     "format": "prettier --write ."
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@prisma/client",
+      "@prisma/engines",
+      "esbuild",
+      "msgpackr-extract",
+      "prisma"
+    ],
+    "overrides": {
+      "deepmerge-ts": "8.0.0",
+      "effect": "3.20.0",
+      "multer": "2.4.0",
+      "qs": "6.16.0"
+    }
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",

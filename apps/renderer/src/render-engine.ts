@@ -51,7 +51,7 @@ const run = async (command: string, args: readonly string[]): Promise<void> => {
   });
 };
 
-export type FfprobeResult = { readonly durationSeconds: number; readonly width: number; readonly height: number };
+export type FfprobeResult = { readonly durationSeconds: number; readonly width: number; readonly height: number; readonly hasAudio?: boolean; readonly meanVolumeDb?: number | null; readonly blackFrameRatio?: number };
 
 export class FfmpegPostProcessor {
   async postprocess(input: { readonly videoInput: string; readonly output: string; readonly narrationInput?: string; readonly backgroundInput?: string }): Promise<void> {
@@ -60,9 +60,11 @@ export class FfmpegPostProcessor {
     if (input.narrationInput) args.push("-i", input.narrationInput);
     if (input.backgroundInput) args.push("-i", input.backgroundInput);
     if (input.narrationInput && input.backgroundInput) {
-      args.push("-filter_complex", "[1:a][2:a]sidechaincompress=threshold=0.03:ratio=8[bgm];[1:a][bgm]amix=inputs=2:normalize=0[a]", "-map", "0:v:0", "-map", "[a]");
+      args.push("-filter_complex", "[2:a]volume=0.20[bg];[1:a][bg]amix=inputs=2:duration=longest:normalize=0,apad[a]", "-map", "0:v:0", "-map", "[a]");
     } else if (input.narrationInput) {
-      args.push("-map", "0:v:0", "-map", "1:a:0");
+      args.push("-filter_complex", "[1:a]apad[a]", "-map", "0:v:0", "-map", "[a]");
+    } else if (input.backgroundInput) {
+      args.push("-filter_complex", "[1:a]volume=0.20,apad[a]", "-map", "0:v:0", "-map", "[a]");
     } else {
       args.push("-map", "0:v:0");
     }
@@ -77,17 +79,32 @@ export class FfmpegPostProcessor {
   async probe(videoInput: string): Promise<FfprobeResult> {
     const output = await new Promise<string>((resolve, reject) => {
       let stdout = "";
-      const child = spawn("ffprobe", ["-v", "error", "-show_entries", "format=duration:stream=width,height", "-of", "json", videoInput]);
+      const child = spawn("ffprobe", ["-v", "error", "-show_entries", "format=duration:stream=codec_type,width,height", "-of", "json", videoInput]);
       child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
       child.once("error", reject);
       child.once("exit", (code) => code === 0 ? resolve(stdout) : reject(new Error(`ffprobe exited with ${code ?? "unknown"}.`)));
     });
     const parsed: unknown = JSON.parse(output);
     if (!parsed || typeof parsed !== "object") throw new Error("Invalid ffprobe output.");
-    const record = parsed as { format?: { duration?: string }; streams?: Array<{ width?: number; height?: number }> };
+    const record = parsed as { format?: { duration?: string }; streams?: Array<{ codec_type?: string; width?: number; height?: number }> };
     const stream = record.streams?.find((entry) => entry.width && entry.height);
     const durationSeconds = Number(record.format?.duration);
     if (!stream || !Number.isFinite(durationSeconds) || !stream.width || !stream.height) throw new Error("Incomplete ffprobe output.");
-    return { durationSeconds, width: stream.width, height: stream.height };
+    const hasAudio = record.streams?.some((entry) => entry.codec_type === "audio") ?? false;
+    const [volumeOutput, blackOutput] = await Promise.all([
+      hasAudio ? captureError("ffmpeg", ["-i", videoInput, "-af", "volumedetect", "-f", "null", "-"]) : Promise.resolve(""),
+      captureError("ffmpeg", ["-i", videoInput, "-vf", "blackdetect=d=0.5:pix_th=0.10", "-an", "-f", "null", "-"])
+    ]);
+    const volume = /mean_volume:\s*(-?[\d.]+)\s*dB/i.exec(volumeOutput)?.[1];
+    const blackDuration = [...blackOutput.matchAll(/black_duration:([\d.]+)/g)].reduce((total, match) => total + Number(match[1] ?? 0), 0);
+    return { durationSeconds, width: stream.width, height: stream.height, hasAudio, meanVolumeDb: volume ? Number(volume) : null, blackFrameRatio: Math.min(1, blackDuration / durationSeconds) };
   }
 }
+
+const captureError = async (command: string, args: readonly string[]): Promise<string> => new Promise((resolve, reject) => {
+  let stderr = "";
+  const child = spawn(command, [...args]);
+  child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+  child.once("error", reject);
+  child.once("exit", (code) => code === 0 ? resolve(stderr) : reject(new Error(`${command} exited with ${code ?? "unknown"}.`)));
+});

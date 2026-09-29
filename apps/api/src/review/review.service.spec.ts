@@ -5,12 +5,15 @@ import { ReviewService } from "./review.service.js";
 import type { PolicyRuleRecord, ReviewRepository } from "./review.repository.js";
 
 const rule: PolicyRuleRecord = { id: "rule-1", platform: "YOUTUBE", region: "GLOBAL", version: 1, effectiveAt: new Date("2026-01-01"), checkedAt: new Date("2026-01-01"), durationRule: { maxDurationSeconds: 60 }, originalityRule: {}, aiDisclosureRule: { required: true }, rightsRule: { requireVerifiedAssets: true }, restrictedTopics: { terms: [] } };
-const content = (): ContentReviewResponse => ({ id: "content-1", channelId: "channel-1", status: "REVIEW_REQUIRED", title: "Review", description: "AI generated summary", durationSeconds: 30, sources: [{ title: "Source", url: "https://example.com", sourceName: "Example" }], assets: [{ id: "asset-1", licenseStatus: "VERIFIED", purpose: "image" }], policy: null });
+const content = (): ContentReviewResponse => ({ id: "content-1", channelId: "channel-1", status: "REVIEW_REQUIRED", title: "Review", description: "AI generated summary", durationSeconds: 30, sources: [{ title: "Source", url: "https://example.com", sourceName: "Example" }], assets: [{ id: "asset-1", licenseStatus: "VERIFIED", purpose: "image" }], policy: null, ideaId: "idea-1", outputs: [] });
 
 class FakeReviewRepository implements ReviewRepository {
   current = content();
   get = (): Promise<ContentReviewResponse> => Promise.resolve(this.current);
   getRule = (): Promise<PolicyRuleRecord> => Promise.resolve(rule);
+  getEvidence = () => Promise.resolve({ factsHaveSources: true, sourceCount: 1, minimumSourceReliability: 0.9, conflictingSources: false, assetsVerified: true, commercialUseVerified: true, duplicateRisk: false, originalityScore: 1, sensitiveTopic: false, forcedReview: false, platformRuleViolations: [] });
+  updateMetadata = (): Promise<ContentReviewResponse> => Promise.resolve(this.current);
+  getPreviewKey = (): Promise<string | null> => Promise.resolve(null);
   saveCheck = (_workspaceId: string, _contentId: string, _rule: PolicyRuleRecord, status: "pass" | "warning" | "review" | "block", _findings: readonly { code: string; severity: "pass" | "warning" | "review" | "block"; message: string }[]): Promise<ContentReviewResponse> => {
     void _findings;
     this.current = { ...this.current, policy: { status, findings: [], snapshotId: "snapshot-1" } };

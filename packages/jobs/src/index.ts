@@ -41,6 +41,16 @@ export type QueueAdapter = {
 
 export type WorkerAdapter = {
   close(): Promise<void>;
+  onModuleDestroy(): Promise<void>;
+};
+
+export type MaintenanceJobInput = {
+  requestId: string;
+};
+
+export type MaintenanceQueueAdapter = {
+  enqueue(input: MaintenanceJobInput): Promise<void>;
+  close(): Promise<void>;
 };
 
 export type DeterministicWorkerInstruction =
@@ -103,11 +113,49 @@ export class BullMqQueueAdapter implements QueueAdapter {
   }
 }
 
+export class BullMqMaintenanceQueueAdapter implements MaintenanceQueueAdapter {
+  private readonly queue: Queue<MaintenanceJobInput>;
+
+  constructor(redisUrl: string) {
+    this.queue = new Queue<MaintenanceJobInput>("maintenance", {
+      connection: createRedisConnection(redisUrl)
+    });
+  }
+
+  async enqueue(input: MaintenanceJobInput): Promise<void> {
+    await this.queue.add("DATA_LIFECYCLE", input, {
+      jobId: input.requestId,
+      attempts: 3,
+      backoff: { type: "exponential", delay: 5_000 },
+      removeOnComplete: false,
+      removeOnFail: false
+    });
+  }
+
+  async close(): Promise<void> {
+    await this.queue.close();
+  }
+}
+
+export const createMaintenanceWorker = (
+  redisUrl: string,
+  processor: Processor<MaintenanceJobInput>
+): WorkerAdapter => {
+  const worker = new Worker<MaintenanceJobInput>("maintenance", processor, {
+    connection: createRedisConnection(redisUrl),
+    concurrency: 1,
+    lockDuration: 60_000
+  });
+  const close = (): Promise<void> => worker.close();
+  return { close, onModuleDestroy: close };
+};
+
 export const createBullMqWorkers = (
   redisUrl: string,
-  processor: Processor<EnqueueJobInput>
+  processor: Processor<EnqueueJobInput>,
+  queueNames: readonly JobQueueName[] = jobQueueNames
 ): WorkerAdapter => {
-  const workers = jobQueueNames.map(
+  const workers = queueNames.map(
     (queueName) =>
       new Worker<EnqueueJobInput>(queueName, processor, {
         connection: createRedisConnection(redisUrl),
@@ -116,9 +164,8 @@ export const createBullMqWorkers = (
       })
   );
 
-  return {
-    close: async () => {
+  const close = async (): Promise<void> => {
       await Promise.all(workers.map((worker) => worker.close()));
-    }
   };
+  return { close, onModuleDestroy: close };
 };

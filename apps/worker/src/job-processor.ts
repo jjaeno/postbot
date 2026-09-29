@@ -1,11 +1,13 @@
 import type { Prisma, PrismaClient } from "@postbot/database";
 import type { EnqueueJobInput } from "@postbot/jobs";
-import { AssetPreparationJobPayloadSchema, RenderJobPayloadSchema, ScriptGenerationJobPayloadSchema, TtsPreparationJobPayloadSchema } from "@postbot/contracts";
+import { AssetPreparationJobPayloadSchema, CollectAutomationJobPayloadSchema, PolicyAutomationJobPayloadSchema, RenderJobPayloadSchema, ScriptGenerationJobPayloadSchema, TtsPreparationJobPayloadSchema } from "@postbot/contracts";
 import { ScriptGenerationProcessor } from "./script-generation-processor.js";
 import { AssetPreparationProcessor } from "./asset-preparation-processor.js";
 import { RenderProcessor } from "./render-processor.js";
 import { PublishProcessor } from "./publish-processor.js";
 import { AnalyticsProcessor } from "./analytics-processor.js";
+import { CollectProcessor } from "./collect-processor.js";
+import { PolicyProcessor } from "./policy-processor.js";
 
 type ProductionJobStatus =
   | "QUEUED"
@@ -77,6 +79,8 @@ export class DeterministicJobProcessor {
   private readonly render: RenderProcessor;
   private readonly publish: PublishProcessor;
   private readonly analytics: AnalyticsProcessor;
+  private readonly collect: CollectProcessor;
+  private readonly policy: PolicyProcessor;
 
   constructor(private readonly prisma: PrismaClient) {
     this.scriptGeneration = new ScriptGenerationProcessor(prisma);
@@ -84,6 +88,8 @@ export class DeterministicJobProcessor {
     this.render = new RenderProcessor(prisma);
     this.publish = new PublishProcessor(prisma);
     this.analytics = new AnalyticsProcessor(prisma);
+    this.collect = new CollectProcessor(prisma);
+    this.policy = new PolicyProcessor(prisma);
   }
 
   async process(input: EnqueueJobInput): Promise<void> {
@@ -97,6 +103,24 @@ export class DeterministicJobProcessor {
       return;
     }
     await this.markAutomationStepRunning(input.id, attemptNumber);
+
+    // The scheduler currently emits only { automation: { runId, stage } }.
+    // Never turn an unimplemented stage into a successful deterministic job.
+    if (automationRunId(input.payload)) {
+      const executable =
+        (input.type === "COLLECT" && CollectAutomationJobPayloadSchema.safeParse(input.payload).success) ||
+        (input.type === "SCRIPT" && ScriptGenerationJobPayloadSchema.safeParse(input.payload).success) ||
+        (input.type === "ASSET" && AssetPreparationJobPayloadSchema.safeParse(input.payload).success) ||
+        (input.type === "TTS" && TtsPreparationJobPayloadSchema.safeParse(input.payload).success) ||
+        (input.type === "RENDER" && RenderJobPayloadSchema.safeParse(input.payload).success) ||
+        (input.type === "POLICY" && PolicyAutomationJobPayloadSchema.safeParse(input.payload).success) ||
+        (input.type === "PUBLISH" && typeof input.payload.publish === "object" && input.payload.publish !== null &&
+          "publishPlanId" in input.payload.publish && typeof input.payload.publish.publishPlanId === "string");
+      if (!executable) {
+        await this.fail(input.id, attemptNumber, "AUTOMATION_STAGE_NOT_CONNECTED", "Automation stage has no executable domain payload.");
+        throw new Error("AUTOMATION_STAGE_NOT_CONNECTED");
+      }
+    }
 
     const behavior = readBehavior(input.payload);
     if (behavior.mode === "timeout") {
@@ -116,6 +140,11 @@ export class DeterministicJobProcessor {
     if (behavior.mode === "retry-then-success" && attemptNumber <= behavior.failAttempts) {
       await this.retry(input.id, attemptNumber, "RETRY_REQUESTED", "Deterministic retry requested.");
       throw new Error("Deterministic retry requested.");
+    }
+
+    if (input.type === "COLLECT" && CollectAutomationJobPayloadSchema.safeParse(input.payload).success) {
+      try { await this.succeed(input.id, attemptNumber, await this.collect.process(input.payload)); return; }
+      catch (error) { const message = error instanceof Error ? error.message : "COLLECT_FAILED"; await this.fail(input.id, attemptNumber, "COLLECT_FAILED", message); throw error; }
     }
 
     if (input.type === "SCRIPT" && ScriptGenerationJobPayloadSchema.safeParse(input.payload).success) {
@@ -167,8 +196,19 @@ export class DeterministicJobProcessor {
         throw error;
       }
     }
+    if (input.type === "POLICY" && PolicyAutomationJobPayloadSchema.safeParse(input.payload).success) {
+      try {
+        const result = await this.policy.process(input.payload);
+        if (result.status !== "pass") { await this.needsReview(input.id, attemptNumber, result, "POLICY_REVIEW_REQUIRED"); return; }
+        await this.succeed(input.id, attemptNumber, result); return;
+      } catch (error) { const message = error instanceof Error ? error.message : "POLICY_CHECK_FAILED"; await this.fail(input.id, attemptNumber, "POLICY_CHECK_FAILED", message); throw error; }
+    }
     if (input.type === "PUBLISH") {
-      try { await this.succeed(input.id, attemptNumber, await this.publish.process(input.payload)); return; } catch (error) { const message = error instanceof Error ? error.message : "PUBLISH_FAILED"; await this.fail(input.id, attemptNumber, "PUBLISH_FAILED", message); throw error; }
+      try {
+        const published = await this.publish.process(input.payload);
+        const analytics = automationRunId(input.payload) ? await this.syncAnalyticsAfterPublish(input.payload).catch((error: unknown) => ({ error: error instanceof Error ? error.message : "ANALYTICS_SYNC_FAILED" })) : null;
+        await this.succeed(input.id, attemptNumber, { ...published, ...(analytics ? { analytics } : {}) }); return;
+      } catch (error) { const message = error instanceof Error ? error.message : "PUBLISH_FAILED"; await this.fail(input.id, attemptNumber, "PUBLISH_FAILED", message); throw error; }
     }
     if (input.type === "ANALYTICS") {
       try { await this.succeed(input.id, attemptNumber, await this.analytics.process(input.payload)); return; } catch (error) { const message = error instanceof Error ? error.message : "ANALYTICS_SYNC_FAILED"; await this.fail(input.id, attemptNumber, "ANALYTICS_SYNC_FAILED", message); throw error; }
@@ -180,6 +220,17 @@ export class DeterministicJobProcessor {
       queueName: input.queueName,
       attemptNumber
     });
+  }
+
+  private async syncAnalyticsAfterPublish(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const publish = payload.publish;
+    if (!publish || typeof publish !== "object" || Array.isArray(publish) || typeof (publish as Record<string, unknown>).publishPlanId !== "string") throw new Error("INVALID_PUBLISH_PAYLOAD");
+    const plan = await this.prisma.publishPlan.findUniqueOrThrow({ where: { id: String((publish as Record<string, unknown>).publishPlanId) }, select: { platform: true, contentItem: { select: { channelId: true } } } });
+    const runId = automationRunId(payload);
+    if (!runId) return { skipped: true };
+    const now = new Date(); const periodStart = new Date(now.getTime() - 7 * 24 * 60 * 60_000);
+    const sync = await this.prisma.analyticsSync.upsert({ where: { idempotencyKey: `automation:${runId}:analytics` }, update: {}, create: { channelId: plan.contentItem.channelId, platform: plan.platform, status: "RUNNING", idempotencyKey: `automation:${runId}:analytics`, periodStart, periodEnd: now, timezone: "UTC" } });
+    return this.analytics.process({ analytics: { syncId: sync.id } });
   }
 
   private async start(jobId: string): Promise<number | null> {
@@ -232,9 +283,11 @@ export class DeterministicJobProcessor {
     const runId = job ? automationRunId(job.payload as Record<string, unknown>) : null;
     if (runId && job) {
       const now = new Date();
+      const run = await this.prisma.automationRun.findUnique({ where: { id: runId }, select: { checkpoint: true } });
+      const previousCheckpoint = run?.checkpoint && typeof run.checkpoint === "object" && !Array.isArray(run.checkpoint) ? run.checkpoint : {};
       await this.prisma.$transaction([
         this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "SUCCEEDED", attemptCount: attemptNumber, output: result as Prisma.InputJsonObject, finishedAt: now } }),
-        this.prisma.automationRun.update({ where: { id: runId }, data: { status: job.type === "PUBLISH" ? "SUCCEEDED" : "RUNNING", heartbeatAt: now, checkpoint: { stage: job.type.toLowerCase(), lastJobId: jobId, completedAt: now.toISOString() } } })
+        this.prisma.automationRun.update({ where: { id: runId }, data: { status: job.type === "PUBLISH" ? "SUCCEEDED" : "RUNNING", heartbeatAt: now, checkpoint: { ...previousCheckpoint, stage: job.type.toLowerCase(), lastJobId: jobId, completedAt: now.toISOString() } } })
       ]);
       await this.settleReservation(runId, jobId, job.type, false);
     }
@@ -323,14 +376,20 @@ export class DeterministicJobProcessor {
     ]);
   }
 
-  private async needsReview(jobId: string, attemptNumber: number, result: Record<string, unknown>): Promise<void> {
+  private async needsReview(jobId: string, attemptNumber: number, result: Record<string, unknown>, errorCode = "ASSET_LICENSE_REVIEW_REQUIRED"): Promise<void> {
     await this.finish(jobId, attemptNumber, "NEEDS_REVIEW", {
       status: "NEEDS_REVIEW",
       result: result as Prisma.InputJsonObject,
       finishedAt: new Date(),
-      errorCode: "ASSET_LICENSE_REVIEW_REQUIRED",
-      errorMessage: "Asset license requires manual review."
+      errorCode,
+      errorMessage: errorCode === "POLICY_REVIEW_REQUIRED" ? "Policy findings require manual review." : "Asset license requires manual review."
     });
+    const job = await this.prisma.productionJob.findUnique({ where: { id: jobId }, select: { payload: true } });
+    const runId = job ? automationRunId(job.payload as Record<string, unknown>) : null;
+    if (runId) await this.prisma.$transaction([
+      this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "HELD", attemptCount: attemptNumber, output: result as Prisma.InputJsonObject, errorCode, errorMessage: "Manual review is required.", finishedAt: new Date() } }),
+      this.prisma.automationRun.update({ where: { id: runId }, data: { status: "PAUSED", pausedReason: errorCode, heartbeatAt: new Date() } })
+    ]);
   }
 
   private async cancel(jobId: string, attemptNumber: number | null): Promise<void> {

@@ -9,6 +9,7 @@ import {
 } from "@postbot/contracts";
 import { BullMqQueueAdapter, queueNameForJobType, type QueueAdapter } from "@postbot/jobs";
 import { loadConfig } from "@postbot/config";
+import { getLogContext } from "@postbot/logger";
 import { isTerminalJobStatus, JOBS_REPOSITORY, type JobsRepository } from "./jobs.repository.js";
 
 export const QUEUE_ADAPTER = Symbol("QUEUE_ADAPTER");
@@ -24,11 +25,13 @@ export class JobsService {
 
   async create(workspaceId: string, rawInput: unknown): Promise<ProductionJobResponse> {
     const input = this.parseCreateInput(rawInput);
+    const context = getLogContext();
+    const tracedInput = { ...input, payload: { ...input.payload, _trace: { correlationId: context.correlationId ?? crypto.randomUUID(), workspaceId, channelId: input.channelId, contentItemId: input.contentItemId ?? null } } };
     try {
       const result = await this.repository.createOrFind(workspaceId, {
-        ...input,
-        queueName: queueNameForJobType(input.type),
-        runAfterDate: parseRunAfter(input.runAfter)
+        ...tracedInput,
+        queueName: queueNameForJobType(tracedInput.type),
+        runAfterDate: parseRunAfter(tracedInput.runAfter)
       });
       if (result.created) {
         await this.queue.enqueue({
