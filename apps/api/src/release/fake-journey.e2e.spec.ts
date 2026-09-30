@@ -183,8 +183,9 @@ describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, 
     // rolling set of near-future slots so a completed render never rolls a
     // single missed weekly slot into the following week.
     const platforms = ["YOUTUBE", "INSTAGRAM", "TIKTOK"] as const;
+    const scheduleBase = Date.now();
     const scheduleRules = platforms.flatMap((platform) => Array.from({ length: 7 }, (_, index) => {
-      const scheduleAt = new Date(Date.now() + (index + 2) * 60_000);
+      const scheduleAt = new Date(scheduleBase + (index + 1) * 2 * 60_000);
       return {
         platform,
         dayOfWeek: scheduleAt.getUTCDay(),
