@@ -10,7 +10,7 @@
     "preview": "vite preview --host 0.0.0.0",
     "lint": "eslint .",
     "typecheck": "tsc -b --noEmit",
-    "test": "vitest run src --passWithNoTests",
+    "test": "node --test scripts/server.spec.mjs && vitest run src --passWithNoTests",
     "pree2e": "pnpm --filter @postbot/contracts build",
     "e2e": "playwright test"
   },

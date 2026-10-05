@@ -69,11 +69,14 @@ import "./styles.css";
 
 const queryClient = new QueryClient();
 const viteEnv = import.meta.env as Readonly<Record<string, string | undefined>>;
-const apiBaseUrl = viteEnv["VITE_API_BASE_URL"] ?? "http://localhost:3000";
+const runtimeConfig = (window as Window & { __POSTBOT_CONFIG__?: { apiBaseUrl?: unknown } }).__POSTBOT_CONFIG__;
+const apiBaseUrl = z.string().url().optional().parse(runtimeConfig?.apiBaseUrl) ?? viteEnv["VITE_API_BASE_URL"] ?? "http://localhost:3000";
+let sessionCsrfToken: string | null = null;
 
 const csrfFromCookie = (): string | null => {
   const cookie = document.cookie.split("; ").find((item) => item.startsWith("postbot_csrf="));
-  return cookie ? decodeURIComponent(cookie.split("=")[1] ?? "") : null;
+  try { return cookie ? decodeURIComponent(cookie.split("=")[1] ?? "") : null; }
+  catch { return null; }
 };
 
 const request = async <Result,>(
@@ -83,7 +86,7 @@ const request = async <Result,>(
 ): Promise<Result> => {
   const headers = new Headers(options.headers);
   headers.set("content-type", "application/json");
-  const csrfToken = csrfFromCookie();
+  const csrfToken = csrfFromCookie() ?? sessionCsrfToken;
   if (csrfToken) {
     headers.set("x-csrf-token", csrfToken);
   }
@@ -101,6 +104,8 @@ const request = async <Result,>(
         : "요청을 처리하지 못했습니다.";
     throw new Error(message);
   }
+  if (["/auth/me", "/auth/login", "/auth/register", "/auth/refresh"].includes(path) && body && typeof body === "object" && "csrfToken" in body && typeof body.csrfToken === "string") sessionCsrfToken = body.csrfToken;
+  if (path === "/auth/logout") sessionCsrfToken = null;
   return parser.parse(body);
 };
 

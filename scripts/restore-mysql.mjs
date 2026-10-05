@@ -13,6 +13,13 @@ if (!targetDatabase.endsWith("_restore") && process.env.ALLOW_PRODUCTION_RESTORE
 const metadata = await readJson(`${path}.metadata.json`);
 const checksum = await sha256File(path);
 if (checksum !== metadata.checksumSha256) throw new Error("Backup checksum validation failed before restore.");
+if (!targetDatabase) throw new Error("Restore target database is required.");
+const inspectTarget = mysqlCommand(targetUrl, "mysql", ["--batch", "--skip-column-names", "-e",
+  `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = CONVERT(0x${Buffer.from(targetDatabase).toString("hex")} USING utf8mb4);`]);
+let targetTableCount = "";
+inspectTarget.stdout.on("data", (chunk) => { targetTableCount += String(chunk); });
+await waitFor(inspectTarget, "Failed to inspect restore target");
+if (targetTableCount.trim() !== "0") throw new Error("Restore target must be empty; refusing to overwrite existing tables.");
 const escaped = targetDatabase.replace(/`/gu, "``");
 const create = mysqlCommand(targetUrl, "mysql", ["-e", `CREATE DATABASE IF NOT EXISTS \`${escaped}\``]);
 await waitFor(create, "Failed to create restore database");

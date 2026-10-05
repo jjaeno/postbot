@@ -1,5 +1,59 @@
 # Postbot v1 Acceptance Report
 
+## 2026-10-06 출시 전체 내부 회귀·운영 보완 — 19.3단계
+
+최종 판정: **PASS_WITH_EXTERNAL_VERIFICATION_PENDING**. 19.3의 지원 v1 범위에서 발견한 내부 출시 차단 결함을 보완했고 필수 로컬 검증을 모두 통과했다. 알려진 내부 release blocker는 0개이며 모든 미래 버그가 없다는 보장은 아니다. 아래는 19.3의 최신 증거이며, 이후의 19.2/19.1 기록은 과거 검증이다. 대상은 `feature-ux-pre-release-addendum.md`의 지원 v1 범위다. 자유 편집기·자유 화면 비율·외부 스톡 자동 구매·인과 효과 실험 등 명시적 제외 로드맵까지 완료했다고 주장하지 않는다. 실제 Provider/SNS, 운영 배포, 사용자 설정은 내부 Fake 검증과 구분한다. 시작 SHA: `592a55e`; 최종 구현 commit은 `git log -1 --format=%H`로 확인한다. push는 수행하지 않았다.
+
+### 이번에 보완한 결함
+
+* 웹 서버의 malformed URI 크래시, 경로 탈출 및 외부 symlink 접근을 차단하고 회귀 테스트를 추가했다. 정적 파일 MIME/HEAD/SPA/404와 runtime 설정의 비캐시를 검증했다.
+* 같은 웹 artifact에 `PUBLIC_API_BASE_URL`을 실행 시 적용한다. 다른 API host의 CSRF 쿠키를 웹에서 읽을 수 없는 경우 인증 응답의 nonce를 메모리에만 보관한다. 인증 응답은 `Cache-Control: no-store`다.
+* staging/production의 공개 placeholder·짧은 인증/암호화 키와 동일 JWT access/refresh 키를 시작 시 거절한다. 실제 키 생성·주입은 운영자가 수행한다.
+* CI에서 DB 회귀가 skip으로 통과하지 않도록 별도 실행하고 `_test_test` DB 이름 중복을 방지했다. worker 통합 fixture는 담당 SCRIPT queue만 사용하며 release fixture는 실행 후 자신이 만든 채널만 PAUSED 처리한다.
+* 알려진 production 의존성 취약점을 패치하고 Node 20 EOL runtime을 Node 24 LTS로 변경했다. 공식 Node build와 Ubuntu 26.04 LTS runtime 조합으로 FFmpeg/Chromium을 검증한다. 미패치 취약점을 숨기지 않도록 CI image scan의 `ignore-unfixed`를 제거했다.
+* 복원은 기존 테이블이 있는 대상에 덤프를 주입하지 않는다. Docker 백업은 원격 주소를 로컬 Compose 대상으로 오인하지 않으며 원격 DB는 direct mode를 요구한다.
+* Redis 완료 key 유실 후 재전달에서 DB의 성공 작업이 다시 실행되는 결함을 재현하고 수정했다. worker는 DB 성공 결과·완료 시각·시도 횟수를 보존한다. 실제 SCRIPT 재전달에서도 usage/ledger 1건을 유지한다.
+* 복구 CLI의 Redis 연결 누수와 worker 즉시 종료 시 초기화 경쟁을 보완했다. queue/maintenance/worker가 소유한 연결을 직접 닫고 Nest 종료 hook에서도 정리한다. 연결 생명주기 검사는 고유 BullMQ prefix로 다른 작업과 격리한다. API SIGTERM은 shutdown hook을 통해 정리하며 readiness Redis 연결은 서버 장애 중에도 끊을 수 있다.
+
+### 검증 결과
+
+| 항목 | 결과·증거 |
+| --- | --- |
+| 전체 monorepo lint/typecheck/build | PASS. Linux Node 24 전체 lint/typecheck 및 production build 15/15. Windows 검사도 통과했다. |
+| 전체 unit + 테스트 전용 DB integration/장애/멱등성 | PASS. Node 24 전체 test task 27/27(의존 build 포함), 마지막 queue/worker/API 보완 후 해당 lint/typecheck/build 및 API 88/88·worker 20/20·jobs lifecycle 6/6 추가 통과. 별도 release 3개는 일반 unit에서만 skip; database 8/8; asset 5/5. Provider 장애·권한·CSRF·예산·예약 경쟁·게시 모호성·중복 비용·완료 작업 재전달 회귀 포함. 영향 없는 성공 검증은 반복하지 않았다. |
+| 웹 서버 / 백업 대상 보호 | PASS. 웹 Node builtin 8/8; 백업 helper 4/4, Node 24에서도 통과. 잘못된 mode·원격/임의 port·다른 loopback DB 주소를 실행 전 거절하고 허용된 실제 Compose 대상의 migration 11행 조회도 통과. |
+| Desktop / mobile Playwright | PASS. 각각 13/13. API mock 기반 UI/마법사/권한 복귀/CSRF fallback과 실제 built 웹 runtime 서버를 검증하며 실제 DB 전체 여정과 구분한다. |
+| 최종 Ubuntu 웹 이미지 | PASS. malformed URL 400 후 정상 URL 200, runtime API 적용 및 no-store, HEAD body 없음. |
+| 실제 MinIO S3 contract | PASS. Node 24에서 upload/download/presigned URL/delete 1/1. |
+| 최종 renderer 15초/60초 MP4 | PASS. 각각 15/60초, 1080×1920, audio true, 평균 -21.1dB, black-frame ratio 0, 장면 픽셀 RGB [199,4,204]. 실제 Chromium/FFmpeg 실행, exit 0. 종료 시 `Target closed` 경고는 출력 결과/QA 실패가 아니다. 마지막 queue 변경 뒤 최종 이미지의 renderer dist·Node·FFmpeg·Chromium·CJK 폰트 SHA-256이 해당 smoke 이미지와 모두 동일함을 확인해 영향 없는 장시간 smoke를 반복하지 않았다. 최종 worker의 실제 샘플 렌더도 별도 통과했다. |
+| 브랜드·이미지·한글 still | PASS. `.artifacts/pre-release/brand-scene-193.png`를 직접 확인: 녹색 로고, 노란 watermark/serif/자막·파란 자막 배경·한글 overlay·장면 이미지. |
+| 새 API/worker baked 전체 Fake 여정 | 최종 이미지 3/3 PASS, exit 0: 수동 130,900ms·승인형 311,358ms·완전 자동형 361,516ms, 전체 804.52초. 실제 HTTP/MySQL/BullMQ/S3/Chromium/FFmpeg와 Fake 외부 Provider로 3-platform 제작/게시/분석/최적화·중복 요청·비용 중복 방지를 확인했다. schedulerObservedMs null은 수동 시작이 선행한 fixture의 관찰값이며 timer 지연을 측정한 결과로 해석하지 않는다. 운영 SNS에는 게시하지 않았다. |
+| 새 이미지의 실제 마법사 샘플 | PASS. `scripts/verify-wizard-sample.mjs`, channel `cmuvk07pc0006mg01xiqobt5j` / run `cmuvk08gv000qmg01rcd242sr` / content `cmuvk0be90007od01igyzwiba`. PAUSED 초안→제작→MP4→정책/승인→설정 완료, publishPlan 0. 30초, 1080×1920, audio true, 평균 -27.1dB, black ratio 0 및 실제 브랜드 스타일 확인. |
+| 실제 Redis/worker 재시작·queue 복구 | PASS. 최종 이미지, stale reset 1·enqueue 2, 두 fixture 모두 SUCCEEDED·attempt 1·provider usage 0. 두 fixture의 완료 queue key만 지우고 재전달해도 동일 결과. worker 재시작 후에도 동일 상태. 복구/검증 CLI 모두 exit 0. 이 두 작업은 queue 생명주기용 deterministic COLLECT fixture이며 실제 domain 제작은 별도 전체 Fake 여정으로 검증한다. |
+| 실제 API/worker graceful 종료 | PASS. 최종 이미지에서 API와 작업을 처리한 worker 모두 exit 0, OOM false. queue 및 maintenance 연결의 정상/즉시 종료와 실제 작업 처리 후 종료는 6개 독립 child process에서 자연 종료를 확인했다. |
+| 격리 migration 및 backup/restore | PASS. 새 `_test` DB에 migration 11개·seed 적용 및 재적용 no pending. 88,823-byte dump checksum 검증·격리 restore 2회 성공, migration/workspace/channel/content = 11/1/1/0. 기존 테이블 대상은 명시적으로 거절. 새 guard restore 77,241ms는 로컬 부하 상태의 측정이며 운영 RTO 보장이 아니다. |
+| production 의존성 audit | PASS. `pnpm audit --prod --audit-level=low`: 알려진 취약점 0. |
+| secret / filesystem scan | PASS. Gitleaks 최신 source에서 노출 0, 기존 41 commit history 노출 0. Trivy filesystem vulnerability+misconfiguration HIGH/CRITICAL 0. artifact·backup·운영 `.env`는 source/image build context에서 제외한다. |
+| 네 최종 image 취약점 scan | PASS. Trivy 0.70.0, 미패치 포함 HIGH/CRITICAL 각각 0. LOW/MEDIUM 및 미래 취약점까지 0이라고 주장하지 않는다. `.artifacts/pre-release/trivy-verified-{api,worker,renderer}-all-high-193.json` 및 `trivy-ubuntu-web-all-high-193.json`. |
+| API 로컬 health baseline | PASS. 최종 이미지에서 100 requests, concurrency 10, p50 3.895ms / p95 15.888ms / max 59.576ms. 전체 여정 종료 후 로컬 측정이며 운영 용량·SLO 증거가 아니다. |
+
+Backup SHA-256: `eefb06d7903474b6a66f577a9ea354858f9e40432a5206cb93f96ab73fb7ab94`. DB/덤프/fixture/object 증거는 보존하며 운영 데이터는 삭제하지 않았다.
+
+최종 로컬 image inspect IDs(배포 registry digest가 아님):
+
+* API: `sha256:807f1dc5af23a47556e504197107a52d06c592d793a999e8a38f12e7d6ce5c25`
+* worker: `sha256:baad448171df23702dae84cde70f710a8ddd382ae9a51dbfb75c8027eb48d89d`
+* web: `sha256:e14baa55583d54a5f1955aee380f7b0d0b3046568ac71ff8d2b3014ab20f221d`
+* renderer: `sha256:79dadf665e8c9758ec2484884ef14b3b6d87e287c806e27afb48b301b8ed6e73`
+
+### 실패한 시도와 외부 검증 한계
+
+처음의 Node 20/Debian 12 및 Node 24/Debian 13 후보는 미패치 HIGH/CRITICAL이 남아 최종 release 후보에서 제외했다. 동시에 여러 image build를 실행할 때 개발 MySQL OOM과 cold browser timeout이 발생했다. 동일 DB를 재시작하고 부하를 분리해 해당 검증을 다시 수행했다. 초기 전체 Fake 여정의 FULL_AUTO에서는 host/VM 시간 약 30분 도약과 BullMQ lock 만료로 timeout이 발생했다. 해당 실패 fixture만 취소·PAUSED 처리하고 데이터/오류 증거를 보존했으며, 이 실패를 성공으로 계산하지 않는다. 이후 새 이미지 전체 여정이 두 번 3/3 통과했고 마지막 판정은 최종 이미지의 결과다. 완료 작업 재전달·연결 누수·즉시 worker 종료 경쟁은 회귀 실패로 재현한 뒤 수정했으며 마지막 관련 검사는 모두 통과했다. 일시적인 수동 명령의 src/dist 중복 수집 결과는 정식 source test 20/20으로 대체했고 성공 수에 포함하지 않았다.
+
+재현 시에는 현재 commit에서 `docker compose -f docker-compose.acceptance.yml build api worker migrate acceptance`, `up -d --wait api worker`, `run --rm acceptance`를 순서대로 실행한다. 실제 샘플의 script mount 명령은 아래 과거 기록의 동일 `scripts/verify-wizard-sample.mjs` 절차를 사용한다. 검증에서는 최종 태그를 고정한 `.artifacts/pre-release/acceptance-final-193.yml` override를 사용했고 운영 `.env`는 주입하지 않았다. 검증 완료 후 acceptance 및 별도 integration Redis만 정지하고 개발 MySQL/Redis/MinIO와 DB/object/backup 증거는 보존한다.
+
+운영자가 정해야 하거나 실제 자격 증명이 필요한 항목: 배포 대상/registry/도메인/HTTPS/같은-site 웹·API 구성, 운영 DB·Redis·S3 및 secret manager/모니터링/용량·RPO/RTO, 실제 Provider 키·voice ID·청구 단가·상업 권리, SNS 앱 심사·계정 권한·게시/analytics API 접근. 실제 유료 호출/SNS 게시/registry push/운영 배포와 원격 GitHub workflow 실행은 하지 않았다. 원격 CI 통과 또는 실제 외부 연동 완료를 주장하지 않는다. 배포/복구 절차는 `deployment-runbook.md`를 따른다.
+
 ## 2026-10-05 최종 명세 점검 보완 — 19.2단계
 
 최종 판정: **PASS_WITH_EXTERNAL_VERIFICATION_PENDING** — 19.2 지원 범위의 구현·필수 로컬 검증이 완료됐다. production 출시 승인이나 전체 로드맵 완료 판정이 아니다. 아래 19.1 결과는 과거 단계의 증거이며 최신 명세 충족 판정으로 사용하지 않는다. 최종 점검에서 발견한 다섯 항목(권리 승인 후 재개, 플랫폼 격리, 실제 voice ID, 실험 제작/성과 비교, 마법사·브랜드·스톡 반영)을 이번 단계에서 구현했다. 시작 SHA는 `b6fa975a9a84ef742f0f02496436c23bfc4c4746`이며 이 절을 포함하는 19.2 구현 커밋의 SHA는 인계 응답과 `git log -1 --format=%H`로 확인한다. push/병합은 하지 않았다.

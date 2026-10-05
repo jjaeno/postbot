@@ -1,4 +1,4 @@
-FROM node:20-bookworm-slim AS build
+FROM node:24-trixie-slim AS build
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends openssl && rm -rf /var/lib/apt/lists/*
 RUN corepack enable && corepack prepare pnpm@10.34.5 --activate
@@ -27,32 +27,36 @@ RUN set -eu; \
     cd /deploy && node --input-type=module -e "import('${REMOTION_RENDERER}/dist/esm/index.mjs').then(({ensureBrowser}) => ensureBrowser({logLevel: 'info'}))"; \
   fi
 
-FROM node:20-bookworm-slim AS runtime
+FROM node:24-trixie-slim AS runtime-node
+
+FROM ubuntu:26.04 AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
-RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
-  ffmpeg \
-  fonts-noto-cjk \
-  openssl \
-  libasound2 \
-  libatk-bridge2.0-0 \
-  libatk1.0-0 \
-  libcups2 \
+ARG APP=api
+COPY --from=runtime-node /usr/local/bin/node /usr/local/bin/node
+RUN set -eu; groupadd --system node; useradd --system --gid node --create-home node; \
+  apt-get -o Acquire::Retries=3 update; apt-get -o Acquire::Retries=3 upgrade -y; \
+  apt-get -o Acquire::Retries=3 install -y --no-install-recommends ca-certificates openssl libstdc++6; \
+  if [ "${APP}" = "worker" ] || [ "${APP}" = "renderer" ]; then \
+  apt-get -o Acquire::Retries=3 install -y --no-install-recommends ffmpeg fonts-noto-cjk \
+  libasound2t64 \
+  libatk-bridge2.0-0t64 \
+  libatk1.0-0t64 \
+  libcups2t64 \
   libdbus-1-3 \
   libdrm2 \
   libgbm1 \
-  libgtk-3-0 \
   libnspr4 \
   libnss3 \
   libxcomposite1 \
   libxdamage1 \
   libxfixes3 \
-  libxrandr2 \
-  xdg-utils \
-  && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
+  libxrandr2; \
+  fi; \
+  node --version; \
+  rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=deploy --chown=node:node /deploy /app
-ARG APP=api
 ENV POSTBOT_APP=${APP}
 USER node
 CMD ["sh", "-c", "if [ \"${POSTBOT_APP}\" = \"web\" ]; then node scripts/serve.mjs; else node dist/main.js; fi"]

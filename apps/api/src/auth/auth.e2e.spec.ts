@@ -169,8 +169,9 @@ describe("Auth API", () => {
     expect(cookies.join("\n")).toContain("SameSite=Lax");
     expect(JSON.stringify(register.body)).not.toContain("very-safe-password");
 
-    await agent.get("/auth/me").expect(200).expect(({ body }) => {
-      expect(AuthSessionSchema.parse(body).user.email).toBe("owner@example.com");
+    await agent.get("/auth/me").expect(200).expect("Cache-Control", "no-store").expect(({ body }) => {
+        expect(AuthSessionSchema.parse(body).user.email).toBe("owner@example.com");
+        expect(AuthSessionSchema.parse(body).csrfToken).toBe(csrfFrom(cookies));
     });
 
     await agent

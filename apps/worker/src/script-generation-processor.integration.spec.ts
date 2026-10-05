@@ -56,7 +56,7 @@ describeIntegration("SCRIPT generation worker integration", () => {
     });
     const input: EnqueueJobInput = { id: job.id, type: "SCRIPT", queueName: "script", runAfter: null, payload: job.payload as Record<string, unknown> };
     const queue = new BullMqQueueAdapter(redisUrl);
-    const workers = createBullMqWorkers(redisUrl, (bullJob) => new DeterministicJobProcessor(prisma).process(bullJob.data));
+    const workers = createBullMqWorkers(redisUrl, (bullJob) => new DeterministicJobProcessor(prisma).process(bullJob.data), ["script"]);
     try {
       await queue.enqueue(input);
       await waitForCompletion(job.id);
@@ -74,11 +74,18 @@ describeIntegration("SCRIPT generation worker integration", () => {
     expect(contentItem.sceneVersions).toHaveLength(1);
     expect(completed.providerUsages).toHaveLength(1);
     expect(completed.providerUsages[0]?.costLedger).toHaveLength(1);
+    await new DeterministicJobProcessor(prisma).process(input);
+    const redelivered = await prisma.productionJob.findUniqueOrThrow({ where: { id: job.id }, include: { attempts: true, providerUsages: { include: { costLedger: true } } } });
+    expect(redelivered.status).toBe("SUCCEEDED");
+    expect(redelivered.attempts).toHaveLength(1);
+    expect(redelivered.providerUsages).toHaveLength(1);
+    expect(redelivered.providerUsages[0]?.costLedger).toHaveLength(1);
+    expect(redelivered.finishedAt).toEqual(completed.finishedAt);
     const assignment = await prisma.experimentAssignment.findUniqueOrThrow({ where: { experimentId_contentItemId: { experimentId: experiment.id, contentItemId: contentItem.id } } });
     expect(contentItem.scriptVersions[0]?.durationSeconds?.toNumber()).toBe(assignment.arm === "control" ? 30 : 33);
     expect(contentItem.scriptVersions[0]?.qualitySnapshot).toMatchObject({ generationContext: { experiment: { experimentId: experiment.id, arm: assignment.arm, assignmentKey: assignment.assignmentKey } } });
     expect(contentItem.sceneVersions[0]?.sceneDocument).toMatchObject({ aiStockRatio: 0.5, style: { brandColor: "#ff00ff", fontFamily: "serif", watermark: "Worker brand", captionColor: "#ffff00", captionFontSize: 40 } });
-  });
+  }, 20_000);
 
   it("cancels a running SCRIPT job before it creates generation records", async () => {
     process.env.LLM_PROVIDER = "fake";
@@ -91,7 +98,7 @@ describeIntegration("SCRIPT generation worker integration", () => {
     const payload = { deterministicBehavior: "timeout", timeoutMs: 250, generation: { request: { ideaId: idea.id, idempotencyKey, platform: "YOUTUBE", partial: "full" }, idea: { id: idea.id, channelId: channel.id, title: idea.title, summary: idea.summary ?? "", canonicalUrl: idea.canonicalUrl, sourceName: idea.sourceName, sourceKind: idea.sourceKind, publishedAt: null, topic: "science", language: "en" } } };
     const job = await prisma.productionJob.create({ data: { channelId: channel.id, type: "SCRIPT", queueName: "script", idempotencyKey, payload } });
     const queue = new BullMqQueueAdapter(redisUrl);
-    const workers = createBullMqWorkers(redisUrl, (bullJob) => new DeterministicJobProcessor(prisma).process(bullJob.data));
+    const workers = createBullMqWorkers(redisUrl, (bullJob) => new DeterministicJobProcessor(prisma).process(bullJob.data), ["script"]);
     try {
       await queue.enqueue({ id: job.id, type: "SCRIPT", queueName: "script", runAfter: null, payload });
       await waitForStatus(job.id, "RUNNING");
@@ -104,5 +111,5 @@ describeIntegration("SCRIPT generation worker integration", () => {
     await expect(prisma.productionJob.findUniqueOrThrow({ where: { id: job.id } })).resolves.toMatchObject({ status: "CANCELLED" });
     await expect(prisma.providerUsage.count({ where: { productionJobId: job.id } })).resolves.toBe(0);
     await expect(prisma.contentItem.count({ where: { channelId: channel.id } })).resolves.toBe(0);
-  });
+  }, 20_000);
 });

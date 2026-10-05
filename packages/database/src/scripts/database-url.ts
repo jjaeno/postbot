@@ -21,7 +21,7 @@ export const getTestDatabaseName = (databaseUrl: string = getDatabaseUrl()): str
     throw new Error("DATABASE_URL must include a database name.");
   }
 
-  return `${databaseName}_test`;
+  return databaseName.endsWith("_test") ? databaseName : `${databaseName}_test`;
 };
 
 export const getTestDatabaseUrl = (databaseUrl: string = getDatabaseUrl()): string =>

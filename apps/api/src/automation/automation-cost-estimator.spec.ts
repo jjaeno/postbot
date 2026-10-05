@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { loadConfig } from "@postbot/config";
 import { describe, expect, it } from "vitest";
 import { estimateAutomationStageCost } from "./automation-cost-estimator.js";
@@ -12,7 +13,9 @@ describe("automation cost estimator", () => {
   });
 
   it("fails closed when a real provider price is not configured", () => {
-    const config = loadConfig({ APP_ENV: "production", LLM_PROVIDER: "openai", OPENAI_API_KEY: "configured-elsewhere" });
+    const config = loadConfig({ APP_ENV: "production", LLM_PROVIDER: "openai", OPENAI_API_KEY: "configured-elsewhere",
+      JWT_ACCESS_SECRET: randomBytes(32).toString("hex"), JWT_REFRESH_SECRET: randomBytes(32).toString("hex"),
+      OAUTH_ENCRYPTION_KEY: randomBytes(32).toString("hex") });
     expect(estimateAutomationStageCost(config, "SCRIPT", {})).toBeNull();
   });
   it("does not require AI pricing when a scene snapshot uses only licensed stock", () => {

@@ -1,0 +1,7 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Exact non-secret fixture ID and empty env example adjacent variable name (not provider credentials)"
+regexTarget = "secret"
+regexes = ['''^publish-key-123456$''', '''^ELEVENLABS_VOICE_ID=?\s*$''']

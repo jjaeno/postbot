@@ -33,5 +33,5 @@ export class AppController implements OnModuleDestroy {
     }
   }
 
-  async onModuleDestroy(): Promise<void> { await this.redis.quit(); }
+  onModuleDestroy(): void { this.redis.disconnect(); }
 }

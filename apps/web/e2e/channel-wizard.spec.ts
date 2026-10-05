@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 const session = {
+  csrfToken: "fixture-csrf-token-for-cross-host-browser-testing",
   user: {
     id: "user-1",
     email: "owner@example.com",
@@ -187,6 +188,7 @@ const mockApi = async (page: Page): Promise<void> => {
 
   await page.route("**/automation/budgets", async (route) => {
     if (route.request().method() === "POST") {
+        expect(route.request().headers()["x-csrf-token"]).toBe(session.csrfToken);
       const body = route.request().postDataJSON() as { channelId: string | null; currency?: string; dailySoftLimit?: number | null; dailyHardLimit?: number | null; monthlySoftLimit?: number | null; monthlyHardLimit?: number | null };
       await route.fulfill({ json: { id: "budget-1", currency: "USD", dailySoftLimit: null, monthlySoftLimit: null, dailyHardLimit: null, monthlyHardLimit: null, ...body, updatedAt: "2026-10-02T00:00:00.000Z" } }); return;
     }

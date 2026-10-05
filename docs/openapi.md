@@ -2,6 +2,8 @@
 
 The NestJS API exposes the generated OpenAPI UI at:
 
+Authentication responses (`/auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout`, `/auth/me`, workspace access check) send `Cache-Control: no-store`; session/CSRF values must not be persisted or logged.
+
 ```text
 http://localhost:3000/openapi
 ```
@@ -16,7 +18,7 @@ Current v1 endpoint summary (the generated Swagger document is authoritative for
 | POST | `/auth/login` | No | Verify email/password and issue secure session cookies |
 | POST | `/auth/refresh` | CSRF cookie/header | Rotate refresh token and issue a new access token |
 | POST | `/auth/logout` | CSRF cookie/header | Revoke current refresh token and clear cookies |
-| GET | `/auth/me` | Access cookie | Return the current user and default workspace |
+| GET | `/auth/me` | Access cookie | Return the current user, default workspace, and nullable CSRF cookie value for same-site cross-host clients (memory only; never persist/log) |
 | GET | `/auth/workspaces/:workspaceId/access-check` | Access cookie | Guarded workspace access check for later domain APIs |
 | GET | `/channels` | Access cookie | List channels in the authenticated workspace |
 | POST | `/channels` | Access cookie + CSRF | Create a channel with collection, template, output, schedule, and automation settings |

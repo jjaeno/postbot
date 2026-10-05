@@ -35,7 +35,8 @@ export const AuthWorkspaceSchema = z.object({
 
 export const AuthSessionSchema = z.object({
   user: AuthUserSchema,
-  workspace: AuthWorkspaceSchema
+  workspace: AuthWorkspaceSchema,
+  csrfToken: z.string().min(32).nullable().optional()
 });
 
 export const RegisterRequestSchema = z.object({

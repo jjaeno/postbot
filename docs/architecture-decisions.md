@@ -75,6 +75,10 @@ v1은 마이크로서비스가 아닌 모듈형 모놀리스로 구성한다.
 
 `apps/api`는 Node.js + NestJS + REST + OpenAPI를 사용한다.
 
+출시 runtime 및 CI는 지원 중인 Node.js 24 LTS를 사용한다(19.3 보안 보완). Node 20은 2026-04-30에 지원 종료됐다. 공식 Node 24 trixie slim에서 빌드하고 동일 공식 이미지의 Node 실행 파일을 Ubuntu 26.04 LTS runtime에 복사한다. Debian 13 미디어 의존성의 미패치 libxml2 CRITICAL 항목을 회피하고, FFmpeg/Chromium/CJK 의존성은 worker/renderer에만 설치한다. NestJS·Prisma·Remotion의 기존 API 및 migration 계약은 유지하며 이미지 변경 후 실제 렌더/DB/HTTP 회귀로 호환성을 검증한다.
+
+근거: [Node 릴리스 정책](https://github.com/nodejs/Release#release-schedule), [Prisma 6 지원 환경](https://www.prisma.io/docs/orm/v6/reference/system-requirements), [Ubuntu 26.04 LTS 지원 기간](https://documentation.ubuntu.com/release-notes/26.04/).
+
 **제약**
 
 장시간 작업은 API 요청 안에서 처리하지 않고 BullMQ 작업을 생성한 뒤 job ID를 반환한다.

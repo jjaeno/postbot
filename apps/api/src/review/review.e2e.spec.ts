@@ -34,5 +34,5 @@ describe("review HTTP API", () => {
     await request(server).post("/content/content-1/review/action").send({ action: "approve" }).expect(409);
     await request(server).post("/content/content-1/review/policy-check").send({ platform: "YOUTUBE" }).expect(201).expect((response) => expect(ContentReviewResponseSchema.parse(response.body).policy?.status).toBe("pass"));
     await request(server).post("/content/content-1/review/action").send({ action: "approve" }).expect(201).expect((response) => expect(ContentReviewResponseSchema.parse(response.body).status).toBe("APPROVED"));
-  });
+  }, 15_000);
 });

@@ -33,7 +33,13 @@ const directArgs = (url, extraArgs) => [
 ];
 
 export const mysqlCommand = (url, command, extraArgs, options = {}) => {
-  const useDocker = (process.env.MYSQL_BACKUP_MODE ?? "docker") === "docker";
+  const mode = process.env.MYSQL_BACKUP_MODE ?? "docker";
+  if (!["docker", "direct"].includes(mode)) throw new Error("MYSQL_BACKUP_MODE must be docker or direct.");
+  const useDocker = mode === "docker";
+  const localCompose = url.hostname === "mysql" ? (url.port || "3306") === "3306" : ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) && url.port === "3307";
+  if (useDocker && !localCompose) {
+    throw new Error("Docker backup mode targets the local Compose MySQL only. Use MYSQL_BACKUP_MODE=direct for a remote database.");
+  }
   const executable = useDocker ? "docker" : command;
   const args = useDocker ? dockerArgs(url, command, extraArgs) : directArgs(url, extraArgs);
   const env = { ...process.env, MYSQL_PWD: decodeURIComponent(url.password) };

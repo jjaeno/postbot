@@ -1074,6 +1074,16 @@ feature 목록, 비교·신뢰도 규칙, 자동 적용 허용 범위, 실험 �
 
 ## 요구사항 추적
 
+### 19.3단계 — 사용자 설정을 제외한 출시 회귀·결함 보완
+
+**상태:** 내부 구현·필수 로컬 검증 완료 — PASS_WITH_EXTERNAL_VERIFICATION_PENDING (사용자 운영 설정·실제 자격 증명/SNS·원격 CI 제한은 acceptance report 참조)
+
+범위: 잘못된 URL에 대한 웹 서버 장애 방지, 동일 웹 artifact의 runtime API 주소 설정, CI DB 회귀 실행 보장, 전체 내부 기능·장애·보안·배포/복구 회귀에서 발견한 결함 보완. 사용자 선택(배포 대상/도메인/운영 용량), 자격 증명, SNS 앱 심사 및 실제 유료 호출/게시/운영 배포는 제외한다.
+
+필수 검증: 전체 lint/typecheck/unit/build, 테스트 전용 DB integration/장애/멱등성 회귀, desktop/mobile Playwright, production image와 실제 Fake 전체 여정/샘플/renderer QA, dependency/secret/filesystem/image scan, 격리 migration 및 backup/restore 검사. 이미 동일 최종 코드에서 성공한 항목은 반복하지 않는다. 실행 불가 항목은 이유를 보고하며 성공으로 간주하지 않는다.
+
+Commit: `fix: 출시 회귀 결함과 운영 검증 보완`
+
 ### 19.2단계 — 최종 명세 점검 결함 보완
 
 **상태:** 구현·필수 로컬 검증 완료 — PASS_WITH_EXTERNAL_VERIFICATION_PENDING (실 Provider/SNS/CI 제한은 acceptance report 참조)

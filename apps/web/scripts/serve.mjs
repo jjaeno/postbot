@@ -1,27 +1,13 @@
-import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
-import { createServer } from "node:http";
-import { extname, join, normalize, resolve } from "node:path";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { createWebServer, validatePublicApiUrl } from "./server.mjs";
 
-const root = resolve("dist");
-const port = Number(process.env.WEB_PORT ?? 5173);
-const types = new Map([[".css", "text/css"], [".html", "text/html"], [".js", "text/javascript"], [".json", "application/json"], [".svg", "image/svg+xml"], [".png", "image/png"], [".jpg", "image/jpeg"], [".woff2", "font/woff2"]]);
+export const start = () => {
+  const apiBaseUrl = validatePublicApiUrl(process.env.PUBLIC_API_BASE_URL ?? process.env.VITE_API_BASE_URL ?? "http://localhost:3000");
+  if (process.env.APP_ENV === "production" && !process.env.PUBLIC_API_BASE_URL) throw new Error("PUBLIC_API_BASE_URL is required in production");
+  const port = Number(process.env.WEB_PORT ?? 5173);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("WEB_PORT is invalid");
+  return createWebServer({ root: resolve("dist"), apiBaseUrl }).listen(port, "0.0.0.0", () => process.stdout.write(`Postbot web listening on ${port}\n`));
+};
 
-createServer(async (request, response) => {
-  const pathname = decodeURIComponent(new URL(request.url ?? "/", "http://localhost").pathname);
-  const relative = normalize(pathname).replace(/^(?:\.\.[/\\])+|^[/\\]+/u, "");
-  let path = resolve(join(root, relative));
-  if (!path.startsWith(`${root}\\`) && !path.startsWith(`${root}/`) && path !== root) {
-    response.writeHead(400).end("Bad request");
-    return;
-  }
-  try {
-    if ((await stat(path)).isDirectory()) path = join(path, "index.html");
-  } catch {
-    path = join(root, "index.html");
-  }
-  response.setHeader("content-type", `${types.get(extname(path)) ?? "application/octet-stream"}; charset=utf-8`);
-  response.setHeader("x-content-type-options", "nosniff");
-  response.setHeader("cache-control", path.endsWith("index.html") ? "no-cache" : "public, max-age=31536000, immutable");
-  createReadStream(path).on("error", () => response.writeHead(404).end("Not found")).pipe(response);
-}).listen(port, "0.0.0.0", () => process.stdout.write(`Postbot web listening on ${port}\n`));
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) start();

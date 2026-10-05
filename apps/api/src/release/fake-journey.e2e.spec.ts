@@ -8,7 +8,7 @@ import {
 import { PrismaClient } from "@postbot/database";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 // This is an HTTP test against separately running API/BullMQ worker processes.
@@ -73,11 +73,16 @@ class Session {
 
 describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, fake external providers", () => {
   const prisma = new PrismaClient();
+  const fixtureChannels = new Set<string>();
   beforeAll(() => {
     const database = new URL(process.env.DATABASE_URL ?? "mysql://invalid/");
     if (database.pathname !== "/postbot_acceptance_test") throw new Error("Dedicated acceptance DB required");
   });
   afterAll(async () => { await prisma.$disconnect(); });
+  afterEach(async () => {
+    await prisma.channel.updateMany({ where: { id: { in: [...fixtureChannels] } }, data: { status: "PAUSED" } });
+    fixtureChannels.clear();
+  });
 
   it("registers, logs in, collects, generates, renders, approves, publishes and analyzes without duplicated costs", async () => {
     const flowStartedAt = performance.now();
@@ -99,6 +104,7 @@ describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, 
     };
     expect((await session.response("/channels", channelInput, false)).status).toBe(403);
     const channel = ChannelResponseSchema.parse(await session.json("/channels", channelInput));
+    fixtureChannels.add(channel.id);
     expect(channel.workspaceId).toBe(auth.session.workspace.id);
 
     const oauth = StartOAuthConnectionResponseSchema.parse(await session.json("/platform-accounts/youtube/connect", { channelId: channel.id }));
@@ -203,6 +209,7 @@ describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, 
       automation: { mode, minInventoryCount: 1, dailyPublishLimit: 1, errorAction: { onPolicyFailure: "hold", onAssetLicenseUnknown: "hold", onConsecutiveFailures: "pause_channel" } }
     }));
     const schedulerStartedAt = performance.now();
+    fixtureChannels.add(channel.id);
     const schedulerObservation = (async (): Promise<number | null> => {
       const deadline = Date.now() + 30_000;
       while (Date.now() < deadline) {

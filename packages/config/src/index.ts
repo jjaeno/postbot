@@ -75,6 +75,15 @@ const EnvSchema = z.object({
   RENDER_USD_PER_MINUTE: z.coerce.number().nonnegative().default(0),
   SENTRY_DSN: z.string().default(""),
   SENTRY_ENVIRONMENT: z.string().min(1).default("local")
+}).superRefine((config, context) => {
+  if (config.APP_ENV !== "production" && config.APP_ENV !== "staging") return;
+  for (const name of ["JWT_ACCESS_SECRET", "JWT_REFRESH_SECRET", "OAUTH_ENCRYPTION_KEY"] as const) {
+    const value = config[name];
+    if (value.length < 32 || /^(local|test|ci|acceptance|replace|change)[-_:]/i.test(value) || value.includes("change-me")) {
+      context.addIssue({ code: "custom", path: [name], message: "A non-placeholder secret of at least 32 characters is required outside local/test" });
+    }
+  }
+  if (config.JWT_ACCESS_SECRET === config.JWT_REFRESH_SECRET) context.addIssue({ code: "custom", path: ["JWT_REFRESH_SECRET"], message: "Access and refresh secrets must differ" });
 });
 
 export type AppConfig = z.infer<typeof EnvSchema>;

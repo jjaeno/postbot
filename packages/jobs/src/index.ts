@@ -78,10 +78,19 @@ export const defaultJobOptions = (input: EnqueueJobInput): JobsOptions => ({
   removeOnFail: false
 });
 
+const startWorker = <Payload>(worker: Worker<Payload>): void => {
+  // A synchronous close must win over startup, before BullMQ starts its timers.
+  queueMicrotask(() => {
+    if (worker.closing) return;
+    void worker.run().catch((error: unknown) => worker.emit("error", error instanceof Error ? error : new Error("Worker run failed", { cause: error })));
+  });
+};
+
 export class BullMqQueueAdapter implements QueueAdapter {
   private readonly queues = new Map<JobQueueName, Queue<EnqueueJobInput>>();
+  private readonly connections = new Map<JobQueueName, Redis>();
 
-  constructor(private readonly redisUrl: string) {}
+  constructor(private readonly redisUrl: string, private readonly prefix = "bull") {}
 
   async enqueue(input: EnqueueJobInput): Promise<void> {
     const queue = this.getQueue(input.queueName);
@@ -97,17 +106,22 @@ export class BullMqQueueAdapter implements QueueAdapter {
   }
 
   async close(): Promise<void> {
-    await Promise.all([...this.queues.values()].map((queue) => queue.close()));
+    await Promise.all([...this.queues.entries()].map(async ([name, queue]) => {
+      try { await queue.close(); }
+      finally { this.connections.get(name)?.disconnect(); }
+    }));
   }
+
+  onModuleDestroy(): Promise<void> { return this.close(); }
 
   private getQueue(queueName: JobQueueName): Queue<EnqueueJobInput> {
     const existing = this.queues.get(queueName);
     if (existing) {
       return existing;
     }
-    const queue = new Queue<EnqueueJobInput>(queueName, {
-      connection: createRedisConnection(this.redisUrl)
-    });
+    const connection = createRedisConnection(this.redisUrl);
+    const queue = new Queue<EnqueueJobInput>(queueName, { connection, prefix: this.prefix });
+    this.connections.set(queueName, connection);
     this.queues.set(queueName, queue);
     return queue;
   }
@@ -115,10 +129,12 @@ export class BullMqQueueAdapter implements QueueAdapter {
 
 export class BullMqMaintenanceQueueAdapter implements MaintenanceQueueAdapter {
   private readonly queue: Queue<MaintenanceJobInput>;
+  private readonly connection: Redis;
 
-  constructor(redisUrl: string) {
+  constructor(redisUrl: string, prefix = "bull") {
+    this.connection = createRedisConnection(redisUrl);
     this.queue = new Queue<MaintenanceJobInput>("maintenance", {
-      connection: createRedisConnection(redisUrl)
+      connection: this.connection, prefix
     });
   }
 
@@ -133,39 +149,58 @@ export class BullMqMaintenanceQueueAdapter implements MaintenanceQueueAdapter {
   }
 
   async close(): Promise<void> {
-    await this.queue.close();
+    try { await this.queue.close(); }
+    finally { this.connection.disconnect(); }
   }
+
+  onModuleDestroy(): Promise<void> { return this.close(); }
 }
 
 export const createMaintenanceWorker = (
   redisUrl: string,
-  processor: Processor<MaintenanceJobInput>
+  processor: Processor<MaintenanceJobInput>,
+  prefix = "bull"
 ): WorkerAdapter => {
+  const connection = createRedisConnection(redisUrl);
   const worker = new Worker<MaintenanceJobInput>("maintenance", processor, {
-    connection: createRedisConnection(redisUrl),
+    connection,
+    prefix,
+    autorun: false,
     concurrency: 1,
     lockDuration: 60_000
   });
-  const close = (): Promise<void> => worker.close();
+  startWorker(worker);
+  const close = async (): Promise<void> => {
+    try { await worker.close(); }
+    finally { connection.disconnect(); }
+  };
   return { close, onModuleDestroy: close };
 };
 
 export const createBullMqWorkers = (
   redisUrl: string,
   processor: Processor<EnqueueJobInput>,
-  queueNames: readonly JobQueueName[] = jobQueueNames
+  queueNames: readonly JobQueueName[] = jobQueueNames,
+  prefix = "bull"
 ): WorkerAdapter => {
-  const workers = queueNames.map(
-    (queueName) =>
-      new Worker<EnqueueJobInput>(queueName, processor, {
-        connection: createRedisConnection(redisUrl),
-        concurrency: 1,
-        lockDuration: 30_000
-      })
-  );
+  const workers = queueNames.map((queueName) => {
+    const connection = createRedisConnection(redisUrl);
+    const worker = new Worker<EnqueueJobInput>(queueName, processor, {
+      connection,
+      prefix,
+      autorun: false,
+      concurrency: 1,
+      lockDuration: 30_000
+    });
+    startWorker(worker);
+    return { worker, connection };
+  });
 
   const close = async (): Promise<void> => {
-      await Promise.all(workers.map((worker) => worker.close()));
+    await Promise.all(workers.map(async ({ worker, connection }) => {
+      try { await worker.close(); }
+      finally { connection.disconnect(); }
+    }));
   };
   return { close, onModuleDestroy: close };
 };

@@ -100,11 +100,14 @@ export class DeterministicJobProcessor {
   }
 
   async process(input: EnqueueJobInput): Promise<void> {
+    const persisted = await this.prisma.productionJob.findUnique({ where: { id: input.id }, select: { status: true } });
+    if (persisted?.status === "SUCCEEDED") return;
     if (await this.isProviderDisabled(input.id, input.type)) {
       await this.holdForProviderSwitch(input.id, input.type);
       return;
     }
     const attemptNumber = await this.start(input.id);
+    if (attemptNumber === "completed") return;
     if (attemptNumber === null) {
       await this.cancel(input.id, null);
       return;
@@ -241,12 +244,13 @@ export class DeterministicJobProcessor {
     return this.analytics.process({ analytics: { syncId: sync.id } });
   }
 
-  private async start(jobId: string): Promise<number | null> {
+  private async start(jobId: string): Promise<number | "completed" | null> {
     return this.prisma.$transaction(async (tx) => {
       const record = await tx.productionJob.findUnique({
         where: { id: jobId },
         include: { attempts: { orderBy: { attemptNumber: "desc" }, take: 1 } }
       });
+      if (record?.status === "SUCCEEDED") return "completed";
       if (!record || record.status === "CANCEL_REQUESTED" || record.status === "CANCELLED") {
         return null;
       }

@@ -52,6 +52,7 @@ const bootstrap = async (): Promise<void> => {
   SwaggerModule.setup("openapi", app, document);
 
   await app.listen(config.API_PORT);
+  app.enableShutdownHooks();
   logger.info({ port: config.API_PORT }, "API server started");
 };
 

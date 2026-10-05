@@ -6,7 +6,7 @@ The v1 implementation covers the stage 0–19 local/Fake scope: source collectio
 
 ## Requirements
 
-- Node.js 20.x
+- Node.js 24.x LTS
 - Corepack
 - Docker Desktop or a compatible Docker engine
 
