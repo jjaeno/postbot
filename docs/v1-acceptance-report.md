@@ -2,7 +2,7 @@
 
 ## 2026-10-05 출시 전 정합성 보완 — 최신 판정
 
-대상: `implementation-plan.md` 19.1단계. 시작/원격 기준 SHA: `ab8758d898fe4a4c90f4ce5398b479a0d1c363ac`. 최신 원격 main도 동일함을 확인했다. 검증된 구현 commit SHA는 로컬 구현 커밋 후 기록한다. 푸시·병합·production 배포와 실제 유료 API/SNS 호출은 하지 않았다.
+대상: `implementation-plan.md` 19.1단계. 시작/원격 기준 SHA: `ab8758d898fe4a4c90f4ce5398b479a0d1c363ac`. 최신 원격 main도 동일함을 확인했다. 검증된 구현 commit SHA: `cb7b9fb3b1d799414de6fa8a5a367daf9b1efe40` (`fix: 출시 전 사용자 흐름과 제작 정합성 개선`, 60 files). 이후 변경은 이 SHA를 기록하는 문서 전용 커밋뿐이며 앱·설정·테스트 코드 변경은 없다. 최종 repository SHA는 인계 응답과 `git log -1 --format=%H`로 확인한다. 푸시·병합·production 배포와 실제 유료 API/SNS 호출은 하지 않았다.
 
 최종 판정: **PASS_WITH_EXTERNAL_VERIFICATION_PENDING** — 19.1단계의 지원 범위에 대한 내부/Fake/local 검증 판정이며 production 출시 승인이나 전체 로드맵 완료 판정이 아니다. 자동 실험 제작 배정/성과 비교, 자유 비율·해상도·자막 테마는 내부 미지원으로 명시하며 전체 로드맵 완료나 근거 없는 blocker 0을 선언하지 않는다. 구현·제외 범위는 `feature-ux-pre-release-addendum.md`, 문제별 근거·실 Provider smoke는 `pre-release-remediation.md`를 따른다. 아래 미실행한 CI/scanner와 moderate 의존성 위험은 staging 승격 전에 확인해야 한다.
 
