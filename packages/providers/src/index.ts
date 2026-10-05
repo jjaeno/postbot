@@ -724,6 +724,13 @@ export class GoogleImageProvider implements ImageProvider {
 }
 
 export type TtsRequest = { model: string; voice: string; text: string; idempotencyKey: string };
+export const resolveTtsVoice = (provider: "fake" | "elevenlabs", profile: string, configuredVoiceId: string): string => {
+  const voice = profile.trim();
+  if (provider === "fake") return voice || "default";
+  const resolved = !voice || ["default", "neutral", "neutral-ko"].includes(voice) ? configuredVoiceId.trim() : voice;
+  if (!resolved) throw new Error("TTS_VOICE_CONFIGURATION_REQUIRED");
+  return resolved;
+};
 export type TtsTiming = { text: string; startSeconds: number; endSeconds: number };
 export type TtsResult = ProviderResult & { model: string; mimeType: string; bytes: Uint8Array; durationSeconds: number; timings: TtsTiming[]; estimatedCostUsd: string };
 export interface TtsProvider { synthesize(request: TtsRequest): Promise<TtsResult>; }

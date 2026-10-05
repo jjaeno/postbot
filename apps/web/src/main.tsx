@@ -39,6 +39,8 @@ import {
   OAuthCallbackResultSchema,
   OptimizationSuggestionResponseSchema,
   StrategyVersionResponseSchema,
+  ExperimentResponseSchema,
+  CreateExperimentRequestSchema,
   PublishPlanResponseSchema,
   PublishCalendarItemSchema,
   ReviewPreviewResponseSchema,
@@ -61,6 +63,7 @@ import {
   type Platform
   , type OptimizationSuggestionResponse, type CostReportResponse, type NotificationResponse, type PublishCalendarItem
 } from "@postbot/contracts";
+import { z } from "zod";
 import { Button } from "./components/ui/button";
 import "./styles.css";
 
@@ -257,6 +260,16 @@ type WizardForm = {
   requiresRightsCheck: boolean;
   blocksSensitiveTopics: boolean;
   maxDailyPosts: number;
+  voiceProfile: string;
+  aiStockRatio: number;
+  brandColor: string;
+  backgroundColor: string;
+  fontFamily: "Arial" | "sans-serif" | "serif";
+  watermark: string;
+  logoAssetId: string;
+  captionColor: string;
+  captionBackground: string;
+  captionFontSize: number;
 };
 
 const defaultWizardValues: WizardForm = {
@@ -284,7 +297,8 @@ const defaultWizardValues: WizardForm = {
   requiresPolicyPass: true,
   requiresRightsCheck: true,
   blocksSensitiveTopics: true,
-  maxDailyPosts: 2
+  maxDailyPosts: 2,
+  voiceProfile: "neutral-ko", aiStockRatio: 1, brandColor: "#0f766e", backgroundColor: "#f8fafc", fontFamily: "Arial", watermark: "", logoAssetId: "", captionColor: "#ffffff", captionBackground: "#0f172a", captionFontSize: 52
 };
 
 const splitCsv = (value: string): string[] =>
@@ -304,16 +318,16 @@ const buildChannelInput = (values: WizardForm): CreateChannelRequest => ({
     template: {
       name: values.templateName,
       tone: values.hookStyle,
-      voiceProfile: "neutral-ko",
+      voiceProfile: values.voiceProfile,
       subtitleStyle: {
         mode: "readable",
-        cta: values.ctaStyle
+        cta: values.ctaStyle, color: values.captionColor, backgroundColor: values.captionBackground, fontSize: values.captionFontSize
       },
       visualStyle: {
         aspectRatio: values.aspectRatio,
-        resolution: values.resolution
+        resolution: values.resolution, brandColor: values.brandColor, backgroundColor: values.backgroundColor, fontFamily: values.fontFamily, watermark: values.watermark || values.name, ...(values.logoAssetId ? { logoAssetId: values.logoAssetId } : {})
       },
-      aiStockRatio: 0.5
+      aiStockRatio: values.aiStockRatio
     },
     outputProfiles: values.platforms.map((platform) => ({
       platform,
@@ -490,7 +504,7 @@ const LegacyField = ({
 const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
   const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
-  const [wizardOpen, setWizardOpen] = useState(false);
+  const [wizardOpen, setWizardOpen] = useState(() => readWizardDraft() !== null);
   const [editing, setEditing] = useState<ChannelResponse | null>(null);
   const [selectedContentId, setSelectedContentId] = useState<string | null>(() => new URLSearchParams(window.location.search).get("content"));
   const [insightChannelId, setInsightChannelId] = useState("");
@@ -570,6 +584,7 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
         <AnalyticsPanel report={analytics.data} isLoading={analytics.isLoading} />
         <div className="flex flex-wrap gap-3 text-sm"><label>분석 플랫폼<select className="ml-2 rounded border p-2" value={insightPlatform} onChange={(event) => setInsightPlatform(event.target.value)}><option value="">전체</option>{(["YOUTUBE", "INSTAGRAM", "TIKTOK"] as const).map((platform) => <option key={platform} value={platform}>{platformLabel(platform)}</option>)}</select></label><label>분석 기간<select className="ml-2 rounded border p-2" value={insightDays} onChange={(event) => setInsightDays(Number(event.target.value))}><option value={7}>최근 7일</option><option value={30}>최근 30일</option><option value={90}>최근 90일</option></select></label></div>
         <OptimizationPanel suggestions={suggestions.data ?? []} isLoading={suggestions.isLoading} />
+        <ExperimentPanel channelId={insightChannelId || channels.data?.[0]?.id || ""} />
         <StrategyPanel channelId={insightChannelId} />
         <div id="settings"><OperationsPanel costs={costs.data} notifications={notifications.data ?? []} isLoading={costs.isLoading || notifications.isLoading} /></div>
         <BudgetPanel budgets={budgets.data ?? []} channels={channels.data ?? []} isLoading={budgets.isLoading} onError={setError} />
@@ -620,11 +635,31 @@ const OptimizationPanel = ({ suggestions, isLoading }: { suggestions: Optimizati
   return <section className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="optimization-panel"><div><h2 className="text-lg font-semibold">최적화 제안</h2><p className="mt-1 text-sm text-muted-foreground">상관관계 기반 가설과 근거, 승인 이력, 안전하게 되돌릴 수 있는 전략 변경을 보여줍니다.</p></div>{isLoading ? <p className="mt-4 text-sm text-muted-foreground">최적화 제안을 불러오는 중입니다.</p> : suggestions.length === 0 ? <p className="mt-4 rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">아직 제안이 없습니다. 먼저 분석 데이터를 동기화하고 비교 집단을 생성해 주세요.</p> : <div className="mt-4 grid gap-2">{suggestions.map((suggestion) => <article className="rounded-md border border-border p-3 text-sm" key={suggestion.id}><div className="flex items-center justify-between gap-2"><p className="font-medium">{suggestion.title}</p><span className="rounded bg-muted px-2 py-1 text-xs">{statusLabel(suggestion.status)}</span></div><p className="mt-2 text-muted-foreground">{suggestion.rationale}</p><p className="mt-2 text-xs text-muted-foreground">표본: {suggestion.sampleSize} · 신뢰도: {suggestion.confidenceScore ?? "미확정"} · 만료: {suggestion.expiresAt ?? "없음"}</p>{suggestion.status === "PENDING" ? <div className="mt-3 flex gap-2"><Button className="h-8" disabled={action.isPending} onClick={() => action.mutate({ id: suggestion.id, next: "approve" })}>승인</Button><Button className="h-8" disabled={action.isPending} onClick={() => action.mutate({ id: suggestion.id, next: "reject" })}>거절</Button></div> : suggestion.status === "APPROVED" ? <Button className="mt-3 h-8" disabled={action.isPending} onClick={() => action.mutate({ id: suggestion.id, next: "apply" })}>변경 불가 전략으로 적용</Button> : null}</article>)}</div>}</section>;
 };
 
+const ExperimentResult = ({ result }: { result: unknown }): ReactElement => {
+  const parsed = z.object({ control: z.object({ sampleSize: z.number(), mean: z.number().nullable() }), variant: z.object({ sampleSize: z.number(), mean: z.number().nullable() }), relativeChange: z.number().nullable(), winner: z.string() }).safeParse(result);
+  if (!parsed.success) return <p>아직 가용 지표 비교 결과가 없습니다.</p>;
+  const value = parsed.data;
+  return <div className="mt-2 text-sm"><p>대조군: {value.control.sampleSize}건 · 평균 {value.control.mean ?? "없음"}</p><p>변경군: {value.variant.sampleSize}건 · 평균 {value.variant.mean ?? "없음"}</p><p>상대 변화: {value.relativeChange === null ? "산출 불가" : `${(value.relativeChange * 100).toFixed(1)}%`} · 판정: {value.winner === "variant" ? "변경군 우세 가설" : value.winner === "control" ? "대조군 우세 가설" : "결론 유보"}</p></div>;
+};
+
+const ExperimentPanel = ({ channelId }: { channelId: string }): ReactElement => {
+  const cache = useQueryClient();
+  const [name, setName] = useState(""); const [hypothesis, setHypothesis] = useState(""); const [platform, setPlatform] = useState<Platform>("YOUTUBE");
+  const [maximum, setMaximum] = useState(100);
+  const [metric, setMetric] = useState("views"); const [period, setPeriod] = useState(30); const [minimum, setMinimum] = useState(4); const [control, setControl] = useState(40); const [variant, setVariant] = useState(44); const [threshold, setThreshold] = useState(0.1); const [direction, setDirection] = useState<"higher" | "lower">("higher");
+  const experiments = useQuery({ queryKey: ["experiments", channelId], enabled: Boolean(channelId), queryFn: () => request(`/optimization/experiments?channelId=${encodeURIComponent(channelId)}`, { method: "GET" }, ExperimentResponseSchema.array()), refetchInterval: 10000 });
+  const refresh = () => { void cache.invalidateQueries({ queryKey: ["experiments", channelId] }); };
+  const create = useMutation({ mutationFn: () => request("/optimization/experiments", { method: "POST", body: JSON.stringify(CreateExperimentRequestSchema.parse({ channelId, name, hypothesis, platform, targetMetric: metric, periodDays: period, minSampleSize: minimum, control: { durationSeconds: control }, variant: { durationSeconds: variant }, successCriteria: { direction, minRelativeImprovement: threshold }, stopCriteria: { maxAssignments: maximum } })) }, ExperimentResponseSchema), onSuccess: refresh });
+  const action = useMutation({ mutationFn: ({ id, next }: { id: string; next: "start" | "pause" | "stop" | "complete" }) => request(`/optimization/experiments/${id}/action`, { method: "POST", body: JSON.stringify({ action: next }) }, ExperimentResponseSchema), onSuccess: refresh });
+  const fields = [{ label: "실험 기간 일", value: period, setter: setPeriod }, { label: "최대 제작 배정 수", value: maximum, setter: setMaximum }, { label: "그룹별 최소 표본", value: minimum, setter: setMinimum }, { label: "대조군 길이 초", value: control, setter: setControl }, { label: "변경군 길이 초", value: variant, setter: setVariant }, { label: "최소 상대 개선율", value: threshold, setter: setThreshold }];
+  return <section className="rounded border border-border bg-white p-5" data-testid="experiment-panel"><h2 className="text-lg font-semibold">제한형 실험</h2><p className="mt-2 text-sm">같은 채널·플랫폼의 다음 전체 제작에 대조/변경 길이를 안정적으로 배정합니다. 기간 종료 후에는 새 배정을 중단합니다. 설정된 변경 폭·길이 범위·보호 주제·권리·정책·예산은 유지합니다. 결과는 가설이며 인과 효과나 통계적 유의성을 주장하지 않습니다.</p><div className="mt-4 grid gap-3 md:grid-cols-2"><label>실험 이름<input className="block w-full rounded border p-2" value={name} onChange={(event) => setName(event.target.value)} /></label><label>가설<input className="block w-full rounded border p-2" value={hypothesis} onChange={(event) => setHypothesis(event.target.value)} /></label><label>실험 플랫폼<select className="block w-full rounded border p-2" value={platform} onChange={(event) => setPlatform(event.target.value as Platform)}>{platforms.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>목표 지표<input className="block w-full rounded border p-2" value={metric} onChange={(event) => setMetric(event.target.value)} /></label>{fields.map((field) => <label key={field.label}>{field.label}<input className="block w-full rounded border p-2" type="number" step={field.label === "최소 상대 개선율" ? "0.01" : "1"} value={field.value} onChange={(event) => field.setter(Number(event.target.value))} /></label>)}<label>개선 방향<select className="block w-full rounded border p-2" value={direction} onChange={(event) => setDirection(event.target.value === "lower" ? "lower" : "higher")}><option value="higher">높을수록 좋음</option><option value="lower">낮을수록 좋음</option></select></label><Button disabled={!channelId || create.isPending} onClick={() => create.mutate()}>실험 초안 생성</Button></div>{create.error || action.error || experiments.error ? <p role="alert" className="mt-3">{(create.error ?? action.error ?? experiments.error)?.message}</p> : null}{experiments.data?.map((experiment) => <article key={experiment.id} className="mt-4 rounded border p-3"><h3>{experiment.name} · {statusLabel(experiment.status)}</h3><p className="text-sm">{experiment.hypothesis} · {experiment.targetMetric} · 그룹별 최소 {experiment.minSampleSize}건</p><div className="mt-2 flex flex-wrap gap-2">{["DRAFT", "PAUSED"].includes(experiment.status) ? <Button disabled={action.isPending} onClick={() => action.mutate({ id: experiment.id, next: "start" })}>실험 시작</Button> : null}{experiment.status === "RUNNING" ? <Button disabled={action.isPending} onClick={() => action.mutate({ id: experiment.id, next: "pause" })}>실험 일시 중지</Button> : null}{["RUNNING", "PAUSED"].includes(experiment.status) ? <><Button disabled={action.isPending} onClick={() => action.mutate({ id: experiment.id, next: "complete" })}>가용 성과로 비교 완료</Button><Button className="bg-foreground" disabled={action.isPending} onClick={() => { if (window.confirm("이 실험의 새 배정을 중단할까요?")) action.mutate({ id: experiment.id, next: "stop" }); }}>실험 중단</Button></> : null}</div><ExperimentResult result={experiment.result} /></article>)}</section>;
+};
+
 const StrategyPanel = ({ channelId }: { channelId: string }): ReactElement => {
   const cache = useQueryClient();
   const versions = useQuery({ queryKey: ["strategy-versions", channelId], enabled: Boolean(channelId), queryFn: () => request(`/optimization/channels/${channelId}/strategies`, { method: "GET" }, { parse: (value: unknown) => StrategyVersionResponseSchema.array().parse(value) }) });
   const rollback = useMutation({ mutationFn: (version: number) => request(`/optimization/channels/${channelId}/rollback/${version}`, { method: "POST", body: "{}" }, { parse: () => ({ ok: true }) }), onSuccess: () => void cache.invalidateQueries({ queryKey: ["strategy-versions", channelId] }) });
-  return <section className="rounded border border-border bg-white p-5"><h2 className="text-lg font-semibold">전략 적용 이력·되돌리기</h2><p className="mt-1 text-sm text-muted-foreground">선택한 전략은 이후 제작에만 적용됩니다. 기존 예약은 그대로 유지됩니다. 실험은 아직 제작 자동 배정·결과 비교를 제공하지 않습니다.</p>{versions.isError ? <p role="alert">전략 이력을 불러오지 못했습니다.</p> : versions.data?.map((version, index) => <div key={version.version} className="mt-3 flex items-center justify-between gap-2 text-sm"><span>버전 {version.version} · {version.name} · {index === 0 ? "현재 적용" : "이전 전략"}</span>{index > 0 ? <Button disabled={rollback.isPending} onClick={() => { if (window.confirm("이 전략으로 이후 제작 설정을 되돌릴까요?")) rollback.mutate(version.version); }}>이 전략으로 되돌리기</Button> : null}</div>)}{rollback.error ? <p role="alert">{rollback.error.message}</p> : null}{rollback.isSuccess ? <p role="status">전략을 복원했습니다. 다음 제작부터 반영됩니다.</p> : null}</section>;
+  return <section className="rounded border border-border bg-white p-5"><h2 className="text-lg font-semibold">전략 적용 이력·되돌리기</h2><p className="mt-1 text-sm text-muted-foreground">선택한 전략은 이후 제작에만 적용됩니다. 기존 예약은 그대로 유지됩니다. 제한형 실험의 배정·비교는 실험 패널에서 관리합니다.</p>{versions.isError ? <p role="alert">전략 이력을 불러오지 못했습니다.</p> : versions.data?.map((version, index) => <div key={version.version} className="mt-3 flex items-center justify-between gap-2 text-sm"><span>버전 {version.version} · {version.name} · {index === 0 ? "현재 적용" : "이전 전략"}</span>{index > 0 ? <Button disabled={rollback.isPending} onClick={() => { if (window.confirm("이 전략으로 이후 제작 설정을 되돌릴까요?")) rollback.mutate(version.version); }}>이 전략으로 되돌리기</Button> : null}</div>)}{rollback.error ? <p role="alert">{rollback.error.message}</p> : null}{rollback.isSuccess ? <p role="status">전략을 복원했습니다. 다음 제작부터 반영됩니다.</p> : null}</section>;
 };
 
 const OperationsPanel = ({ costs, notifications, isLoading }: { costs: CostReportResponse | undefined; notifications: NotificationResponse[]; isLoading: boolean }): ReactElement => {
@@ -755,7 +790,7 @@ const ReviewPanel = ({ accounts, content, contentItemId, onSelectContent, onErro
     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-lg font-semibold">콘텐츠 검토</h2><p className="mt-1 text-sm text-muted-foreground">목록에서 콘텐츠를 선택해 플랫폼별 결과물과 게시 준비 상태를 검토합니다.</p></div><div className="flex gap-2"><label className="sr-only" htmlFor="review-content">검토할 콘텐츠</label><select id="review-content" aria-label="검토할 콘텐츠" className="h-10 min-w-56 rounded-md border border-border px-3 text-sm" onChange={(event) => onSelectContent(event.target.value)} value={contentItemId ?? ""}><option value="">콘텐츠 선택</option>{content.map((item) => <option key={item.id} value={item.id}>{item.title} · {statusLabel(item.status)}</option>)}</select><Button disabled={!contentItemId || policyCheck.isPending || !output?.videoReady} onClick={() => policyCheck.mutate(platform)}>정책 검사</Button></div></div>
     <div className="mt-4 flex gap-2" role="tablist" aria-label="검수 플랫폼">{(["YOUTUBE", "INSTAGRAM", "TIKTOK"] as const).map((candidate) => <Button role="tab" aria-selected={platform === candidate} className={platform === candidate ? "" : "bg-foreground"} key={candidate} onClick={() => setPlatform(candidate)} type="button">{platformLabel(candidate)}</Button>)}</div>
     {generationNotice ? <p role="status" className="mt-3 text-sm text-primary">{generationNotice}</p> : null}
-  {data?.assets.length ? <details className="mt-3 rounded border border-border p-3 text-sm"><summary>에셋 권리 증빙 검토 (소유자)</summary><p className="mt-2">제공자 요금제·음성 동의·상업 사용·변형 권리를 직접 확인한 뒤 증빙을 등록합니다. URL만 입력했다고 권리가 자동 확인되는 것은 아닙니다. 변경 후 재검사·재승인이 필요하고 기존 예약은 보류됩니다.</p><label className="mt-2 block">검토할 에셋<select className="ml-2 rounded border p-2" value={licenseAssetId} onChange={(event) => setLicenseAssetId(event.target.value)}><option value="">선택</option>{[...new Map(selectedAssets.map((asset) => [asset.id, asset])).values()].map((asset) => <option key={asset.id} value={asset.id}>{asset.purpose} · {statusLabel(asset.licenseStatus)}</option>)}</select></label><label className="mt-2 block">라이선스 이름<input className="ml-2 rounded border p-2" value={licenseName} onChange={(event) => setLicenseName(event.target.value)} /></label><label className="mt-2 block">권리 증빙 URL<input className="ml-2 rounded border p-2" type="url" value={licenseProof} onChange={(event) => setLicenseProof(event.target.value)} placeholder="https://" /></label><label className="mt-2 block"><input type="checkbox" checked={commercialAllowed} onChange={(event) => setCommercialAllowed(event.target.checked)} /> 상업 사용 허용을 확인했습니다</label><label className="mt-2 block"><input type="checkbox" checked={derivativeAllowed} onChange={(event) => setDerivativeAllowed(event.target.checked)} /> 변형·편집 허용을 확인했습니다</label><div className="mt-2 flex gap-2"><Button disabled={license.isPending || !licenseAssetId || !commercialAllowed || !derivativeAllowed || !licenseProof.startsWith("https://") || licenseName.length < 3} onClick={() => { if (window.confirm("실제 권리 증빙을 확인했으며 상업 사용을 승인할까요?")) license.mutate("VERIFIED"); }}>증빙 확인 후 승인</Button><Button disabled={license.isPending || !licenseAssetId || !licenseProof.startsWith("https://") || licenseName.length < 3} onClick={() => license.mutate("REJECTED")}>권리 사용 거절</Button></div>{license.error ? <p role="alert">{license.error.message}</p> : null}{license.isSuccess ? <p role="status">권리 검토를 기록했습니다. 정책 검사를 다시 실행해 주세요.</p> : null}</details> : null}
+  {data?.assets.length ? <details className="mt-3 rounded border border-border p-3 text-sm"><summary>에셋 권리 증빙 검토 (소유자)</summary><p className="mt-2">제공자 요금제·음성 동의·상업 사용·변형 권리를 직접 확인한 뒤 증빙을 등록합니다. URL만 입력했다고 권리가 자동 확인되는 것은 아닙니다. 변경 후 해당 자산을 사용하는 플랫폼만 재검사·재승인이 필요하며 해당 예약만 보류됩니다. 이미지 준비 중 권리 승인으로 멈췄다면 기존 이미지를 재사용해 자동으로 이어갑니다.</p><label className="mt-2 block">검토할 에셋<select className="ml-2 rounded border p-2" value={licenseAssetId} onChange={(event) => setLicenseAssetId(event.target.value)}><option value="">선택</option>{[...new Map(selectedAssets.map((asset) => [asset.id, asset])).values()].map((asset) => <option key={asset.id} value={asset.id}>{asset.purpose} · {statusLabel(asset.licenseStatus)}</option>)}</select></label><label className="mt-2 block">라이선스 이름<input className="ml-2 rounded border p-2" value={licenseName} onChange={(event) => setLicenseName(event.target.value)} /></label><label className="mt-2 block">권리 증빙 URL<input className="ml-2 rounded border p-2" type="url" value={licenseProof} onChange={(event) => setLicenseProof(event.target.value)} placeholder="https://" /></label><label className="mt-2 block"><input type="checkbox" checked={commercialAllowed} onChange={(event) => setCommercialAllowed(event.target.checked)} /> 상업 사용 허용을 확인했습니다</label><label className="mt-2 block"><input type="checkbox" checked={derivativeAllowed} onChange={(event) => setDerivativeAllowed(event.target.checked)} /> 변형·편집 허용을 확인했습니다</label><div className="mt-2 flex gap-2"><Button disabled={license.isPending || !licenseAssetId || !commercialAllowed || !derivativeAllowed || !licenseProof.startsWith("https://") || licenseName.length < 3} onClick={() => { if (window.confirm("실제 권리 증빙을 확인했으며 상업 사용을 승인할까요?")) license.mutate("VERIFIED"); }}>증빙 확인 후 승인</Button><Button disabled={license.isPending || !licenseAssetId || !licenseProof.startsWith("https://") || licenseName.length < 3} onClick={() => license.mutate("REJECTED")}>권리 사용 거절</Button></div>{license.error ? <p role="alert">{license.error.message}</p> : null}{license.isSuccess ? <p role="status">권리 검토를 기록했습니다. 정책 검사를 다시 실행해 주세요.</p> : null}</details> : null}
     {output?.script ? <details className="mt-3 rounded border border-border p-3 text-sm"><summary>대본·적용 언어 확인 ({output.script.language}, {output.durationSeconds ?? "미확정"}초)</summary><p className="mt-2">{output.script.hook}</p><p>{output.script.body}</p><p>{output.script.callToAction}</p></details> : null}
     <div className="mt-3 flex flex-wrap items-center gap-2 text-sm"><label>재생성 범위<select aria-label="재생성 범위" className="ml-2 rounded border p-2" value={regenerationPart} onChange={(event) => setRegenerationPart(event.target.value as typeof regenerationPart)}>{[["full", "전체"], ["hook", "훅"], ["body", "본문"], ["metadata", "메타데이터"], ["scene", "장면 이미지"]].map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><Button disabled={regenerate.isPending || !output} onClick={() => regenerate.mutate(regenerationPart)}>선택 범위 재생성</Button><p>선택 플랫폼의 새 버전을 만들고 이미지·음성·영상·정책 검사를 다시 실행합니다. 서버가 단계별 예상 비용을 산정하며 예산·단가 미확정 시 보류합니다.</p></div>
     {review.isLoading ? <p className="mt-4 text-sm text-muted-foreground">검토 정보를 불러오는 중입니다.</p> : null}
@@ -1115,6 +1150,7 @@ const EditPanel = ({
   const [cta, setCta] = useState("");
   const [durationMin, setDurationMin] = useState(15);
   const [durationMax, setDurationMax] = useState(60);
+  const [template, setTemplate] = useState<ChannelResponse["template"] | null>(null);
 
   useEffect(() => {
     if (channel) {
@@ -1124,6 +1160,7 @@ const EditPanel = ({
       setHook(channel.outputProfiles[0]?.hookStyle ?? "질문형");
       setCta(typeof channel.template.subtitleStyle.cta === "string" ? channel.template.subtitleStyle.cta : "");
       setDurationMin(channel.outputProfiles[0]?.minDurationSeconds ?? 15); setDurationMax(channel.outputProfiles[0]?.maxDurationSeconds ?? 60);
+      setTemplate(channel.template);
     }
   }, [channel]);
 
@@ -1139,7 +1176,7 @@ const EditPanel = ({
           body: JSON.stringify({
             name,
             language, targetAudience: audience,
-            template: { ...channel.template, tone, subtitleStyle: { ...channel.template.subtitleStyle, cta } },
+            template: { ...(template ?? channel.template), tone, subtitleStyle: { ...(template ?? channel.template).subtitleStyle, cta } },
             outputProfiles: channel.outputProfiles.map((profile) => ({ ...profile, hookStyle: hook, minDurationSeconds: durationMin, maxDurationSeconds: durationMax })),
             automation: {
               mode: channel.automationMode,
@@ -1175,6 +1212,8 @@ const EditPanel = ({
         {[{ label: "생성 언어", value: language, set: setLanguage }, { label: "목표 시청자", value: audience, set: setAudience }, { label: "말투", value: tone, set: setTone }, { label: "훅 방식", value: hook, set: setHook }, { label: "CTA 방식", value: cta, set: setCta }].map((field) => <label className="block text-sm font-medium" key={field.label}>{field.label}<input className="mt-1 h-10 w-full rounded border border-border px-3" value={field.value} onChange={(event) => field.set(event.target.value)} /></label>)}
         <label className="block text-sm font-medium">최소 길이 초<input className="mt-1 h-10 w-full rounded border border-border px-3" type="number" min={15} max={180} value={durationMin} onChange={(event) => setDurationMin(Number(event.target.value))} /></label>
         <label className="block text-sm font-medium">최대 길이 초<input className="mt-1 h-10 w-full rounded border border-border px-3" type="number" min={15} max={180} value={durationMax} onChange={(event) => setDurationMax(Number(event.target.value))} /></label>
+        <TemplateEditor template={template ?? channel.template} onChange={setTemplate} />
+        <WizardAssetUpload channelId={channel.id} onLogo={(id) => setTemplate((previous) => ({ ...(previous ?? channel.template), visualStyle: { ...(previous ?? channel.template).visualStyle, logoAssetId: id } }))} />
         <label className="block text-sm font-medium">
           채널 이름
           <input
@@ -1208,6 +1247,66 @@ const EditPanel = ({
   );
 };
 
+const TemplateEditor = ({ template, onChange }: { template: ChannelResponse["template"]; onChange: (value: ChannelResponse["template"]) => void }): ReactElement => {
+  const updateVisual = (field: string, value: string) => onChange({ ...template, visualStyle: { ...template.visualStyle, [field]: value } });
+  const updateCaption = (field: string, value: string | number) => onChange({ ...template, subtitleStyle: { ...template.subtitleStyle, [field]: value } });
+  const colors = [{ label: "브랜드 색상", value: typeof template.visualStyle.brandColor === "string" ? template.visualStyle.brandColor : "#0f766e", set: (value: string) => updateVisual("brandColor", value) }, { label: "배경 색상", value: typeof template.visualStyle.backgroundColor === "string" ? template.visualStyle.backgroundColor : "#f8fafc", set: (value: string) => updateVisual("backgroundColor", value) }, { label: "자막 색상", value: typeof template.subtitleStyle.color === "string" ? template.subtitleStyle.color : "#ffffff", set: (value: string) => updateCaption("color", value) }, { label: "자막 배경", value: typeof template.subtitleStyle.backgroundColor === "string" ? template.subtitleStyle.backgroundColor : "#0f172a", set: (value: string) => updateCaption("backgroundColor", value) }];
+  return <fieldset className="grid gap-3 rounded border p-3"><legend>브랜드·음성·이미지 설정</legend><label>음성 프로필<input className="block w-full rounded border p-2" value={template.voiceProfile} onChange={(event) => onChange({ ...template, voiceProfile: event.target.value })} /></label><label>AI 이미지 비율 (0~1)<input type="number" min="0" max="1" step="0.1" className="block w-full rounded border p-2" value={template.aiStockRatio} onChange={(event) => onChange({ ...template, aiStockRatio: Number(event.target.value) })} /></label>{colors.map((field) => <label key={field.label}>{field.label}<input type="color" value={field.value} onChange={(event) => field.set(event.target.value)} /></label>)}<label>워터마크<input className="block w-full rounded border p-2" value={typeof template.visualStyle.watermark === "string" ? template.visualStyle.watermark : ""} onChange={(event) => updateVisual("watermark", event.target.value)} /></label><label>글꼴<select value={typeof template.visualStyle.fontFamily === "string" ? template.visualStyle.fontFamily : "Arial"} onChange={(event) => updateVisual("fontFamily", event.target.value)}><option value="Arial">Arial</option><option value="sans-serif">Sans serif</option><option value="serif">Serif</option></select></label><label>자막 글자 크기<input type="number" min="32" max="64" value={typeof template.subtitleStyle.fontSize === "number" ? template.subtitleStyle.fontSize : 52} onChange={(event) => updateCaption("fontSize", Number(event.target.value))} /></label>{template.visualStyle.logoAssetId ? <Button type="button" onClick={() => { const visualStyle = { ...template.visualStyle }; delete visualStyle.logoAssetId; onChange({ ...template, visualStyle }); }}>로고 제거</Button> : null}</fieldset>;
+};
+
+const WizardAssetUpload = ({ channelId, onLogo }: { channelId: string; onLogo: (id: string) => void }): ReactElement => {
+  const [file, setFile] = useState<File | null>(null);
+  const [kind, setKind] = useState("stock");
+  const [proof, setProof] = useState("");
+  const [license, setLicense] = useState("");
+  const [rights, setRights] = useState(false);
+  const stock = useQuery({ queryKey: ["stock-assets", channelId], queryFn: () => request(`/channels/${channelId}/stock-assets`, { method: "GET" }, z.object({ assets: z.array(z.object({ id: z.string() })) })) });
+  const upload = useMutation({ mutationFn: async () => {
+    if (!file || file.size > 1_048_576 || !rights) throw new Error("1MB 이하 PNG/JPEG 파일과 상업 사용·변형 허용 증빙이 필요합니다.");
+    const encoded = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onerror = () => reject(new Error("파일을 읽지 못했습니다.")); reader.onload = () => typeof reader.result === "string" ? resolve(reader.result.split(",")[1] ?? "") : reject(new Error("잘못된 이미지입니다.")); reader.readAsDataURL(file); });
+    return request(`/channels/${channelId}/stock-assets`, { method: "POST", body: JSON.stringify({ bodyBase64: encoded, mimeType: file.type, licenseName: license, proofUrl: proof, commercialUseAllowed: rights, derivativeAllowed: rights, assetKind: kind }) }, z.object({ id: z.string() }));
+  }, onSuccess: (asset) => { if (kind === "logo") onLogo(asset.id); void stock.refetch(); } });
+  return <section className="mt-5 grid gap-3 rounded border p-4"><h3 className="font-semibold">스톡 이미지·브랜드 로고 등록</h3><p className="text-sm">권리 확인된 스톡 {stock.data?.assets.length ?? 0}개. 출처·증빙을 직접 확인한 파일만 등록하세요. 로고는 이 채널 영상에만 사용됩니다.</p><label>파일 종류<select aria-label="등록 에셋 종류" value={kind} onChange={(event) => setKind(event.target.value)}><option value="stock">스톡 이미지</option><option value="logo">브랜드 로고</option></select></label><label>PNG/JPEG (최대 1MB)<input type="file" accept="image/png,image/jpeg" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label><label>라이선스 이름<input aria-label="스톡 라이선스 이름" className="ml-2 rounded border p-2" value={license} onChange={(event) => setLicense(event.target.value)} /></label><label>권리 증빙 HTTPS URL<input aria-label="스톡 증빙 URL" type="url" className="ml-2 rounded border p-2" value={proof} onChange={(event) => setProof(event.target.value)} /></label><label><input type="checkbox" checked={rights} onChange={(event) => setRights(event.target.checked)} />상업 사용과 변형이 모두 허용됨을 확인했습니다.</label><Button type="button" disabled={upload.isPending || !rights || !file || !license || !proof} onClick={() => upload.mutate()}>에셋 등록</Button>{upload.error ? <p role="alert">{upload.error.message}</p> : upload.isSuccess ? <p role="status">등록했습니다.</p> : null}</section>;
+};
+
+const WizardSampleOutput = ({ review, output }: { review: ContentReviewResponse; output: ContentReviewResponse["outputs"][number] }): ReactElement => {
+  const cache = useQueryClient();
+  const preview = useQuery({ queryKey: ["content-preview", review.id, output.platform], queryFn: () => request(`/content/${review.id}/review/preview?platform=${output.platform}`, { method: "GET" }, ReviewPreviewResponseSchema), enabled: output.videoReady });
+  const approve = useMutation({ mutationFn: async () => {
+    const checked = await request(`/content/${review.id}/review/policy-check`, { method: "POST", body: JSON.stringify({ platform: output.platform }) }, ContentReviewResponseSchema);
+    if (checked.outputs.find((item) => item.platform === output.platform)?.policy?.status !== "pass") throw new Error("정책 검사가 통과하지 않았습니다. 출처·권리 증빙을 확인해 주세요.");
+    return request(`/content/${review.id}/review/action`, { method: "POST", body: JSON.stringify({ action: "approve", platform: output.platform }) }, ContentReviewResponseSchema);
+  }, onSuccess: () => { void cache.invalidateQueries({ queryKey: ["content-review", review.id] }); } });
+  return <article className="grid gap-3 rounded border p-4"><h3>{platformLabel(output.platform)} 실제 샘플</h3>{preview.data ? <video controls className="max-h-96 w-full" src={preview.data.url} /> : <p>렌더 완료 후 실제 영상을 표시합니다.</p>}<p className="text-sm">{output.script?.hook} {output.script?.body} {output.script?.callToAction}</p><p>정책: {output.policy?.status ?? "검사 대기"} · 승인: {statusLabel(output.reviewStatus)}</p>{output.policy?.findings.map((finding) => <p key={`${finding.code}:${finding.message}`} className="text-sm">{finding.message}</p>)}<Button type="button" disabled={!output.videoReady || approve.isPending} onClick={() => approve.mutate()}>정책 검사 후 샘플 승인</Button>{approve.error ? <p role="alert">{approve.error.message}</p> : null}{preview.error ? <p role="alert">{preview.error.message}</p> : null}</article>;
+};
+
+const WizardSampleReview = ({ review }: { review: ContentReviewResponse }): ReactElement => {
+  const cache = useQueryClient();
+  const [assetId, setAssetId] = useState(""); const [proof, setProof] = useState(""); const [license, setLicense] = useState(""); const [rights, setRights] = useState(false);
+  const activeScenes = new Set(review.outputs.map((output) => output.sceneVersionId));
+  const pending = review.assets.filter((asset) => asset.licenseStatus !== "VERIFIED" && (!asset.sceneVersionId || activeScenes.has(asset.sceneVersionId)));
+  const evidence = useMutation({ mutationFn: () => request(`/content/${review.id}/review/asset-license`, { method: "POST", body: JSON.stringify({ assetId, proofUrl: proof, licenseName: license, status: "VERIFIED", commercialUseAllowed: rights, derivativeAllowed: rights }) }, ContentReviewResponseSchema), onSuccess: () => { void cache.invalidateQueries({ queryKey: ["content-review", review.id] }); } });
+  return <section className="grid gap-4"><h3 className="font-semibold">샘플 출처·권리·플랫폼 검토</h3>{review.sources.map((source) => <a key={source.url} href={source.url} target="_blank" rel="noreferrer" className="underline">{source.title} · {source.sourceName}</a>)}{pending.length ? <div className="grid gap-2 rounded border p-3"><p>확인되지 않은 권리는 자동 승인하지 않습니다.</p><select aria-label="샘플 권리 검토 에셋" value={assetId} onChange={(event) => setAssetId(event.target.value)}><option value="">에셋 선택</option>{[...new Map(pending.map((asset) => [asset.id, asset])).values()].map((asset) => <option key={asset.id} value={asset.id}>{asset.purpose} · {asset.licenseStatus}</option>)}</select><input aria-label="샘플 권리 증빙 URL" placeholder="HTTPS 권리 증빙 URL" type="url" value={proof} onChange={(event) => setProof(event.target.value)} /><input aria-label="샘플 라이선스 이름" placeholder="라이선스 이름" value={license} onChange={(event) => setLicense(event.target.value)} /><label><input type="checkbox" checked={rights} onChange={(event) => setRights(event.target.checked)} />상업 사용·변형 허용 증빙을 확인했습니다.</label><Button type="button" disabled={!rights || !assetId || !proof || license.length < 3 || evidence.isPending} onClick={() => evidence.mutate()}>샘플 권리 증빙 저장</Button>{evidence.error ? <p role="alert">{evidence.error.message}</p> : null}</div> : null}{review.outputs.filter((output) => output.platform).map((output) => <WizardSampleOutput key={output.platform} review={review} output={output} />)}</section>;
+};
+
+type WizardDraft = { channelId: string; values: WizardForm; step: number; runId: string | null; sampleSnapshot: string | null };
+const readWizardDraft = (): WizardDraft | null => {
+  try {
+    const value: unknown = JSON.parse(sessionStorage.getItem("postbot-wizard-draft") ?? "null");
+    if (!value || typeof value !== "object") return null;
+    const record = value as Record<string, unknown>;
+    if (typeof record.channelId !== "string" || !record.values || typeof record.values !== "object") return null;
+    const fields = record.values as Record<string, unknown>;
+    for (const [key, fallback] of Object.entries(defaultWizardValues)) {
+      if (Array.isArray(fallback)) { if (!Array.isArray(fields[key]) || !(fields[key] as unknown[]).every((entry) => typeof entry === "string")) return null; }
+      else if (typeof fields[key] !== typeof fallback) return null;
+    }
+    const values = fields as WizardForm;
+    if (!CreateChannelRequestSchema.safeParse(buildChannelInput(values)).success) return null;
+    return { channelId: record.channelId, values, step: typeof record.step === "number" ? Math.max(0, Math.min(7, record.step)) : 1, runId: typeof record.runId === "string" ? record.runId : null, sampleSnapshot: typeof record.sampleSnapshot === "string" ? record.sampleSnapshot : null };
+  } catch { return null; }
+};
+
 const ChannelWizard = ({
   onClose,
   onError
@@ -1216,28 +1315,66 @@ const ChannelWizard = ({
   onError: (error: string) => void;
 }): ReactElement => {
   const queryClient = useQueryClient();
-  const [step, setStep] = useState(0);
+  const [restored] = useState(readWizardDraft);
+  const [step, setStep] = useState(restored?.step ?? 0);
+  const [draftId, setDraftId] = useState<string | null>(restored?.channelId ?? null);
+  const [runId, setRunId] = useState<string | null>(restored?.runId ?? null);
+  const [sampleSnapshot, setSampleSnapshot] = useState<string | null>(restored?.sampleSnapshot ?? null);
+  const [dailyBudget, setDailyBudget] = useState("5");
+  const [monthlyBudget, setMonthlyBudget] = useState("20");
+  const [sampleConfirmed, setSampleConfirmed] = useState(false);
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => { dialog.current?.showModal(); }, []);
-  const form = useForm<WizardForm>({ defaultValues: defaultWizardValues });
+  const form = useForm<WizardForm>({ defaultValues: restored?.values ?? defaultWizardValues });
   const values = form.watch();
   const preview = useMemo(() => buildChannelInput(values), [values]);
+  useEffect(() => { if (draftId) sessionStorage.setItem("postbot-wizard-draft", JSON.stringify({ channelId: draftId, values, step, runId, sampleSnapshot })); }, [draftId, values, step, runId, sampleSnapshot]);
+  const accounts = useQuery({ queryKey: ["platform-accounts"], queryFn: fetchPlatformAccounts, refetchInterval: 5000 });
+  const connected = accounts.data?.filter((account) => account.channelId === draftId && account.status === "CONNECTED") ?? [];
+  const ensureDraft = async (): Promise<string> => {
+    if (draftId) return draftId;
+    const channel = await request("/channels", { method: "POST", body: JSON.stringify(CreateChannelRequestSchema.parse({ ...buildChannelInput(form.getValues()), startPaused: true })) }, ChannelResponseSchema);
+    setDraftId(channel.id);
+    return channel.id;
+  };
+  const connect = useMutation({ mutationFn: async (platform: Platform) => {
+    const channelId = await ensureDraft();
+    sessionStorage.setItem("postbot-wizard-draft", JSON.stringify({ channelId, values: form.getValues(), step: 1, runId, sampleSnapshot }));
+    const started = await request(`/platform-accounts/${platform.toLowerCase()}/connect`, { method: "POST", body: JSON.stringify({ channelId }) }, StartOAuthConnectionResponseSchema);
+    if (started.provider === "fake") await requestAbsolute(started.authorizationUrl, { method: "GET" }, OAuthCallbackResultSchema);
+    else { sessionStorage.setItem("postbot-oauth-channel", channelId); window.location.assign(started.authorizationUrl); }
+  }, onSuccess: () => { void accounts.refetch(); void queryClient.invalidateQueries({ queryKey: ["channels"] }); } });
+  const sample = useMutation({ mutationFn: async () => {
+    const channelId = await ensureDraft();
+    const config = CreateChannelRequestSchema.parse(buildChannelInput(form.getValues()));
+    await request(`/channels/${channelId}`, { method: "PATCH", body: JSON.stringify(config) }, ChannelResponseSchema);
+    await request("/automation/budgets", { method: "POST", body: JSON.stringify({ channelId, dailyHardLimit: Number(dailyBudget), monthlyHardLimit: Number(monthlyBudget) }) }, AutomationBudgetResponseSchema);
+    return request("/automation/runs", { method: "POST", body: JSON.stringify({ channelId, platforms: config.platforms, sample: true, idempotencyKey: `wizard-sample:${crypto.randomUUID()}` }) }, AutomationRunResponseSchema);
+  }, onSuccess: (run) => { setRunId(run.id); setSampleConfirmed(false); setSampleSnapshot(JSON.stringify(buildChannelInput(form.getValues()))); } });
+  const sampleRun = useQuery({ queryKey: ["wizard-sample-run", runId], queryFn: () => request(`/automation/runs/${runId}`, { method: "GET" }, AutomationRunResponseSchema), enabled: Boolean(runId), refetchInterval: 3000 });
+  const sampleContent = sampleRun.data?.steps.find((item) => item.stage === "SCRIPT" && typeof item.output?.contentItemId === "string")?.output?.contentItemId;
+  const sampleReview = useQuery({ queryKey: ["content-review", sampleContent], queryFn: () => fetchReview(typeof sampleContent === "string" ? sampleContent : ""), enabled: typeof sampleContent === "string", refetchInterval: 3000 });
+  const sampleApproved = sampleConfirmed && values.platforms.every((platform) => sampleReview.data?.outputs.some((output) => output.platform === platform && output.videoReady && output.policy?.status === "pass" && output.reviewStatus === "APPROVED")) && sampleSnapshot === JSON.stringify(preview);
 
   const mutation = useMutation({
-    mutationFn: (data: WizardForm) =>
-      request("/channels", { method: "POST", body: JSON.stringify(CreateChannelRequestSchema.parse(buildChannelInput(data))) }, ChannelResponseSchema),
+    mutationFn: async () => {
+      if (!runId || !sampleApproved || connected.length === 0) throw new Error("계정 연결과 실제 샘플 미리보기·정책 승인을 먼저 완료해 주세요.");
+      return request(`/automation/runs/${runId}/complete-setup`, { method: "POST", body: "{}" }, { parse: () => ({ ok: true }) });
+    },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["channels"] });
+      sessionStorage.removeItem("postbot-wizard-draft");
       onClose();
     },
     onError: (error) => onError(error instanceof Error ? error.message : "채널을 만들지 못했습니다.")
   });
 
-  const submit = form.handleSubmit((data) => {
-    mutation.mutate(data);
+  const submit = form.handleSubmit(() => {
+    mutation.mutate();
   });
   const lastStep = wizardSteps.length - 1;
   const nextStep = () => {
+    if (step === 1 && !connected.some((account) => values.platforms.includes(account.platform))) { form.setError("platforms", { message: "선택한 SNS 계정을 최소 1개 연결해 주세요." }); return; }
     const result = CreateChannelRequestSchema.safeParse(buildChannelInput(form.getValues()));
     const fields: Record<string, keyof WizardForm> = { name: "name", topic: "topic", targetAudience: "audience", language: "language", platforms: "platforms", "collectionRule.keywords": "keywords", "collectionRule.recencyHours": "recencyHours", "collectionRule.collectionFrequencyMinutes": "collectionFrequencyMinutes", "template.name": "templateName", "template.tone": "hookStyle", "outputProfiles.minDurationSeconds": "durationMinSeconds", "outputProfiles.maxDurationSeconds": "durationMaxSeconds", "scheduleRules.timezone": "timezone", "scheduleRules.timeOfDayLocal": "times", scheduleRules: "times", "automation.dailyPublishLimit": "maxDailyPosts", "automation.minInventoryCount": "minContentInventory" };
     const stepFields: Array<Array<keyof WizardForm>> = [["name", "topic", "audience", "language"], ["platforms"], ["keywords", "recencyHours", "collectionFrequencyMinutes"], ["templateName", "hookStyle", "ctaStyle"], ["durationMinSeconds", "durationMaxSeconds"], ["timezone", "times", "days", "minContentInventory"], ["maxDailyPosts"], []];
@@ -1274,7 +1411,7 @@ const ChannelWizard = ({
                 aria-label={item.title}
                 className={`h-2 rounded ${index <= step ? "bg-primary" : "bg-muted"}`}
                 key={item.title}
-                onClick={() => setStep(index)}
+                onClick={() => { if (index <= step) setStep(index); }}
                 type="button"
               />
             ))}
@@ -1282,6 +1419,10 @@ const ChannelWizard = ({
         </header>
         <section className="flex-1 px-5 py-6">
           <WizardStep step={step} form={form} preview={preview} />
+          {step === 1 ? <div className="mt-4 grid gap-2">{values.platforms.map((platform) => <div key={platform} className="flex items-center justify-between rounded border p-3"><span>{platformLabel(platform)} · {connected.some((account) => account.platform === platform) ? "연결됨" : "미연결"}</span><Button type="button" disabled={connect.isPending} onClick={() => connect.mutate(platform)}>계정 연결</Button></div>)}<p className="text-sm text-muted-foreground">초안 채널은 샘플 승인 전까지 일시 중지됩니다. 닫았다가 다시 열어도 설정을 이어갈 수 있습니다.</p>{connect.error ? <p role="alert">{connect.error.message}</p> : null}</div> : null}
+          {step === 3 && draftId ? <WizardAssetUpload channelId={draftId} onLogo={(id) => form.setValue("logoAssetId", id)} /> : null}
+          {step === 7 ? <div className="mt-5 grid gap-4"><label>일간 중단 예산 (USD)<input aria-label="샘플 일간 예산" type="number" min="0" step="0.01" className="ml-2 rounded border p-2" value={dailyBudget} onChange={(event) => setDailyBudget(event.target.value)} /></label><label>월간 중단 예산 (USD)<input aria-label="샘플 월간 예산" type="number" min="0" step="0.01" className="ml-2 rounded border p-2" value={monthlyBudget} onChange={(event) => setMonthlyBudget(event.target.value)} /></label><Button type="button" disabled={sample.isPending || connected.length === 0 || (Boolean(runId) && ["QUEUED", "RUNNING"].includes(sampleRun.data?.status ?? ""))} onClick={() => sample.mutate()}>실제 샘플 제작</Button><p className="text-sm">샘플은 렌더·정책 검사까지 실행하며 SNS에 게시하거나 예약하지 않습니다. 실제 Provider는 예산 내 비용이 발생할 수 있습니다.</p>{sample.error ? <p role="alert">{sample.error.message}</p> : null}{sampleRun.data ? <p role="status">샘플: {statusLabel(sampleRun.data.status)} · {sampleRun.data.steps.filter((item) => item.stage !== "PUBLISH").map((item) => `${platformLabel(item.platform)} ${stageLabel(item.stage)} ${statusLabel(item.status)}`).join(" / ")}</p> : null}{sampleRun.data?.steps.filter((item) => item.errorCode && item.errorCode !== "SAMPLE_REVIEW_REQUIRED").map((item) => <p role="alert" key={`${item.platform}:${item.stage}`}>{platformLabel(item.platform)}: {item.errorCode === "STOCK_ASSET_REQUIRED" ? "템플릿 단계에서 권리 확인된 스톡 이미지를 등록해 주세요." : item.errorMessage ?? item.errorCode}</p>)}{sampleReview.data ? <WizardSampleReview review={sampleReview.data} /> : null}{runId && sampleSnapshot !== JSON.stringify(preview) ? <p role="alert">제작 후 설정이 변경되었습니다. 새 설정으로 샘플을 다시 제작해 주세요.</p> : null}</div> : null}
+          {step === 7 ? <label className="mt-4 flex gap-2"><input type="checkbox" checked={sampleConfirmed} onChange={(event) => setSampleConfirmed(event.target.checked)} />모든 플랫폼의 실제 샘플 영상과 출처를 확인했습니다.</label> : null}
           {Object.entries(form.formState.errors).map(([field, issue]) => <p role="alert" className="mt-2 text-sm text-red-700" key={field}>{field}: {issue.message}</p>)}
         </section>
         <footer className="flex items-center justify-between border-t border-border px-5 py-4">
@@ -1290,9 +1431,9 @@ const ChannelWizard = ({
             이전
           </Button>
           {step === lastStep ? (
-            <Button className="gap-2" data-testid="wizard-create" disabled={mutation.isPending} key="create" type="submit">
+            <Button className="gap-2" data-testid="wizard-create" disabled={mutation.isPending || !sampleApproved || connected.length === 0} key="create" type="submit">
               <CheckCircle2 aria-hidden="true" className="h-4 w-4" />
-              생성
+              설정 완료
             </Button>
           ) : (
             <Button className="gap-2" data-testid="wizard-next" key="next" onClick={nextStep} type="button">
@@ -1378,6 +1519,15 @@ const WizardStep = ({
         <Field label="템플릿 이름" registration={register("templateName", { required: true })} />
         <Field label="CTA 방식" registration={register("ctaStyle", { required: true })} />
         <Field label="훅 방식" registration={register("hookStyle", { required: true })} />
+        <Field label="음성 프로필" helper="neutral-ko는 운영 환경의 기본 음성 ID를 사용합니다." registration={register("voiceProfile", { required: true })} />
+        <Field label="AI 이미지 비율" helper="0은 스톡만, 1은 AI만 사용합니다. 혼합 비율은 장면 수에 맞춰 반올림합니다." type="number" registration={register("aiStockRatio", { valueAsNumber: true, min: 0, max: 1 })} />
+        <Field label="브랜드 색상" type="color" registration={register("brandColor")} />
+        <Field label="배경 색상" type="color" registration={register("backgroundColor")} />
+        <Field label="워터마크" helper="비워 두면 채널 이름" registration={register("watermark")} />
+        <label className="text-sm">글꼴<select aria-label="브랜드 글꼴" className="mt-2 w-full rounded border p-3" {...register("fontFamily")}><option value="Arial">Arial</option><option value="sans-serif">Sans serif</option><option value="serif">Serif</option></select></label>
+        <Field label="자막 색상" type="color" registration={register("captionColor")} />
+        <Field label="자막 배경" type="color" registration={register("captionBackground")} />
+        <Field label="자막 글자 크기" type="number" registration={register("captionFontSize", { valueAsNumber: true, min: 32, max: 64 })} />
       </div>
     );
   }
@@ -1387,7 +1537,7 @@ const WizardStep = ({
       <div className="grid gap-4 md:grid-cols-2">
         <Field label="최소 길이 초" type="number" registration={register("durationMinSeconds", { valueAsNumber: true })} />
         <Field label="최대 길이 초" type="number" registration={register("durationMaxSeconds", { valueAsNumber: true })} />
-        <p className="rounded bg-muted p-3 text-sm md:col-span-2">지원 출력: 9:16 · 1080×1920 · 가독성 자막. 다른 화면 비율·해상도·자막 테마는 아직 제공하지 않습니다.</p>
+        <p className="rounded bg-muted p-3 text-sm md:col-span-2">지원 출력: 9:16 · 1080×1920. 템플릿에서 설정한 브랜드·자막 스타일이 실제 영상에 반영됩니다.</p>
       </div>
     );
   }
@@ -1435,15 +1585,15 @@ const WizardStep = ({
     <div className="grid gap-4">
       <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
         <AlertTriangle aria-hidden="true" className="mb-2 h-5 w-5" />
-        OAuth 연결은 다음 단계에서 제공됩니다. 선택한 플랫폼은 실제 연결 성공으로 처리하지 않고 연결 예정 상태로 저장됩니다.
+        실제 샘플 제작 후 각 플랫폼의 영상·출처·정책 결과를 확인하고 승인해야 설정을 완료할 수 있습니다. 샘플은 게시하지 않습니다.
       </div>
       <div className="grid gap-3 md:grid-cols-2">
         <article className="rounded-md border border-border p-4"><h3 className="font-semibold">채널</h3><p className="mt-2 text-sm">{preview.name}</p><p className="text-sm text-muted-foreground">{preview.topic} · {preview.targetAudience}</p></article>
-        <article className="rounded-md border border-border p-4"><h3 className="font-semibold">플랫폼</h3><p className="mt-2 text-sm">{preview.platforms.map(platformLabel).join(", ") || "선택 필요"}</p><p className="text-sm text-muted-foreground">계정 연결은 채널 생성 후 이어서 진행합니다.</p></article>
+        <article className="rounded-md border border-border p-4"><h3 className="font-semibold">플랫폼</h3><p className="mt-2 text-sm">{preview.platforms.map(platformLabel).join(", ") || "선택 필요"}</p><p className="text-sm text-muted-foreground">SNS 단계에서 연결한 계정은 그대로 유지됩니다.</p></article>
         <article className="rounded-md border border-border p-4"><h3 className="font-semibold">제작 설정</h3><p className="mt-2 text-sm">{preview.template.name} · {preview.outputProfiles[0]?.minDurationSeconds ?? "-"}~{preview.outputProfiles[0]?.maxDurationSeconds ?? "-"}초</p><p className="text-sm text-muted-foreground">{preview.template.tone} · 읽기 쉬운 자막</p></article>
         <article className="rounded-md border border-border p-4"><h3 className="font-semibold">운영</h3><p className="mt-2 text-sm">{preview.automation.mode === "FULL_AUTO" ? "완전 자동형" : "승인형"} · 최소 재고 {preview.automation.minInventoryCount}개</p><p className="text-sm text-muted-foreground">{preview.scheduleRules.length}개 반복 슬롯 · {preview.scheduleRules[0]?.timezone ?? "시간대 미설정"}</p></article>
       </div>
-      <p className="text-sm text-muted-foreground">생성 후 계정 연결과 예산을 설정하면 자동 제작을 시작할 수 있습니다. 샘플 영상은 실제 제작 작업이 완료된 뒤 콘텐츠 검토 화면에서 확인합니다.</p>
+      <p className="text-sm text-muted-foreground">예산을 설정한 뒤 샘플 제작을 시작해 주세요. 설정을 변경하면 새 설정으로 샘플을 다시 제작해야 합니다.</p>
     </div>
   );
 };

@@ -88,8 +88,8 @@ export const ChannelTemplateInputSchema = z.object({
   name: z.string().min(1).max(120),
   tone: z.string().min(1).max(120),
   voiceProfile: z.string().min(1).max(120),
-  subtitleStyle: JsonObjectSchema,
-  visualStyle: JsonObjectSchema,
+  subtitleStyle: z.object({ color: z.string().regex(/^#[0-9a-f]{6}$/i).optional(), backgroundColor: z.string().regex(/^#[0-9a-f]{6}$/i).optional(), fontSize: z.number().int().min(32).max(64).optional() }).catchall(z.unknown()),
+  visualStyle: z.object({ brandColor: z.string().regex(/^#[0-9a-f]{6}$/i).optional(), backgroundColor: z.string().regex(/^#[0-9a-f]{6}$/i).optional(), fontFamily: z.enum(["Arial", "sans-serif", "serif"]).optional(), watermark: z.string().max(60).optional(), logoAssetId: z.string().min(1).max(80).optional() }).catchall(z.unknown()),
   aiStockRatio: z.number().min(0).max(1)
 });
 
@@ -131,6 +131,7 @@ export const CreateChannelRequestSchema = z
   .object({
     name: z.string().min(1).max(120),
     description: z.string().max(1000).optional().default(""),
+    startPaused: z.boolean().optional(),
     language: z.string().min(2).max(16),
     targetAudience: z.string().min(3).max(255),
     topic: z.string().min(3).max(255),
@@ -626,6 +627,7 @@ export const AutomationRunRequestSchema = z.object({
   channelId: z.string().min(1),
   idempotencyKey: z.string().min(8).max(191),
   ideaId: z.string().min(1).optional(),
+  sample: z.boolean().optional(),
   platforms: z.array(PlatformSchema).min(1).max(3).optional(),
   partial: z.enum(["full", "hook", "body", "metadata", "scene"]).default("full")
 });
@@ -637,7 +639,7 @@ export const AutomationRunResponseSchema = z.object({
   pausedReason: z.string().nullable(),
   nextRunAt: z.string().datetime().nullable(), heartbeatAt: z.string().datetime().nullable(),
   lastErrorCode: z.string().nullable(), lastErrorMessage: z.string().nullable(),
-  steps: z.array(z.object({ stage: AutomationStageSchema, platform: PlatformSchema.nullable(), status: AutomationStepStatusSchema, attemptCount: z.number().int(), maxAttempts: z.number().int(), productionJobId: z.string().nullable(), errorCode: z.string().nullable(), errorMessage: z.string().nullable() }))
+  steps: z.array(z.object({ stage: AutomationStageSchema, platform: PlatformSchema.nullable(), status: AutomationStepStatusSchema, attemptCount: z.number().int(), maxAttempts: z.number().int(), productionJobId: z.string().nullable(), errorCode: z.string().nullable(), errorMessage: z.string().nullable(), output: JsonObjectSchema.nullable().optional() }))
 });
 export const AutomationBudgetRequestSchema = z.object({
   channelId: z.string().min(1).nullable().default(null), currency: z.string().length(3).default("USD"),
@@ -676,7 +678,8 @@ export const OptimizationSettingsSchema = z.object({
 export const UpdateOptimizationSettingsRequestSchema = z.object({ channelId: z.string().min(1), settings: OptimizationSettingsSchema });
 export const GenerateSuggestionsRequestSchema = z.object({ channelId: z.string().min(1), platform: PlatformSchema, metric: z.enum(["views", "impressions", "average_watch_seconds", "completion_rate", "engagement_rate"]), periodStart: z.string().datetime(), periodEnd: z.string().datetime(), idempotencyKey: z.string().min(8).max(128) }).refine((value) => value.periodStart < value.periodEnd, { message: "periodStart must precede periodEnd" });
 export const SuggestionActionRequestSchema = z.object({ action: z.enum(["approve", "reject", "apply", "expire"]), reason: z.string().min(1).max(500).optional() });
-export const CreateExperimentRequestSchema = z.object({ channelId: z.string().min(1), name: z.string().min(1).max(120), hypothesis: z.string().min(1).max(2000), targetMetric: z.string().min(1).max(80), minSampleSize: z.number().int().min(2).max(10_000), control: JsonObjectSchema, variant: JsonObjectSchema, successCriteria: JsonObjectSchema, stopCriteria: JsonObjectSchema.optional() });
+export const ExperimentStrategySchema = z.object({ durationSeconds: z.number().positive().max(180) }).strict();
+export const CreateExperimentRequestSchema = z.object({ channelId: z.string().min(1), name: z.string().min(1).max(120), hypothesis: z.string().min(1).max(2000), platform: PlatformSchema.default("YOUTUBE"), periodDays: z.number().int().min(1).max(90).default(30), targetMetric: z.string().min(1).max(80), minSampleSize: z.number().int().min(2).max(10_000), control: ExperimentStrategySchema, variant: ExperimentStrategySchema, successCriteria: z.object({ direction: z.enum(["higher", "lower"]).default("higher"), minRelativeImprovement: z.number().positive().max(1).default(0.1) }).strict(), stopCriteria: z.object({ maxAssignments: z.number().int().min(4).max(20_000) }).strict().optional() }).refine((value) => !value.stopCriteria || value.stopCriteria.maxAssignments >= value.minSampleSize * 2, "배정 상한은 두 그룹 최소 표본의 합 이상이어야 합니다.");
 export const ExperimentActionRequestSchema = z.object({ action: z.enum(["start", "pause", "stop", "complete", "inconclusive"]), reason: z.string().min(1).max(500).optional() });
 export const AssignExperimentRequestSchema = z.object({ contentItemId: z.string().min(1) });
 export const OptimizationSuggestionResponseSchema = z.object({ id: z.string(), channelId: z.string(), status: z.enum(["PENDING", "PROPOSED", "APPROVED", "REJECTED", "HELD", "APPLIED", "EXPIRED"]), title: z.string(), rationale: z.string(), evidence: z.unknown(), targetStrategy: z.unknown().nullable(), sampleSize: z.number().int(), confidenceScore: z.number().nullable(), expectedImpact: z.unknown().nullable(), risk: z.unknown().nullable(), expiresAt: z.string().datetime().nullable(), createdAt: z.string().datetime(), appliedAt: z.string().datetime().nullable() });

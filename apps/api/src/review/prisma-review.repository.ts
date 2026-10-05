@@ -24,12 +24,45 @@ export class PrismaReviewRepository implements ReviewRepository {
     await this.prisma.$transaction(async (tx) => {
       await tx.assetLicense.create({ data: { assetId: asset.id, status: input.status, licenseName: input.licenseName, proofUrl: input.proofUrl, commercialUseAllowed: input.commercialUseAllowed, derivativeAllowed: input.derivativeAllowed, checkedAt: new Date() } });
       await tx.auditLog.create({ data: { workspaceId, userId, action: "asset.license.review", targetType: "asset", targetId: asset.id, metadata: { status: input.status } } });
-      const scripts = await tx.scriptVersion.findMany({ where: { contentItemId } });
-      for (const script of scripts) await tx.scriptVersion.update({ where: { id: script.id }, data: { qualitySnapshot: { ...json(script.qualitySnapshot), reviewStatus: "REVIEW_REQUIRED" } } });
-      const checks = await tx.policyCheck.findMany({ where: { contentItemId }, orderBy: { checkedAt: "desc" }, distinct: ["platform"] });
-      for (const check of checks) await tx.policyCheck.create({ data: { contentItemId, platform: check.platform, policyRuleId: check.policyRuleId, status: "UNKNOWN", reasons: [{ code: "LICENSE_REVIEW_CHANGED", message: "권리 증빙 변경 후 정책 재검사가 필요합니다." }] } });
-      await tx.publishPlan.updateMany({ where: { contentItemId, status: "SCHEDULED" }, data: { status: "HELD" } });
-      await tx.contentItem.update({ where: { id: contentItemId }, data: { status: "REVIEW_REQUIRED" } });
+      const usages = await tx.assetUsage.findMany({ where: { assetId: asset.id, contentItem: { channel: { workspaceId } } }, include: { sceneVersion: true } });
+      const affected = new Set<string>();
+      for (const usage of usages) {
+        const candidates = usage.sceneVersion ? [usage.sceneVersion] : await tx.sceneVersion.findMany({ where: { contentItemId: usage.contentItemId }, orderBy: { version: "desc" }, distinct: ["platform"] });
+        for (const scene of candidates) {
+          const latest = await tx.sceneVersion.findFirst({ where: { contentItemId: scene.contentItemId, platform: scene.platform }, orderBy: { version: "desc" } });
+          if (latest?.id !== scene.id || affected.has(scene.id)) continue;
+          affected.add(scene.id);
+          const scope = { contentItemId: scene.contentItemId, platform: scene.platform };
+          const scripts = await tx.scriptVersion.findMany({ where: scope });
+          for (const script of scripts) await tx.scriptVersion.update({ where: { id: script.id }, data: { qualitySnapshot: { ...json(script.qualitySnapshot), reviewStatus: "REVIEW_REQUIRED" } } });
+          if (scene.platform) {
+            const platformScope = { contentItemId: scene.contentItemId, platform: scene.platform };
+            const check = await tx.policyCheck.findFirst({ where: platformScope, orderBy: { checkedAt: "desc" } });
+            if (check) await tx.policyCheck.create({ data: { ...platformScope, policyRuleId: check.policyRuleId, status: "UNKNOWN", reasons: [{ code: "LICENSE_REVIEW_CHANGED", message: "권리 증빙 변경 후 정책 재검사가 필요합니다." }] } });
+            await tx.publishPlan.updateMany({ where: { ...platformScope, status: "SCHEDULED" }, data: { status: "HELD" } });
+          }
+          const activePlans = await tx.publishPlan.count({ where: { contentItemId: scene.contentItemId, status: { in: ["SCHEDULED", "PUBLISHING", "PUBLISHED"] } } });
+          if (!activePlans) await tx.contentItem.update({ where: { id: scene.contentItemId }, data: { status: "REVIEW_REQUIRED" } });
+          if (input.status !== "VERIFIED") continue;
+          const sceneUsages = await tx.assetUsage.findMany({ where: { sceneVersionId: scene.id }, include: { asset: { include: { licenses: { orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 1 } } } } });
+          const now = new Date();
+          if (!sceneUsages.length || !sceneUsages.every((record) => {
+            const license = record.asset.licenses[0];
+            return license?.status === "VERIFIED" && license.commercialUseAllowed && license.derivativeAllowed && (!license.validFrom || license.validFrom <= now) && (!license.validUntil || license.validUntil > now);
+          })) continue;
+          const steps = await tx.automationStep.findMany({ where: { stage: "ASSET", platform: scene.platform, status: "HELD", errorCode: "ASSET_LICENSE_REVIEW_REQUIRED", automationRun: { channel: { workspaceId }, status: { in: ["RUNNING", "PAUSED"] } } } });
+          for (const step of steps) {
+            const result = json(step.output);
+            const records = Array.isArray(result.assets) ? result.assets : [];
+            if (!records.some((record) => json(record as Prisma.JsonValue).assetId === asset.id) || !step.productionJobId) continue;
+            const job = await tx.productionJob.findUnique({ where: { id: step.productionJobId } });
+            const preparation = json(json(job?.payload ?? null).assetPreparation as Prisma.JsonValue);
+            if (preparation.sceneVersionId !== scene.id || job?.status !== "NEEDS_REVIEW") continue;
+            await tx.automationStep.update({ where: { id: step.id }, data: { status: "PENDING", errorCode: null, errorMessage: null, finishedAt: null } });
+            await tx.automationRun.update({ where: { id: step.automationRunId }, data: { status: "QUEUED", pausedReason: null, nextRunAt: now } });
+          }
+        }
+      }
     });
     return true;
   }

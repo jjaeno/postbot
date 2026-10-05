@@ -6,7 +6,7 @@ import { loadConfig } from "@postbot/config";
 import { createLogger, runWithLogContext } from "@postbot/logger";
 import * as Sentry from "@sentry/node";
 import cookieParser from "cookie-parser";
-import type { NextFunction, Request, Response } from "express";
+import { json, type NextFunction, type Request, type Response } from "express";
 import { AppModule } from "./app.module.js";
 import { HttpExceptionResponseFilter } from "./http-exception.filter.js";
 
@@ -17,6 +17,11 @@ const bootstrap = async (): Promise<void> => {
   }
   const logger = createLogger("postbot-api");
   const app = await NestFactory.create(AppModule, { bufferLogs: true });
+
+  app.use("/channels/:channelId/stock-assets", json({ limit: "1500kb" }));
+  // Nest skips its default JSON parser when a route-specific parser is registered.
+  // Keep the normal 100kb limit for every other endpoint.
+  app.use(json());
 
   app.use(cookieParser());
   app.use((req: Request, res: Response, next: NextFunction) => {

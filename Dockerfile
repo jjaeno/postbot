@@ -32,6 +32,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
   ffmpeg \
+  fonts-noto-cjk \
   openssl \
   libasound2 \
   libatk-bridge2.0-0 \

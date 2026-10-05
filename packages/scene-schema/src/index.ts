@@ -19,6 +19,20 @@ export const SceneSchema = z.object({
   overlays: z.array(SceneOverlaySchema).min(1).max(4)
 });
 
+export const VideoStyleSchema = z.object({
+  brandColor: z.string().regex(/^#[0-9a-f]{6}$/i).default("#0f766e"),
+  backgroundColor: z.string().regex(/^#[0-9a-f]{6}$/i).default("#f8fafc"),
+  fontFamily: z.enum(["Arial", "sans-serif", "serif"]).default("Arial"),
+  watermark: z.string().max(60).default("Postbot"),
+  logoAssetId: z.string().min(1).max(80).optional(),
+  captionColor: z.string().regex(/^#[0-9a-f]{6}$/i).default("#ffffff"),
+  captionBackground: z.string().regex(/^#[0-9a-f]{6}$/i).default("#0f172a"),
+  captionFontSize: z.number().int().min(32).max(64).default(52)
+});
+export type VideoStyle = z.infer<typeof VideoStyleSchema>;
+
+export const aiSceneCount = (sceneCount: number, aiStockRatio: number): number => Math.round(sceneCount * Math.max(0, Math.min(1, aiStockRatio)));
+
 export const SceneDocumentSchema = z.object({
   schemaVersion: z.literal("1.0.0"),
   title: z.string().min(1),
@@ -26,6 +40,8 @@ export const SceneDocumentSchema = z.object({
   height: z.literal(1920),
   fps: z.number().int().positive(),
   durationInFrames: z.number().int().positive(),
+  style: VideoStyleSchema.optional(),
+  aiStockRatio: z.number().min(0).max(1).optional(),
   scenes: z.array(SceneSchema).min(1).max(12)
 }).superRefine((value, ctx) => {
   const lastFrame = Math.max(...value.scenes.map((scene) => scene.startFrame + scene.durationInFrames));

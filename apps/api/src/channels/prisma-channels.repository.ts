@@ -168,6 +168,7 @@ export class PrismaChannelsRepository implements ChannelsRepository {
           targetAudience: input.targetAudience,
           topic: input.topic,
           excludedTopics: input.excludedTopics,
+          status: input.startPaused ? "PAUSED" : "ACTIVE",
           automationMode: input.automation.mode,
           minInventoryCount: input.automation.minInventoryCount,
           dailyPublishLimit: input.automation.dailyPublishLimit,

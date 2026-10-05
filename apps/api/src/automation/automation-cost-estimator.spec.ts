@@ -15,4 +15,10 @@ describe("automation cost estimator", () => {
     const config = loadConfig({ APP_ENV: "production", LLM_PROVIDER: "openai", OPENAI_API_KEY: "configured-elsewhere" });
     expect(estimateAutomationStageCost(config, "SCRIPT", {})).toBeNull();
   });
+  it("does not require AI pricing when a scene snapshot uses only licensed stock", () => {
+    const config = loadConfig({ APP_ENV: "test", IMAGE_PROVIDER: "google" });
+    expect(estimateAutomationStageCost(config, "ASSET", { imageCount: 0 })).toMatchObject({ provider: "licensed-stock", amountUsd: 0 });
+    expect(estimateAutomationStageCost(config, "ASSET", {})).toBeNull();
+    expect(estimateAutomationStageCost(config, "ASSET", { imageCount: 2 })).toBeNull();
+  });
 });

@@ -1,7 +1,19 @@
 # 출시 전 기능·UX 정합성 보완
 
 기준일: 2026-10-05  
-범위: `implementation-plan.md` 19.1단계
+범위: `implementation-plan.md` 19.1~19.2단계
+
+## 19.2 최종 명세 점검 보완
+
+19.1 인계 이후 읽기 전용 점검에서 발견한 다음 5개 문제를 보완한다. 아래 19.1 검증 수치는 당시 기록이며 19.2 결과는 최신 acceptance report를 따른다.
+
+| 점검 사항 | 보완 |
+| --- | --- |
+| 실제 이미지 권리 승인 뒤 ASSET 정지·재생성 | 최신 권리를 확인해 같은 SceneVersion의 저장된 이미지를 재사용하고 보류 step/job을 자동 재개 |
+| 한 에셋 증빙 변경이 모든 플랫폼을 무효화 | 현재 버전에서 실제 사용하는 플랫폼만 승인/정책/예약 무효화, 다른 예약/성공 상태 유지 |
+| neutral-ko가 ElevenLabs 실제 voice ID로 전송 | 기본 별칭을 ELEVENLABS_VOICE_ID로 매핑, custom ID 유지, 미설정 fail-closed |
+| 제한형 실험이 상태 기록만 제공 | 실제 전체 제작 배정·기간/최대 배정 중단·범위/보호 항목 확인·가용 게시 성과 비교·부족 표본 완료 거부 |
+| 마법사/브랜드/비율이 요약·설정 저장만 제공 | 마법사 실제 연결·샘플 제작/미리보기/정책 승인, sample 게시 차단, renderer 직접 스타일/로고 반영, 검증 스톡 업로드와 실제 혼합 선택 |
 
 ## 문제별 처리 결과
 
@@ -61,7 +73,7 @@ FFmpeg/ffprobe가 포함된 production runtime image에서 15초·60초 MP4 smok
 
 ## 남은 외부·환경 의존 검증
 
-지원 범위·제한은 `feature-ux-pre-release-addendum.md`를 따른다. 실험의 제작 자동 배정·성과 비교는 내부 미구현이며 완료 API를 차단했다. 자유 출력 비율/해상도·자막 테마는 제공하지 않는다. 권리 증빙의 진위, 실제 Provider 청구 대사, production capacity와 실제 SNS 권한은 로컬 Fake 테스트로 확정할 수 없다. 전체 로드맵의 100% 완료나 근거 없는 blocker 0을 선언하지 않는다.
+지원 범위·제한은 `feature-ux-pre-release-addendum.md`를 따른다. 제한형 실험과 브랜드/자막 스타일은 19.2에서 구현했으며 자유 출력 비율/해상도·편집기·외부 스톡 구매 자동화는 제공하지 않는다. 권리 증빙의 진위, 실제 Provider 청구 대사, production capacity와 실제 SNS 권한은 로컬 Fake 테스트로 확정할 수 없다. 전체 로드맵의 100% 완료나 근거 없는 blocker 0을 선언하지 않는다.
 
 실제 유료 호출, SNS 게시, production 배포는 이번 작업에서 수행하지 않았다. 자격 증명을 비밀 저장소에 넣은 staging에서 다음 순서로 smoke한다.
 

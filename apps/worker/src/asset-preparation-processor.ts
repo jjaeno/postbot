@@ -2,11 +2,12 @@ import { AssetPreparationService, AssetRepository } from "@postbot/asset-library
 import { loadConfig } from "@postbot/config";
 import { AssetPreparationJobPayloadSchema, TtsPreparationJobPayloadSchema } from "@postbot/contracts";
 import type { PrismaClient } from "@postbot/database";
-import { FakeImageProvider, FakeStorageProvider, FakeTtsProvider, GoogleImageProvider, ElevenLabsTtsProvider, S3StorageProvider } from "@postbot/providers";
-import { SceneDocumentSchema } from "@postbot/scene-schema";
+import { FakeImageProvider, FakeStorageProvider, FakeTtsProvider, GoogleImageProvider, ElevenLabsTtsProvider, S3StorageProvider, resolveTtsVoice } from "@postbot/providers";
+import { SceneDocumentSchema, aiSceneCount } from "@postbot/scene-schema";
 
 export class AssetPreparationProcessor {
   private readonly preparation: AssetPreparationService;
+  private readonly assets: AssetRepository;
   private readonly config = loadConfig();
 
   constructor(private readonly prisma: PrismaClient) {
@@ -19,7 +20,8 @@ export class AssetPreparationProcessor {
     const tts = this.config.TTS_PROVIDER === "elevenlabs"
       ? new ElevenLabsTtsProvider({ apiKey: this.config.ELEVENLABS_API_KEY, timeoutMs: this.config.TTS_TIMEOUT_MS, usdPerThousandCharacters: this.config.TTS_USD_PER_THOUSAND_CHARACTERS })
       : new FakeTtsProvider();
-    this.preparation = new AssetPreparationService(new AssetRepository(prisma, storage), image, tts);
+    this.assets = new AssetRepository(prisma, storage);
+    this.preparation = new AssetPreparationService(this.assets, image, tts);
   }
 
   async processAsset(payload: Record<string, unknown>, jobId: string): Promise<Record<string, unknown>> {
@@ -29,7 +31,20 @@ export class AssetPreparationProcessor {
     const document = SceneDocumentSchema.parse(version.sceneDocument);
     const platformKey = input.platform ?? "COMMON";
     const assets = [];
-    for (const scene of document.scenes) {
+    const aiCount = aiSceneCount(document.scenes.length, document.aiStockRatio ?? 1);
+    const stock = aiCount < document.scenes.length ? await this.assets.selectLicensedStock(input.channelId) : [];
+    // Validate stock availability before making any paid AI requests.
+    if (aiCount < document.scenes.length && stock.length === 0) return { assets: [], needsReview: true, reviewCode: "STOCK_ASSET_REQUIRED", contentItemId: input.contentItemId };
+    for (const [index, scene] of document.scenes.entries()) {
+      if (index >= aiCount) {
+        const purpose = `scene-image:${platformKey}:${scene.id}`;
+        const existing = await this.assets.findPreparedImage({ channelId: input.channelId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose });
+        if (existing) { assets.push({ sceneId: scene.id, ...existing }); continue; }
+        const selected = stock[(index - aiCount) % stock.length]!;
+        await this.assets.attachUsage({ assetId: selected.assetId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose, snapshot: { stock: true, license: "verified" } });
+        assets.push({ sceneId: scene.id, assetId: selected.assetId, fallback: false, needsReview: false });
+        continue;
+      }
       const result = await this.preparation.prepareImage({ channelId: input.channelId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, productionJobId: jobId, purpose: `scene-image:${platformKey}:${scene.id}`, key: `images/${jobId}/${scene.id}`, prompt: scene.visualPrompt || input.prompt, model: this.config.IMAGE_MODEL, idempotencyKey: `${input.idempotencyKey}:${scene.id}` });
       assets.push({ sceneId: scene.id, ...result });
     }
@@ -38,7 +53,8 @@ export class AssetPreparationProcessor {
 
   async processTts(payload: Record<string, unknown>, jobId: string): Promise<Record<string, unknown>> {
     const input = TtsPreparationJobPayloadSchema.parse(payload).ttsPreparation;
-    const result = await this.preparation.prepareTts({ channelId: input.channelId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, productionJobId: jobId, purpose: input.platform ? `tts-narration:${input.platform}` : undefined, key: `audio/${jobId}`, text: input.text, voice: input.voice, model: this.config.TTS_MODEL, idempotencyKey: input.idempotencyKey });
+    const voice = resolveTtsVoice(this.config.TTS_PROVIDER, input.voice, this.config.ELEVENLABS_VOICE_ID);
+    const result = await this.preparation.prepareTts({ channelId: input.channelId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, productionJobId: jobId, purpose: input.platform ? `tts-narration:${input.platform}` : undefined, key: `audio/${jobId}`, text: input.text, voice, model: this.config.TTS_MODEL, idempotencyKey: input.idempotencyKey });
     return result;
   }
 }

@@ -1,5 +1,13 @@
 # Postbot 자동 운영 시스템
 
+## 19.2 마법사 샘플·권리 재개
+
+`startPaused`로 만든 초안은 scheduler 대상에서 제외된다. 명시적 `sample:true` 실행만 PAUSED 초안을 제작할 수 있다. 샘플은 재고 계산과 무관하게 1건을 만들며 기존 예산·Provider switch·권리·정책 검사를 적용한다. PUBLISH enqueue의 최상단에서 sample checkpoint를 검사해 `SAMPLE_REVIEW_REQUIRED`로 보류하므로 FULL_AUTO, resume, retry로도 샘플을 예약/게시하지 않는다.
+
+`complete-setup`은 모든 대상 플랫폼의 렌더·최신 정책 PASS·승인과 만료되지 않은 연결 계정을 확인한다. 샘플 PUBLISH를 CANCELLED로 끝낸 후 채널을 ACTIVE로 전환한다. 샘플 이후 템플릿 변경은 완료를 거부한다. 새 설정 샘플은 별도 멱등 키의 실행이며 이전 evidence를 삭제하지 않는다.
+
+권리 승인으로 보류된 ASSET은 현재 SceneVersion의 모든 에셋이 commercial/derivative·유효기간 검사를 통과하면 같은 step/job을 PENDING/QUEUED로 복구한다. worker는 저장된 이미지를 재사용한다. 스톡 부족은 유료 이미지 호출 전 `STOCK_ASSET_REQUIRED`로 보류하고, 소유자의 검증 스톡 등록 후 기존 job을 재개한다. ASSET 비용은 실제 AI 장면 수만 산정하며 0장인 스톡 전용은 유료 단가가 필요하지 않다.
+
 ## 2026-10-02 실행·비용 계약 보완
 
 `POST /automation/runs`는 클라이언트 예상 금액을 받지 않는다. `ideaId`와 `platforms`가 있으면 이미 수집된 아이디어를 COLLECT 결과로 고정하고 같은 전체 pipeline을 실행한다. 플랫폼을 생략하면 채널 설정의 대상 플랫폼을 사용한다.

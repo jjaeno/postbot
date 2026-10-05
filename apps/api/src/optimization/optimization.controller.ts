@@ -14,7 +14,8 @@ export class OptimizationController {
   @Get("channels/:channelId/strategies") strategies(@Req() req: AuthenticatedRequest, @Param("channelId") channelId: string) { return this.optimization.listStrategies(req.auth.workspaceId, channelId); }
   @Post("suggestions/:suggestionId/action") suggestionAction(@Req() req: AuthenticatedRequest, @Param("suggestionId") id: string, @Body() body: unknown) { return this.optimization.suggestionAction(req.auth.workspaceId, req.auth.workspace.role, req.auth.userId, id, body); }
   @Post("experiments") createExperiment(@Req() req: AuthenticatedRequest, @Body() body: unknown) { return this.optimization.createExperiment(req.auth.workspaceId, req.auth.workspace.role, body); }
-  @Post("experiments/:experimentId/action") experimentAction(@Req() req: AuthenticatedRequest, @Param("experimentId") id: string, @Body() body: unknown) { return this.optimization.experimentAction(req.auth.workspaceId, req.auth.workspace.role, id, body); }
+  @Get("experiments") experiments(@Req() req: AuthenticatedRequest, @Query("channelId") channelId: string) { return this.optimization.listExperiments(req.auth.workspaceId, channelId); }
+  @Post("experiments/:experimentId/action") experimentAction(@Req() req: AuthenticatedRequest, @Param("experimentId") id: string, @Body() body: unknown) { return this.optimization.experimentAction(req.auth.workspaceId, req.auth.workspace.role, id, body, req.auth.userId); }
   @Post("experiments/:experimentId/assign") assignExperiment(@Req() req: AuthenticatedRequest, @Param("experimentId") id: string, @Body() body: unknown) { return this.optimization.assignExperiment(req.auth.workspaceId, id, body); }
   @Post("channels/:channelId/rollback/:version") rollback(@Req() req: AuthenticatedRequest, @Param("channelId") channelId: string, @Param("version") version: string) { return this.optimization.rollback(req.auth.workspaceId, req.auth.workspace.role, req.auth.userId, channelId, Number.parseInt(version, 10)); }
 }

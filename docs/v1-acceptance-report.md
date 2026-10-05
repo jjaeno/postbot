@@ -1,6 +1,47 @@
 # Postbot v1 Acceptance Report
 
-## 2026-10-05 출시 전 정합성 보완 — 최신 판정
+## 2026-10-05 최종 명세 점검 보완 — 19.2단계
+
+최종 판정: **PASS_WITH_EXTERNAL_VERIFICATION_PENDING** — 19.2 지원 범위의 구현·필수 로컬 검증이 완료됐다. production 출시 승인이나 전체 로드맵 완료 판정이 아니다. 아래 19.1 결과는 과거 단계의 증거이며 최신 명세 충족 판정으로 사용하지 않는다. 최종 점검에서 발견한 다섯 항목(권리 승인 후 재개, 플랫폼 격리, 실제 voice ID, 실험 제작/성과 비교, 마법사·브랜드·스톡 반영)을 이번 단계에서 구현했다. 시작 SHA는 `b6fa975a9a84ef742f0f02496436c23bfc4c4746`이며 이 절을 포함하는 19.2 구현 커밋의 SHA는 인계 응답과 `git log -1 --format=%H`로 확인한다. push/병합은 하지 않았다.
+
+검증된 범위와 증거:
+
+| 검증 | 결과 |
+| --- | --- |
+| 변경 API/worker/web/renderer/asset-library/contracts/providers/scene-schema/optimization lint·typecheck·build | PASS. 전체 monorepo 회귀를 반복하지 않고 변경 범위를 검증 |
+| API 권리 재개/플랫폼 격리 DB 회귀 | 2/2 PASS. 기존 이미지 재사용, 추가 호출/비용 없음, 미사용 플랫폼 승인·정책·예약 보존 |
+| 제한 실험 unit / API DB 회귀 | 3/3 / 3/3 PASS. 멱등 배정, 기간·플랫폼·보호 항목·배정 상한, 실제 게시/AVAILABLE 성과만 비교, 부족 표본 거절 |
+| API 샘플 안전장치 / 스톡 업로드 DB 회귀 | 1/1 / 2/2 PASS. 게시 재시도 차단, 계정·검수 미완료 활성화 차단, 소유권/권리/중복 증빙 검증 |
+| Worker SCRIPT / ASSET DB 회귀 | 각각 2/2 PASS. 실제 실험 길이·브랜드 스냅샷, 2 AI+2 스톡, 반복 실행 비용 중복 없음 |
+| ElevenLabs Provider mock | Provider 14 passed, 1 DB skipped. 기본 음성 별칭을 설정된 voice ID로 해석하고 설정 누락은 차단 |
+| 장면 스타일 / 비용 unit | 각각 2/2 / 3/3 PASS. 전량 스톡은 이미지 생성 비용 0, 미확정 실 Provider 단가는 계속 차단 |
+| Web Playwright (API mock) | desktop 기존 여정 10/10, 모바일 변경 wizard 3/3, 신규 실험 여정 1/1 PASS |
+| API / worker / asset-library unit | 각각 72 passed·17 skipped / 3 passed·16 skipped / 3 passed·2 skipped. DB 항목은 위 별도 실행과 구분 |
+| 최종 baked API/worker 및 실제 샘플 여정 | PASS. dist override 없이 PAUSED 초안부터 승인/설정 완료까지 통과. 게시 재시도 뒤에도 publishPlan 0건 |
+| 최종 production worker 브랜드 still | PASS. 1080×1920, 실제 이미지/녹색 로고/노란 워터마크/serif/노란 자막·파란 배경/한글 overlay를 직접 확인 |
+
+추가 발견: route 전용 JSON parser 등록으로 Nest 기본 parser가 생략되는 초기화 문제를 수정해 다른 API의 기본 100kb 제한을 명시적으로 유지했다. runtime에 `fonts-noto-cjk`를 포함해 한글 overlay/caption의 누락 글리프를 보완했다. 아래에 최종 baked image 실제 샘플/renderer 결과를 기록한다.
+
+실제 샘플 검증 스크립트: `scripts/verify-wizard-sample.mjs`. 격리 Compose API/worker/MySQL/Redis/MinIO와 실제 Chromium/FFmpeg를 사용하며 외부 Provider/OAuth는 모두 Fake로 강제한다. `_test` DB와 `APP_ENV=test` 이외의 실행은 거절한다. PAUSED 초안→계정 연결→예산→샘플 제작→MP4 다운로드→정책 검사/승인→게시 재시도 차단→설정 완료를 검사한다. fixture는 증거를 보존하고 마지막에 해당 채널만 PAUSED 처리한다.
+
+실제 성공 fixture: channel `cmuvcfujf0017p401nh90j96v`, run `cmuvcfuod001rp401lyuaig4x`, content `cmuvcfyaq000lk201euxgcv1x`. MP4 다운로드 성공, 30.016초, 1080×1920, audio true, 평균 -27.1dB, black-frame 비율 0. manifest에 실제 브랜드/자막 스타일을 확인했다. Chromium 종료 과정의 `Target closed` 경고는 있었으나 작업/QA/전체 스크립트 exit 0이다. 최초 수집 실패는 fixture 키워드 `science`가 준비된 자료 본문과 맞지 않아 `rocket`으로 수정했고, 권리/정책 gate를 우회하지 않았다.
+
+최종 Docker image inspect IDs: API `sha256:58b24a48f4585d28fc9d81465c24254e388bb265076de6eb633caa1537e17d3c`, worker `sha256:b745f909205ded6b9f64f1ae211976386cbe9375d7e28d1feddc9268dd1b82d4`. 로컬 이미지 식별자이며 registry 승격 증거가 아니다. 이미지 빌드의 15 package/app build도 PASS. 최종 API에는 기본 JSON parser 보완, worker에는 CJK 폰트가 포함됐다. 이미지 증거는 `.artifacts/pre-release/brand-scene-smoke.png`이며 Git에는 넣지 않는다.
+
+격리 환경 재현 명령(저장소 루트):
+
+```powershell
+docker compose -f docker-compose.acceptance.yml build api worker acceptance
+docker compose -f docker-compose.acceptance.yml up -d --wait api worker
+docker compose -f docker-compose.acceptance.yml run --rm --volume "${PWD}/scripts/verify-wizard-sample.mjs:/app/scripts/verify-wizard-sample.mjs:ro" -e TOPIC_SOURCE_PROVIDER=fixture acceptance node scripts/verify-wizard-sample.mjs
+docker compose -f docker-compose.acceptance.yml stop
+```
+
+이 명령은 격리 Compose의 테스트용 설정만 사용한다. 운영 `.env`를 주입하지 않는다. 완료 후 격리 컨테이너만 정지하고 DB/object 증거는 삭제하지 않았다. 기존 개발용 MySQL/Redis/MinIO는 유지했다.
+
+남은 제한: 실험은 길이 변수 하나의 제한된 가설 비교이며 인과 효과/통계적 유의성을 주장하지 않는다. 출력은 1080×1920 고정이다. 실제 Provider/SNS, production 배포, registry 승격, CI Gitleaks/Trivy는 실행하지 않았으며 아래 외부 검증 제한은 계속 유효하다. 유료 호출·실제 게시·push는 하지 않는다.
+
+## 2026-10-05 출시 전 정합성 보완 — 19.1 과거 기록
 
 대상: `implementation-plan.md` 19.1단계. 시작/원격 기준 SHA: `ab8758d898fe4a4c90f4ce5398b479a0d1c363ac`. 최신 원격 main도 동일함을 확인했다. 검증된 구현 commit SHA: `cb7b9fb3b1d799414de6fa8a5a367daf9b1efe40` (`fix: 출시 전 사용자 흐름과 제작 정합성 개선`, 60 files). 이후 변경은 이 SHA를 기록하는 문서 전용 커밋뿐이며 앱·설정·테스트 코드 변경은 없다. 최종 repository SHA는 인계 응답과 `git log -1 --format=%H`로 확인한다. 푸시·병합·production 배포와 실제 유료 API/SNS 호출은 하지 않았다.
 

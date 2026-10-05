@@ -170,7 +170,7 @@ export class DeterministicJobProcessor {
       try {
         const result = await this.assetPreparation.processAsset(input.payload, input.id);
         if (result.needsReview === true) {
-          await this.needsReview(input.id, attemptNumber, result);
+          await this.needsReview(input.id, attemptNumber, result, typeof result.reviewCode === "string" ? result.reviewCode : undefined);
           return;
         }
         await this.succeed(input.id, attemptNumber, result);

@@ -9,9 +9,10 @@ import {
 } from "@postbot/contracts";
 import { Prisma, type PrismaClient } from "@postbot/database";
 import { FakeLlmProvider, OpenAiLlmProvider, type LlmProvider } from "@postbot/providers";
-import { SceneDocumentSchema, type SceneDocument } from "@postbot/scene-schema";
+import { SceneDocumentSchema, VideoStyleSchema, type SceneDocument } from "@postbot/scene-schema";
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { assignProductionExperiment } from "@postbot/optimization";
 
 const promptVersion = "script-scene-v1";
 
@@ -46,6 +47,10 @@ export class ScriptGenerationProcessor {
 
   private async generate(input: ScriptGenerationJobPayload["generation"]): Promise<GeneratedWithUsage> {
     const config = loadConfig();
+    const experiment = await this.prisma.$transaction(async (tx) => {
+      const content = await tx.contentItem.upsert({ where: { channelId_topicKey: { channelId: input.idea.channelId, topicKey: `idea:${input.idea.id}` } }, create: { channelId: input.idea.channelId, topicKey: `idea:${input.idea.id}`, title: input.idea.title, status: "GENERATING" }, update: {} });
+      return input.request.partial === "full" ? assignProductionExperiment(tx, input.idea.channelId, content.id, input.request.platform ?? undefined) : null;
+    });
     const provider: LlmProvider = config.LLM_PROVIDER === "openai"
       ? new OpenAiLlmProvider({ apiKey: config.OPENAI_API_KEY, baseUrl: config.OPENAI_BASE_URL, timeoutMs: config.LLM_TIMEOUT_MS, inputUsdPerMillionTokens: config.LLM_INPUT_USD_PER_MILLION_TOKENS, outputUsdPerMillionTokens: config.LLM_OUTPUT_USD_PER_MILLION_TOKENS })
       : new FakeLlmProvider();
@@ -63,6 +68,7 @@ export class ScriptGenerationProcessor {
         const template = channel?.templates[0];
         const profile = channel?.outputProfiles[0];
         const subtitle = jsonObject(template?.subtitleStyle ?? null);
+        const visual = jsonObject(template?.visualStyle ?? null);
         const strategy = jsonObject(channel?.strategyVersions[0]?.strategy ?? null);
         const generationContext = {
           language: channel?.language ?? input.idea.language,
@@ -75,7 +81,8 @@ export class ScriptGenerationProcessor {
           captionStyle: profile?.captionStyle ?? null,
           voiceProfile: template?.voiceProfile ?? null,
           visualStyle: jsonObject(template?.visualStyle ?? null),
-          strategy: Object.keys(strategy).length > 0 ? strategy : null
+          strategy: experiment?.strategy ?? (Object.keys(strategy).length > 0 ? strategy : null),
+          experiment: experiment ? { experimentId: experiment.experimentId, arm: experiment.arm, assignmentKey: experiment.assignmentKey } : null
         };
         const response = await provider.generateScriptAndScene({
           model: config.LLM_MODEL, promptVersion, idempotencyKey: `${input.request.idempotencyKey}:attempt:${attempt}`,
@@ -84,11 +91,15 @@ export class ScriptGenerationProcessor {
           channelContext: generationContext
         });
         const structured = this.parse(response.structuredOutput, input.idea);
+        if (experiment && (Math.abs(structured.script.durationSeconds - experiment.strategy.durationSeconds) > 1 || Math.abs(structured.sceneDocument.durationInFrames / structured.sceneDocument.fps - experiment.strategy.durationSeconds) > 1)) throw new Error("EXPERIMENT_DURATION_NOT_APPLIED");
+        structured.sceneDocument.style = VideoStyleSchema.parse({ ...visual, captionColor: subtitle.color, captionBackground: subtitle.backgroundColor, captionFontSize: subtitle.fontSize, watermark: typeof visual.watermark === "string" ? visual.watermark : channel?.name ?? "Postbot" });
+        structured.sceneDocument.aiStockRatio = template?.aiStockRatio.toNumber() ?? 1;
         return { ...structured, model: response.model, usage: response.usage, estimatedCostUsd: response.estimatedCostUsd, generationContext, strategyVersion: channel?.strategyVersions[0]?.version ?? null };
       } catch (error) {
         lastError = error;
       }
     }
+    await this.prisma.contentItem.updateMany({ where: { channelId: input.idea.channelId, topicKey: `idea:${input.idea.id}`, status: "GENERATING", scriptVersions: { none: {} } }, data: { status: "FAILED" } });
     throw lastError instanceof Error ? lastError : new Error("LLM_GENERATION_FAILED");
   }
 

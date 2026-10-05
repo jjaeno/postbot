@@ -23,6 +23,11 @@ export class AutomationController {
     return this.automation.start(req.auth.workspaceId, body);
   }
 
+  @Post("runs/:runId/complete-setup")
+  completeSetup(@Req() req: AuthenticatedRequest, @Param("runId") runId: string) {
+    return this.automation.completeSampleSetup(req.auth.workspaceId, runId);
+  }
+
   @Post("budgets")
   setBudget(@Req() req: AuthenticatedRequest, @Body() body: unknown) {
     return this.automation.setBudget(req.auth.workspaceId, req.auth.userId, body);

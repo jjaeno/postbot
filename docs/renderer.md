@@ -1,5 +1,11 @@
 # Renderer
 
+## 19.2 브랜드·자막 snapshot
+
+SCRIPT worker는 현재 template의 스타일·AI 비율을 SceneDocument에 기록한다. Remotion은 이 snapshot의 brand/background 색상, Arial/sans-serif/serif, watermark, caption color/background/fontSize(32~64)를 직접 적용한다. logoAssetId는 channel-owned GRAPHIC의 현재 권리를 검사하고 storage bytes를 data URL로 전달하며 SceneVersion usage로 기록한다. 임의 외부 logo URL을 renderer에서 불러오지 않는다. 기존 예약의 style은 설정 변경으로 덮어쓰지 않는다.
+
+`smoke:asset`는 장면 이미지뿐 아니라 녹색 로고, 노란 브랜드 워터마크, serif 글꼴, 노란 자막/파란 배경을 실제 Chromium still에 합성한다. 전체 MP4 QA와 브라우저 API mock은 서로 다른 검증이다.
+
 ## Renderer 1.1 scene image contract
 
 `RenderInput.sceneAssets`는 scene ID와 storage에서 내려받은 image data URL의 배열이다. Remotion composition은 해당 scene 시간 구간에 이미지를 `object-fit: cover` 배경으로 표시하고, 가독성 overlay와 caption을 그 위에 합성한다. render manifest에는 사용한 scene asset ID와 목적이 기록된다.
@@ -15,3 +21,5 @@
 QA는 1080x1920, duration 오차, audio stream, 무음/손상 audio, black-frame 비율, caption safe-area, ffprobe/FFmpeg 오류를 검사한다. 실패와 성공 모두 임시 디렉터리를 정리한다. `apps/renderer/scripts/smoke.mjs`는 15초와 60초 fixture를 렌더하고 ffprobe 결과를 검증한다.
 
 Production worker/renderer image에는 고정 Remotion 버전의 Chrome Headless Shell을 build 시점에 내려받아 포함한다. 따라서 런타임 네트워크에 의존해 브라우저를 설치하지 않는다. image에는 `ffmpeg`와 `ffprobe` 및 Chromium shared libraries가 있고 non-root `node` 사용자로 실행된다.
+
+19.2 runtime에는 `fonts-noto-cjk`를 포함한다. Arial/serif 등 선택한 글꼴에 한글 글리프가 없으면 CJK fallback으로 표시한다. 한글 overlay/caption은 브랜드 still smoke에서 실제 화면으로 확인한다.

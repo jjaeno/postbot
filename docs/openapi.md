@@ -117,7 +117,11 @@ For callbacks accepting HTML, the server redirects with HTTP 303 to the configur
 
 Approval, policy and metadata are platform-scoped. Editing metadata preserves the rendered SceneVersion and rights evidence, creates a new ScriptVersion, requires recheck/reapproval and holds old scheduled plans. Reservations enforce actual occupied slots and channel daily platform limits within a channel lock. A worker claims a scheduled plan atomically before upload, so cancellation cannot race an already-started publish.
 
-Experiment completion is rejected with `EXPERIMENT_RESULT_ANALYSIS_NOT_IMPLEMENTED`: automatic production assignment/result comparison is not a supported feature. Stored experiment state alone is not a completed analysis.
+`GET/POST /optimization/experiments` lists/creates platform-scoped duration experiments. Creation accepts periodDays, per-arm minSampleSize, control/variant durationSeconds, successCriteria.direction/minRelativeImprovement and optional stopCriteria.maxAssignments. `complete` compares available metrics of actually published experiment-tagged outputs, rejects insufficient per-arm evidence and preserves result snapshot IDs. It does not claim causal effects or auto-apply a winner.
+
+`POST /channels` optionally accepts `startPaused` for onboarding drafts. `POST /automation/runs` accepts `sample: true`: it can produce a paused draft, but PUBLISH is permanently held by `SAMPLE_REVIEW_REQUIRED`, including retries. Step responses include output IDs for preview lookup. `POST /automation/runs/:runId/complete-setup` requires completed sample media, current policy PASS/approval and a nonexpired connected account, cancels sample publish steps and activates the channel.
+
+Owner-only `POST /channels/:channelId/stock-assets` accepts PNG/JPEG bodyBase64 (up to 1MB), mimeType, licenseName, HTTPS proofUrl and explicit commercialUseAllowed/derivativeAllowed true. Optional assetKind is stock or logo. GET lists currently eligible stock IDs. Template visual/subtitle settings are validated and saved into immutable scene render snapshots.
 
 ## Generation Contract
 

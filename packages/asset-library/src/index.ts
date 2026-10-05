@@ -36,6 +36,21 @@ export type StoreAssetInput = { channelId: string | null; kind: "IMAGE" | "VIDEO
 
 export class AssetRepository {
   constructor(private readonly prisma: PrismaClient, private readonly storage: StorageProvider) {}
+  async getLicense(assetId: string): Promise<AssetLicenseSnapshot | null> {
+    const license = await this.prisma.assetLicense.findFirst({ where: { assetId }, orderBy: [{ createdAt: "desc" }, { id: "desc" }] });
+    if (!license) return null;
+    const now = new Date();
+    const expired = (license.validUntil && license.validUntil <= now) || (license.validFrom && license.validFrom > now);
+    return { status: expired ? "expired" : license.status === "VERIFIED" ? "verified" : license.status === "REJECTED" ? "rejected" : license.status === "EXPIRED" ? "expired" : "unknown", commercialUseAllowed: license.commercialUseAllowed, derivativeAllowed: license.derivativeAllowed, attributionRequired: license.attributionRequired, attributionText: license.attributionText, proofUrl: license.proofUrl };
+  }
+
+  async findPreparedImage(input: { channelId: string; contentItemId: string; sceneVersionId: string; purpose: string }): Promise<{ assetId: string; fallback: boolean; needsReview: boolean } | null> {
+    const usage = await this.prisma.assetUsage.findFirst({ where: { contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, contentItem: { channelId: input.channelId }, purpose: sceneAssetUsageKey(input.purpose, input.sceneVersionId), asset: { kind: "IMAGE" } } });
+    if (!usage) return null;
+    const snapshot = usage.usageSnapshot;
+    const fallback = Boolean(snapshot && typeof snapshot === "object" && !Array.isArray(snapshot) && snapshot.fallback === true);
+    return { assetId: usage.assetId, fallback, needsReview: assetNeedsReview(await this.getLicense(usage.assetId)) };
+  }
   async store(input: StoreAssetInput): Promise<{ assetId: string; duplicate: boolean }> {
     const checksum = checksumSha256(input.body);
     const existing = await this.prisma.asset.findUnique({ where: { checksumSha256: checksum } });
@@ -65,6 +80,13 @@ export class AssetRepository {
     return this.findAllowedFallback("AUDIO");
   }
 
+  async selectLicensedStock(channelId: string): Promise<Array<{ assetId: string; storageKey: string }>> {
+    const candidates = await this.prisma.asset.findMany({ where: { channelId, kind: "IMAGE", origin: { in: ["STOCK_FREE", "STOCK_PAID", "PUBLIC_DOMAIN", "INTERNAL"] } }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
+    const allowed = [];
+    for (const candidate of candidates) if (!assetNeedsReview(await this.getLicense(candidate.id))) allowed.push({ assetId: candidate.id, storageKey: candidate.storageKey });
+    return allowed;
+  }
+
   async recordProviderCost(input: { contentItemId: string; productionJobId?: string; provider: string; model: string; operation: string; quantity: number; unit: string; category: string; estimatedCostUsd: string; idempotencyKey: string }): Promise<void> {
     await this.prisma.$transaction(async (tx) => {
       const existing = await tx.providerUsage.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
@@ -88,13 +110,17 @@ export class AssetRepository {
 export class AssetPreparationService {
   constructor(private readonly assets: AssetRepository, private readonly image: ImageProvider, private readonly tts: TtsProvider) {}
   async prepareImage(input: { channelId: string; contentItemId: string | null; sceneVersionId?: string | null; productionJobId?: string; purpose?: string; key: string; prompt: string; model: string; idempotencyKey: string }): Promise<{ assetId: string; fallback: boolean; needsReview: boolean }> {
+    if (input.contentItemId && input.sceneVersionId) {
+      const prepared = await this.assets.findPreparedImage({ channelId: input.channelId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose: input.purpose ?? "scene-image" });
+      if (prepared) return prepared;
+    }
     try {
       const result = await this.image.generate({ ...input, width: 1080, height: 1920 });
       const license = result.provider === "fake-image" ? { status: "verified" as const, commercialUseAllowed: true, derivativeAllowed: true, attributionRequired: false, attributionText: null, proofUrl: null } : { status: "unknown" as const, commercialUseAllowed: false, derivativeAllowed: false, attributionRequired: false, attributionText: null, proofUrl: null };
       const stored = await this.assets.store({ channelId: input.channelId, kind: "IMAGE", origin: "AI_GENERATED", key: input.key, body: result.bytes, mimeType: result.mimeType, source: { provider: result.provider, model: result.model, prompt: input.prompt }, license });
       if (input.contentItemId) await this.assets.attachUsage({ assetId: stored.assetId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose: input.purpose ?? "scene-image", snapshot: { prompt: input.prompt, provider: result.provider, model: result.model, license: "provider-generated" } });
       if (input.contentItemId) await this.assets.recordProviderCost({ contentItemId: input.contentItemId, productionJobId: input.productionJobId, provider: result.provider, model: result.model, operation: "image-generation", quantity: 1, unit: "image", category: "image", estimatedCostUsd: result.estimatedCostUsd, idempotencyKey: `image:${input.idempotencyKey}` });
-      const needsReview = assetNeedsReview(license);
+      const needsReview = assetNeedsReview(await this.assets.getLicense(stored.assetId));
       if (needsReview && input.contentItemId) await this.assets.markContentNeedsReview(input.contentItemId);
       return { assetId: stored.assetId, fallback: false, needsReview };
     } catch {

@@ -39,7 +39,8 @@ describeIntegration("SCRIPT generation worker integration", () => {
     const suffix = randomUUID();
     const user = await prisma.user.create({ data: { email: `worker-${suffix}@example.org`, displayName: "Worker Test", passwordHash: "test-password" } });
     const workspace = await prisma.workspace.create({ data: { ownerId: user.id, name: "Worker Test", slug: `worker-${suffix}`, memberships: { create: { userId: user.id, role: "OWNER" } } } });
-    const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Worker Test", slug: `worker-${suffix}`, topic: "science", language: "en" } });
+    const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Worker Test", slug: `worker-${suffix}`, topic: "science", language: "en", outputProfiles: { create: { platform: "YOUTUBE", minDurationSeconds: 15, maxDurationSeconds: 60 } }, templates: { create: { version: 1, isActive: true, name: "Brand", tone: "Clear", voiceProfile: "neutral-ko", aiStockRatio: "0.5", subtitleStyle: { color: "#ffff00", backgroundColor: "#101010", fontSize: 40 }, visualStyle: { brandColor: "#ff00ff", fontFamily: "serif", watermark: "Worker brand" } } } } });
+    const experiment = await prisma.experiment.create({ data: { channelId: channel.id, status: "RUNNING", name: "Duration", hypothesis: "Duration", startedAt: new Date(), allocation: { platform: "YOUTUBE", periodDays: 7, control: { durationSeconds: 30 }, variant: { durationSeconds: 33 } }, successCriteria: { minRelativeImprovement: 0.1 }, targetMetric: "views", minSampleSize: 2 } });
     const idea = await prisma.contentIdea.create({
       data: {
         channelId: channel.id, title: "Reusable rocket test", summary: "A public test improved recovery.", canonicalUrl: "https://example.org/rocket", urlHash: suffix, contentHash: suffix,
@@ -73,6 +74,10 @@ describeIntegration("SCRIPT generation worker integration", () => {
     expect(contentItem.sceneVersions).toHaveLength(1);
     expect(completed.providerUsages).toHaveLength(1);
     expect(completed.providerUsages[0]?.costLedger).toHaveLength(1);
+    const assignment = await prisma.experimentAssignment.findUniqueOrThrow({ where: { experimentId_contentItemId: { experimentId: experiment.id, contentItemId: contentItem.id } } });
+    expect(contentItem.scriptVersions[0]?.durationSeconds?.toNumber()).toBe(assignment.arm === "control" ? 30 : 33);
+    expect(contentItem.scriptVersions[0]?.qualitySnapshot).toMatchObject({ generationContext: { experiment: { experimentId: experiment.id, arm: assignment.arm, assignmentKey: assignment.assignmentKey } } });
+    expect(contentItem.sceneVersions[0]?.sceneDocument).toMatchObject({ aiStockRatio: 0.5, style: { brandColor: "#ff00ff", fontFamily: "serif", watermark: "Worker brand", captionColor: "#ffff00", captionFontSize: 40 } });
   });
 
   it("cancels a running SCRIPT job before it creates generation records", async () => {

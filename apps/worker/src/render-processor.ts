@@ -1,5 +1,5 @@
 import { loadConfig } from "@postbot/config";
-import { readAssetUsagePurpose } from "@postbot/asset-library";
+import { readAssetUsagePurpose, AssetRepository, assetNeedsReview } from "@postbot/asset-library";
 import { RenderJobPayloadSchema } from "@postbot/contracts";
 import type { Prisma, PrismaClient } from "@postbot/database";
 import { FakeStorageProvider, S3StorageProvider, type StorageProvider } from "@postbot/providers";
@@ -61,6 +61,13 @@ export class RenderProcessor {
       return previous;
     }
     const sceneDocument = SceneDocumentSchema.parse(sceneVersion.sceneDocument);
+    let brandLogo: string | undefined;
+    if (sceneDocument.style?.logoAssetId) {
+      const logo = await this.prisma.asset.findFirst({ where: { id: sceneDocument.style.logoAssetId, channelId: input.channelId, kind: "GRAPHIC" } });
+      if (!logo || assetNeedsReview(await new AssetRepository(this.prisma, this.storage).getLicense(logo.id))) throw new Error("BRAND_LOGO_LICENSE_REQUIRED");
+      brandLogo = `data:${logo.mimeType};base64,${Buffer.from(await this.storage.download(logo.storageKey)).toString("base64")}`;
+      await new AssetRepository(this.prisma, this.storage).attachUsage({ assetId: logo.id, contentItemId: input.contentItemId, sceneVersionId: sceneVersion.id, purpose: "brand-logo", snapshot: { license: "verified" } });
+    }
     const platformKey = sceneVersion.platform ?? "COMMON";
     const usages = await this.prisma.assetUsage.findMany({
       where: { contentItemId: input.contentItemId, sceneVersionId: sceneVersion.id },
@@ -88,7 +95,7 @@ export class RenderProcessor {
         const bytes = await this.storage.download(usage.asset.storageKey);
         sceneAssets[sceneId] = `data:${usage.asset.mimeType};base64,${Buffer.from(bytes).toString("base64")}`;
       }
-      await this.withTimeout(this.renderer.render({ sceneDocument, captions, sceneAssets, outputLocation: draftPath }));
+      await this.withTimeout(this.renderer.render({ sceneDocument, captions, sceneAssets, brandLogo, outputLocation: draftPath }));
       await this.withTimeout(this.postProcessor.postprocess({ videoInput: draftPath, output: outputPath, narrationInput: narrationPath, backgroundInput: backgroundPath }));
       await this.withTimeout(this.postProcessor.thumbnail(outputPath, thumbnailPath));
       const qa = await this.withTimeout(this.postProcessor.probe(outputPath));
@@ -105,6 +112,7 @@ export class RenderProcessor {
         thumbnailKey,
         captions: captions.length,
         sceneAssets: Object.keys(sceneAssets),
+        style: sceneDocument.style ?? null,
         qa
       };
       await this.prisma.sceneVersion.update({ where: { id: sceneVersion.id }, data: { renderManifest: manifest } });

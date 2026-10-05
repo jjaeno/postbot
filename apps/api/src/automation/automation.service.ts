@@ -128,7 +128,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     }
 
     const channel = await this.prisma.channel.findFirst({
-      where: { id: input.channelId, workspaceId, status: "ACTIVE" },
+      where: { id: input.channelId, workspaceId, status: input.sample ? { in: ["ACTIVE", "PAUSED"] } : "ACTIVE" },
       include: {
         platformAccounts: true,
         scheduleRules: { where: { isActive: true } },
@@ -153,14 +153,14 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     });
     const count = (status: "GENERATING" | "REVIEW_REQUIRED" | "APPROVED" | "SCHEDULED"): number =>
       counts.find((entry) => entry.status === status)?._count._all ?? 0;
-    const deficit = selectedIdea ? 1 : inventoryDeficit(
+    const deficit = selectedIdea || input.sample ? 1 : inventoryDeficit(
       channel.minInventoryCount,
       count("GENERATING"),
       count("REVIEW_REQUIRED"),
       count("APPROVED"),
       count("SCHEDULED")
     );
-    const missingFullAutoSetup = channel.automationMode === "FULL_AUTO" && platforms.some((platform) =>
+    const missingFullAutoSetup = !input.sample && channel.automationMode === "FULL_AUTO" && platforms.some((platform) =>
       !channel.platformAccounts.some((account) => account.status === "CONNECTED" && account.platform === platform)
       || !channel.scheduleRules.some((rule) => rule.platform === null || rule.platform === platform)
     );
@@ -182,7 +182,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     ];
     const reservation = await this.prisma.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM channels WHERE id = ${channel.id} FOR UPDATE`;
-      const active = !selectedIdea ? await tx.automationRun.findFirst({ where: { channelId: channel.id, status: { in: ["QUEUED", "RUNNING", "PAUSED", "DRAINING"] } }, orderBy: { createdAt: "desc" }, include: { steps: { orderBy: [{ platform: "asc" }, { createdAt: "asc" }] } } }) : null;
+      const active = !selectedIdea && !input.sample ? await tx.automationRun.findFirst({ where: { channelId: channel.id, status: { in: ["QUEUED", "RUNNING", "PAUSED", "DRAINING"] } }, orderBy: { createdAt: "desc" }, include: { steps: { orderBy: [{ platform: "asc" }, { createdAt: "asc" }] } } }) : null;
       if (active) return { run: active, created: false };
       const created = await tx.automationRun.create({
       data: {
@@ -196,6 +196,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
           completed: [],
           platforms,
           partial: input.partial
+          , sample: input.sample === true
         },
         nextRunAt: deficit === 0 || heldReason ? null : new Date(),
         steps: { create: steps },
@@ -221,6 +222,26 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     });
     if (!run) throw new NotFoundException("AUTOMATION_RUN_NOT_FOUND");
     return this.toResponse(run);
+  }
+
+  async completeSampleSetup(workspaceId: string, runId: string): Promise<{ ok: true }> {
+    const run = await this.prisma.automationRun.findFirst({ where: { id: runId, channel: { workspaceId } }, include: { steps: true, channel: { include: { platformAccounts: { include: { credential: true } }, templates: { where: { isActive: true }, orderBy: { version: "desc" }, take: 1 }, outputProfiles: { where: { isActive: true } } } } } });
+    if (!run || asObject(run.checkpoint).sample !== true) throw new NotFoundException("SAMPLE_RUN_NOT_FOUND");
+    if (!run.channel.platformAccounts.some((account) => account.status === "CONNECTED" && account.credential && (!account.credential.expiresAt || account.credential.expiresAt > new Date()))) throw new ConflictException("CONNECTED_PLATFORM_ACCOUNT_REQUIRED");
+    if (run.steps.some((step) => ["COLLECT", "SCRIPT", "ASSET", "TTS", "RENDER"].includes(step.stage) && step.status !== "SUCCEEDED")) throw new ConflictException("SAMPLE_NOT_READY");
+    for (const profile of run.channel.outputProfiles) {
+      const output = asObject(run.steps.find((step) => step.stage === "SCRIPT" && step.platform === profile.platform)?.output ?? null);
+      if (typeof output.contentItemId !== "string" || typeof output.sceneVersionId !== "string") throw new ConflictException("SAMPLE_NOT_READY");
+      const scene = await this.prisma.sceneVersion.findUnique({ where: { id: output.sceneVersionId }, include: { scriptVersion: true } });
+      const check = await this.prisma.policyCheck.findFirst({ where: { contentItemId: output.contentItemId, platform: profile.platform }, orderBy: { checkedAt: "desc" } });
+      if (!scene?.renderManifest || !scene.scriptVersion || asObject(scene.scriptVersion.qualitySnapshot).reviewStatus !== "APPROVED" || check?.status !== "PASS" || check.checkedAt < scene.createdAt || (run.channel.templates[0] && run.channel.templates[0].createdAt > scene.createdAt)) throw new ConflictException("SAMPLE_PREVIEW_AND_POLICY_APPROVAL_REQUIRED");
+    }
+    await this.prisma.$transaction([
+      this.prisma.channel.update({ where: { id: run.channelId }, data: { status: "ACTIVE" } }),
+      this.prisma.automationRun.update({ where: { id: run.id }, data: { status: "SUCCEEDED", pausedReason: null, nextRunAt: null } }),
+      this.prisma.automationStep.updateMany({ where: { automationRunId: run.id, stage: "PUBLISH" }, data: { status: "CANCELLED", finishedAt: new Date() } })
+    ]);
+    return { ok: true };
   }
 
   async list(workspaceId: string, channelId?: string): Promise<AutomationRunResponse[]> {
@@ -435,6 +456,13 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
       where: { automationRunId: runId, stage, branchKey: branchKey(platform) }
     });
     if (!step || ["SUCCEEDED", "CANCELLED", "SKIPPED"].includes(step.status)) return;
+    if (stage === "PUBLISH") {
+      const run = await this.prisma.automationRun.findUniqueOrThrow({ where: { id: runId }, select: { checkpoint: true } });
+      if (asObject(run.checkpoint).sample === true) {
+        await this.holdStep(runId, stage, platform, "SAMPLE_REVIEW_REQUIRED");
+        return;
+      }
+    }
     if (step.productionJobId) {
       const existingJob = await this.prisma.productionJob.findUnique({
         where: { id: step.productionJobId },
@@ -854,7 +882,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
         const scene = await this.prisma.sceneVersion.findFirst({ where: { id: sceneVersionId, contentItemId, platform } });
         const document = asObject(scene?.sceneDocument ?? null);
         const scenes = Array.isArray(document.scenes) ? document.scenes : [];
-        if (stage === "ASSET") usage.imageCount = scenes.length;
+        if (stage === "ASSET") usage.imageCount = Math.round(scenes.length * (typeof document.aiStockRatio === "number" ? document.aiStockRatio : 1));
         else {
           const frames = typeof document.durationInFrames === "number" ? document.durationInFrames : 0;
           const fps = typeof document.fps === "number" ? document.fps : 0;

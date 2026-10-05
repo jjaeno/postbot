@@ -36,6 +36,7 @@ export const estimateAutomationStageCost = (
   if (stage === "ASSET") {
     const imageCount = usage.imageCount ?? 0;
     const rate = config.IMAGE_PROVIDER === "fake" ? 0.001 : config.IMAGE_USD_PER_OUTPUT;
+    if (usage.imageCount === 0) return { stage, provider: "licensed-stock", model: "owner-library", amountUsd: 0, usage: { imageCount: 0 }, pricing: {} };
     if (imageCount <= 0 || rate <= 0) return null;
     return { stage, provider: config.IMAGE_PROVIDER, model: config.IMAGE_MODEL, amountUsd: rounded(imageCount * rate), usage: { imageCount }, pricing: { usdPerOutput: rate } };
   }

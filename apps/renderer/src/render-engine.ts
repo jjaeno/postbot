@@ -14,6 +14,7 @@ export type RenderInput = {
   readonly sceneDocument: SceneDocument;
   readonly captions: readonly CaptionTiming[];
   readonly sceneAssets?: Readonly<Record<string, string>>;
+  readonly brandLogo?: string;
   readonly outputLocation: string;
 };
 
@@ -32,7 +33,7 @@ export class RemotionVideoRenderer implements VideoRenderer {
     await mkdir(dirname(input.outputLocation), { recursive: true });
     const entryPoint = fileURLToPath(new URL("./remotion-entry.js", import.meta.url));
     const serveUrl = await bundle({ entryPoint });
-    const inputProps = { sceneDocument: input.sceneDocument, captions: input.captions, sceneAssets: input.sceneAssets ?? {} };
+    const inputProps = { sceneDocument: input.sceneDocument, captions: input.captions, sceneAssets: input.sceneAssets ?? {}, brandLogo: input.brandLogo };
     const composition = await selectComposition({ serveUrl, id: "PostbotShort", inputProps });
     await renderMedia({
       composition,

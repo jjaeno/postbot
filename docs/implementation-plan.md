@@ -1074,6 +1074,16 @@ feature 목록, 비교·신뢰도 규칙, 자동 적용 허용 범위, 실험 �
 
 ## 요구사항 추적
 
+### 19.2단계 — 최종 명세 점검 결함 보완
+
+**상태:** 구현·필수 로컬 검증 완료 — PASS_WITH_EXTERNAL_VERIFICATION_PENDING (실 Provider/SNS/CI 제한은 acceptance report 참조)
+
+범위: 권리 승인 후 기존 자산을 재사용해 제작 재개, 실제 사용 플랫폼만 승인/예약 무효화, ElevenLabs voice 설정 매핑, 제한된 성과 비교 실험의 제작 배정·결과 계산, 채널 브랜드/자막·AI/스톡 비율 반영, 계정 연결과 실제 샘플 제작·정책 검사를 포함하는 마법사.
+
+필수 검증: 변경 app/package lint·typecheck·build, 권리 재개/플랫폼 격리 DB 회귀, Provider voice mock, 실험 배정/비교 unit·DB 회귀, 마법사 Playwright, 브랜드·장면 이미지 실제 renderer smoke. 유료 Provider/SNS/운영 배포는 실행하지 않는다. 기존 성공 검증은 영향 없는 경우 반복하지 않는다.
+
+Commit: `fix: 최종 명세 점검 결함과 누락 기능 보완`
+
 세부 제품 요구사항과 각 단계의 추적 관계는 기능 명세에서 관리한다.
 
 구현 계획에는 **단계 범위와 완료 조건만 유지**하며 기능 명세의 전체 내용을 중복 복사하지 않는다.

@@ -3,6 +3,9 @@ import type { EnqueueJobInput } from "@postbot/jobs";
 import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
 import { DeterministicJobProcessor } from "./job-processor.js";
+import { AssetPreparationProcessor } from "./asset-preparation-processor.js";
+import { AssetRepository } from "@postbot/asset-library";
+import { FakeStorageProvider } from "@postbot/providers";
 
 const enabled = process.env.RUN_DB_INTEGRATION === "1" ? describe : describe.skip;
 const prisma = new PrismaClient();
@@ -36,5 +39,26 @@ enabled("asset and TTS worker integration", () => {
     await expect(prisma.productionJob.findUniqueOrThrow({ where: { id: fallbackJob.id } })).resolves.toMatchObject({ status: "SUCCEEDED", result: { assets: [{ fallback: true }] } });
     await expect(prisma.providerUsage.count({ where: { contentItemId: contentItem.id, operation: "speech-synthesis" } })).resolves.toBe(1);
     await expect(prisma.costLedger.count({ where: { contentItemId: contentItem.id, category: "tts" } })).resolves.toBe(1);
+  });
+  it("honors a mixed snapshot, holds before paid work without stock and preserves assignments on retry", async () => {
+    process.env.STORAGE_PROVIDER = "fake"; process.env.IMAGE_PROVIDER = "fake";
+    const fixture = await seed();
+    const sceneDocument = { schemaVersion: "1.0.0", title: "Mixed", width: 1080, height: 1920, fps: 30, durationInFrames: 120, aiStockRatio: 0.5, scenes: Array.from({ length: 4 }, (_, index) => ({ id: `scene-${index}`, startFrame: index * 30, durationInFrames: 30, visualPrompt: `${fixture.suffix}:${index}`, narration: { text: "Fixture", sourceUrl: "https://example.com/fixture" }, overlays: [{ kind: "fact", text: "Fixture" }] })) };
+    await prisma.sceneVersion.update({ where: { id: fixture.sceneVersion.id }, data: { sceneDocument } });
+    const payload = { assetPreparation: { channelId: fixture.channel.id, contentItemId: fixture.contentItem.id, sceneVersionId: fixture.sceneVersion.id, platform: "YOUTUBE", prompt: fixture.suffix, idempotencyKey: `mix-${fixture.suffix}` } };
+    const job = await prisma.productionJob.create({ data: { channelId: fixture.channel.id, contentItemId: fixture.contentItem.id, type: "ASSET", queueName: "asset", idempotencyKey: `mix-${fixture.suffix}`, payload } });
+    const processor = new AssetPreparationProcessor(prisma);
+    expect(await processor.processAsset(payload, job.id)).toMatchObject({ assets: [], needsReview: true, reviewCode: "STOCK_ASSET_REQUIRED" });
+    expect(await prisma.providerUsage.count({ where: { productionJobId: job.id } })).toBe(0);
+    const assets = new AssetRepository(prisma, new FakeStorageProvider());
+    const stock = await assets.store({ channelId: fixture.channel.id, kind: "IMAGE", origin: "STOCK_FREE", key: `stock-${fixture.suffix}`, body: new TextEncoder().encode(`stock-${fixture.suffix}`), mimeType: "image/png", source: { provider: "fixture" }, license: { status: "verified", commercialUseAllowed: true, derivativeAllowed: true, attributionRequired: false, attributionText: null, proofUrl: "https://example.com/license" } });
+    const result = await processor.processAsset(payload, job.id);
+    expect(result.needsReview).toBe(false);
+    const usages = await prisma.assetUsage.findMany({ where: { sceneVersionId: fixture.sceneVersion.id }, include: { asset: true } });
+    expect(usages.filter((usage) => usage.asset.origin === "AI_GENERATED")).toHaveLength(2);
+    expect(usages.filter((usage) => usage.assetId === stock.assetId)).toHaveLength(2);
+    expect(await processor.processAsset(payload, job.id)).toEqual(result);
+    expect(await prisma.providerUsage.count({ where: { productionJobId: job.id, operation: "image-generation" } })).toBe(2);
+    expect(await prisma.assetUsage.count({ where: { sceneVersionId: fixture.sceneVersion.id } })).toBe(4);
   });
 });

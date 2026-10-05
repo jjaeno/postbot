@@ -13,6 +13,7 @@
     "test": "vitest run src --passWithNoTests"
   },
   "dependencies": {
+    "@postbot/optimization": "workspace:*",
     "@nestjs/common": "^11.1.9",
     "@nestjs/core": "^11.1.9",
     "@postbot/asset-library": "workspace:*",

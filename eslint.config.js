@@ -30,7 +30,7 @@ export default tseslint.config(
     }
   },
   {
-    files: ["apps/renderer/scripts/**/*.mjs", "apps/web/scripts/**/*.mjs"],
+    files: ["apps/renderer/scripts/**/*.mjs", "apps/web/scripts/**/*.mjs", "scripts/verify-wizard-sample.mjs"],
     extends: [tseslint.configs.disableTypeChecked],
     languageOptions: {
       parserOptions: {

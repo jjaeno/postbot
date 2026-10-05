@@ -3,6 +3,8 @@ import { Prisma, type PrismaClient } from "@postbot/database";
 import { AssignExperimentRequestSchema, CreateExperimentRequestSchema, ExperimentActionRequestSchema, ExperimentResponseSchema, GenerateSuggestionsRequestSchema, OptimizationSettingsSchema, OptimizationSuggestionResponseSchema, SuggestionActionRequestSchema, UpdateOptimizationSettingsRequestSchema, type ExperimentResponse, type OptimizationSettings, type OptimizationSuggestionResponse } from "@postbot/contracts";
 import { createHash } from "node:crypto";
 import { OperationsService } from "../operations/operations.service.js";
+import { deterministicExperimentArm, compareExperimentArms } from "@postbot/optimization";
+export { deterministicExperimentArm } from "@postbot/optimization";
 
 const MIN_SAMPLE_SIZE = 4;
 const RULE_VERSION = "optimization-rules-v1";
@@ -12,7 +14,6 @@ const terminalExperiment = new Set(["COMPLETED", "CANCELLED", "STOPPED", "INCONC
 const asRecord = (value: Prisma.JsonValue | null): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value : {};
 const toInputJson = (value: unknown): Prisma.InputJsonValue => JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
-export const deterministicExperimentArm = (experimentId: string, contentItemId: string): "control" | "variant" => Number.parseInt(hash(`${experimentId}:${contentItemId}`).slice(0, 8), 16) % 2 === 0 ? "control" : "variant";
 const isProtected = (content: { title: string; topicKey: string }, settings: OptimizationSettings): boolean => {
   const text = `${content.title} ${content.topicKey}`.toLocaleLowerCase();
   return [...settings.protectedTopics, ...settings.protectedBrandPhrases, ...settings.prohibitedPatterns].some((entry) => text.includes(entry.toLocaleLowerCase()));
@@ -120,24 +121,80 @@ export class OptimizationService {
     this.requireOwner(role);
     const input = CreateExperimentRequestSchema.parse(raw);
     await this.channel(workspaceId, input.channelId);
-    const experiment = await this.prisma.experiment.create({ data: { channelId: input.channelId, name: input.name, hypothesis: input.hypothesis, allocation: toInputJson({ control: input.control, variant: input.variant }), successCriteria: toInputJson(input.successCriteria), targetMetric: input.targetMetric, minSampleSize: input.minSampleSize, stopCriteria: input.stopCriteria ? toInputJson(input.stopCriteria) : Prisma.DbNull } });
+    const profile = await this.prisma.platformOutputProfile.findFirst({ where: { channelId: input.channelId, platform: input.platform, isActive: true }, orderBy: { version: "desc" } });
+    const settings = await this.getSettings(workspaceId, input.channelId);
+    if (!profile || [input.control.durationSeconds, input.variant.durationSeconds].some((value) => value < profile.minDurationSeconds || value > profile.maxDurationSeconds) || Math.abs(input.variant.durationSeconds / input.control.durationSeconds - 1) > settings.maxChangeRatio) throw new ConflictException("EXPERIMENT_DURATION_OUTSIDE_ALLOWED_RANGE");
+    const experiment = await this.prisma.experiment.create({ data: { channelId: input.channelId, name: input.name, hypothesis: input.hypothesis, allocation: toInputJson({ control: input.control, variant: input.variant, platform: input.platform, periodDays: input.periodDays }), successCriteria: toInputJson(input.successCriteria), targetMetric: input.targetMetric, minSampleSize: input.minSampleSize, stopCriteria: input.stopCriteria ? toInputJson(input.stopCriteria) : Prisma.DbNull } });
     return this.experimentResponse(experiment);
   }
 
-  async experimentAction(workspaceId: string, role: string, experimentId: string, raw: unknown): Promise<ExperimentResponse> {
+  async listExperiments(workspaceId: string, channelId: string): Promise<ExperimentResponse[]> {
+    await this.channel(workspaceId, channelId);
+    return (await this.prisma.experiment.findMany({ where: { channelId }, orderBy: { createdAt: "desc" } })).map((item) => this.experimentResponse(item));
+  }
+
+  async experimentAction(workspaceId: string, role: string, experimentId: string, raw: unknown, userId?: string): Promise<ExperimentResponse> {
     this.requireOwner(role);
     const input = ExperimentActionRequestSchema.parse(raw);
-    if (input.action === "complete") throw new ConflictException("EXPERIMENT_RESULT_ANALYSIS_NOT_IMPLEMENTED");
     const experiment = await this.prisma.experiment.findFirst({ where: { id: experimentId, channel: { workspaceId } } });
     if (!experiment) throw new NotFoundException("EXPERIMENT_NOT_FOUND");
+    if (input.action === "complete" && experiment.status === "COMPLETED") return this.experimentResponse(experiment);
     if (terminalExperiment.has(experiment.status)) throw new ConflictException("EXPERIMENT_TERMINAL");
-    if (input.action === "start") {
-      const conflicting = await this.prisma.experiment.findFirst({ where: { channelId: experiment.channelId, status: "RUNNING", id: { not: experiment.id } } });
-      if (conflicting) throw new ConflictException("CONFLICTING_CHANNEL_EXPERIMENT");
+    if (input.action === "complete") {
+      if (!experiment.startedAt || !["RUNNING", "PAUSED"].includes(experiment.status)) throw new ConflictException("EXPERIMENT_NOT_STARTED");
+      const allocation = asRecord(experiment.allocation);
+      const platform = allocation.platform;
+      if (platform !== "YOUTUBE" && platform !== "INSTAGRAM" && platform !== "TIKTOK") throw new ConflictException("EXPERIMENT_PLATFORM_REQUIRED");
+      const end = new Date(Math.min(Date.now(), experiment.startedAt.getTime() + (typeof allocation.periodDays === "number" ? allocation.periodDays : 30) * 86_400_000));
+      const assignments = await this.prisma.experimentAssignment.findMany({
+        where: { experimentId },
+        include: { contentItem: { include: { publishPlans: {
+          where: { platform, status: "PUBLISHED" },
+          include: {
+            sceneVersion: { include: { scriptVersion: true } },
+            platformPost: { include: { analyticsSnapshots: {
+              where: { metric: experiment.targetMetric ?? "", status: "AVAILABLE", value: { not: null }, observedAt: { gte: experiment.startedAt, lte: end } },
+              orderBy: [{ observedAt: "desc" }, { revision: "desc" }]
+            } } }
+          }
+        } } } }
+      });
+      const control: number[] = []; const variant: number[] = []; const evidence: Array<{ contentItemId: string; arm: string; snapshotId: string; observedAt: string }> = [];
+      for (const assignment of assignments) {
+        const matching = assignment.contentItem.publishPlans.filter((plan) => {
+          const context = asRecord(asRecord(plan.sceneVersion?.scriptVersion?.qualitySnapshot ?? null).generationContext ?? null);
+          return asRecord(context.experiment ?? null).assignmentKey === assignment.assignmentKey && plan.platformPost && plan.platformPost.publishedAt >= assignment.assignedAt && plan.platformPost.publishedAt <= end;
+        });
+        const snapshots = matching.flatMap((plan) => plan.platformPost?.analyticsSnapshots.filter((metric) => metric.observedAt >= plan.platformPost!.publishedAt) ?? []).sort((left, right) => right.observedAt.getTime() - left.observedAt.getTime() || right.revision - left.revision);
+        const snapshot = snapshots[0];
+        if (!snapshot?.value || !["control", "variant"].includes(assignment.arm)) continue;
+        const value = snapshot.value.toNumber();
+        if (!Number.isFinite(value)) continue;
+        (assignment.arm === "control" ? control : variant).push(value);
+        evidence.push({ contentItemId: assignment.contentItemId, arm: assignment.arm, snapshotId: snapshot.id, observedAt: snapshot.observedAt.toISOString() });
+      }
+      const criteria = asRecord(experiment.successCriteria);
+      const comparison = compareExperimentArms(control, variant, experiment.minSampleSize, typeof criteria.minRelativeImprovement === "number" ? criteria.minRelativeImprovement : 0.1, criteria.direction === "lower" ? "lower" : "higher");
+      if (!comparison.sufficient) throw new ConflictException({ code: "EXPERIMENT_INSUFFICIENT_SAMPLES", message: `각 그룹에 ${experiment.minSampleSize}건의 가용 지표가 필요합니다. 현재 대조 ${control.length}, 변경 ${variant.length}건입니다.` });
+      const changed = await this.prisma.experiment.updateMany({ where: { id: experimentId, status: { in: ["RUNNING", "PAUSED"] } }, data: { status: "COMPLETED", endedAt: end, result: toInputJson({ ...comparison, metric: experiment.targetMetric, platform, periodStart: experiment.startedAt.toISOString(), periodEnd: end.toISOString(), evidence, metricVersion: METRIC_VERSION }) } });
+      const completed = await this.prisma.experiment.findUniqueOrThrow({ where: { id: experimentId } });
+      if (completed.status !== "COMPLETED") throw new ConflictException("EXPERIMENT_TERMINAL");
+      if (userId && changed.count === 1) await this.operations.audit(workspaceId, userId, "experiment.complete", "experiment", experimentId);
+      return this.experimentResponse(completed);
     }
-    const status = input.action === "start" ? "RUNNING" : input.action === "pause" ? "PAUSED" : input.action === "stop" ? "STOPPED" : input.action === "inconclusive" ? "INCONCLUSIVE" : "COMPLETED";
+    if (input.action === "start") {
+      return this.experimentResponse(await this.prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM channels WHERE id = ${experiment.channelId} FOR UPDATE`;
+        const current = await tx.experiment.findUniqueOrThrow({ where: { id: experiment.id } });
+        if (terminalExperiment.has(current.status)) throw new ConflictException("EXPERIMENT_TERMINAL");
+        const conflicting = await tx.experiment.findFirst({ where: { channelId: experiment.channelId, status: "RUNNING", id: { not: experiment.id } } });
+        if (conflicting) throw new ConflictException("CONFLICTING_CHANNEL_EXPERIMENT");
+        return tx.experiment.update({ where: { id: current.id }, data: { status: "RUNNING", startedAt: current.startedAt ?? new Date() } });
+      }));
+    }
+    const status = input.action === "pause" ? "PAUSED" : input.action === "stop" ? "STOPPED" : "INCONCLUSIVE";
     const terminal = terminalExperiment.has(status);
-    return this.experimentResponse(await this.prisma.experiment.update({ where: { id: experiment.id }, data: { status, startedAt: input.action === "start" ? new Date() : undefined, endedAt: terminal ? new Date() : undefined, stopReason: terminal ? input.reason ?? null : undefined, result: terminal ? { outcome: status === "COMPLETED" ? "pending-analysis" : status.toLocaleLowerCase(), reason: input.reason ?? null } : undefined } }));
+    return this.experimentResponse(await this.prisma.experiment.update({ where: { id: experiment.id }, data: { status, endedAt: terminal ? new Date() : undefined, stopReason: terminal ? input.reason ?? null : undefined, result: terminal ? { outcome: status.toLocaleLowerCase(), reason: input.reason ?? null } : undefined } }));
   }
 
   async assignExperiment(workspaceId: string, experimentId: string, raw: unknown): Promise<{ arm: "control" | "variant"; assignmentKey: string }> {

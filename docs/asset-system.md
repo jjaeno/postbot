@@ -2,13 +2,17 @@
 
 ## Scene asset and cost behavior
 
-ASSET automation reads the selected platform `SceneDocument` and creates one image for every scene `visualPrompt`. Each usage is attached to the exact `sceneVersionId` with purpose `scene-image:<platform>:<sceneId>`; renderer lookup therefore cannot reuse another platform or older version accidentally.
+ASSET reads the selected platform SceneDocument snapshot, rounds `sceneCount * aiStockRatio`, and generates only that many AI images. Remaining scenes use this channel's currently verified stock/internal images. Missing stock holds with `STOCK_ASSET_REQUIRED` before any paid image call. Exact-scene retries reuse existing image usages and current licenses without regeneration. Each usage remains attached to `sceneVersionId` with logical purpose `scene-image:<platform>:<sceneId>`.
 
 The logical purpose is stored in `usageSnapshot.originalPurpose`. Scene-scoped DB purpose keys use an 80-character prefix plus a 128-bit digest of logical purpose and SceneVersion, within the existing VARCHAR(120) unique key. Identical fallback/image/audio bytes can therefore retain separate historical scene usages while retries remain idempotent. Renderer accepts legacy unsuffixed purposes but selects only the exact SceneVersion. No schema change or migration is introduced.
 
 Fallback lookup is channel-scoped and checks the latest license, commercial/derivative permission and validity dates; a historical approval cannot override a later rejection. Review/policy evidence also selects the current platform SceneVersion instead of combining older regeneration assets.
 
-Real image and TTS rights remain unknown, not implicitly commercial-use approved. The review screen records a human-reviewed HTTPS proof URL, license name, commercial/derivative confirmations and VERIFIED/REJECTED status. This records evidence, not automated legal verification. Changes invalidate policy/approval and hold scheduled plans until recheck/reapproval.
+Real image and TTS rights remain unknown, not implicitly commercial-use approved. The review screen records human-reviewed HTTPS proof, license name, and commercial/derivative permission. Changes invalidate only current outputs actually using that asset and hold only their scheduled plans. When every image in a held scene is allowed, its existing ASSET step becomes PENDING and the scheduler recovers the same production job. Historical asset usages remain intact. Approval is evidence recording, not legal verification.
+
+Owner-only `POST /channels/:channelId/stock-assets` registers PNG/JPEG bytes (1MB limit) and reviewed proof; `assetKind: logo` stores a GRAPHIC. GET lists eligible stock IDs without storage credentials. It never downloads arbitrary external URLs. Stock registration resumes stock-required steps. Logo rendering verifies channel ownership/current rights and records a scene usage.
+
+For ElevenLabs, `default`, `neutral`, and `neutral-ko` map to `ELEVENLABS_VOICE_ID`; an explicit custom profile remains a provider voice ID. Missing default configuration fails closed. Fake profiles do not need a real voice ID.
 
 Image and TTS Provider results record `ProviderUsage` and estimated `CostLedger` entries with the production job correlation. Configured real-provider rates are used for the estimate. A provider response is not mislabeled as an actual settled charge when the provider does not return billing settlement data.
 
