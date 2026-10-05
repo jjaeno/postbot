@@ -15,6 +15,17 @@ export type AssetLicenseSnapshot = {
 
 export const checksumSha256 = (body: Uint8Array): string => createHash("sha256").update(body).digest("hex");
 
+// The existing unique key includes purpose, not SceneVersion. Keep retries idempotent
+// without moving an older scene's usage to a newly generated scene.
+export const sceneAssetUsageKey = (purpose: string, sceneVersionId?: string | null): string =>
+  sceneVersionId ? `${purpose.slice(0, 80)}:v:${createHash("sha256").update(JSON.stringify([purpose, sceneVersionId])).digest("hex").slice(0, 32)}` : purpose;
+
+export const readAssetUsagePurpose = (usage: { purpose: string; usageSnapshot: Prisma.JsonValue | null }): string => {
+  const snapshot = usage.usageSnapshot;
+  return snapshot && typeof snapshot === "object" && !Array.isArray(snapshot) && typeof snapshot.originalPurpose === "string"
+    ? snapshot.originalPurpose : usage.purpose;
+};
+
 export const isLicenseAllowedForGeneration = (license: AssetLicenseSnapshot): boolean =>
   license.status === "verified" && license.commercialUseAllowed && license.derivativeAllowed;
 
@@ -40,8 +51,13 @@ export class AssetRepository {
     }
   }
 
-  async findAllowedFallback(kind: StoreAssetInput["kind"]): Promise<{ assetId: string; storageKey: string } | null> {
-    const asset = await this.prisma.asset.findFirst({ where: { kind, licenses: { some: { status: "VERIFIED", commercialUseAllowed: true, derivativeAllowed: true } } }, orderBy: { createdAt: "asc" } });
+  async findAllowedFallback(kind: StoreAssetInput["kind"], channelId: string | null = null): Promise<{ assetId: string; storageKey: string } | null> {
+    const candidates = await this.prisma.asset.findMany({ where: { kind, channelId, licenses: { some: { status: "VERIFIED", commercialUseAllowed: true, derivativeAllowed: true } } }, include: { licenses: { orderBy: { createdAt: "desc" }, take: 1 } }, orderBy: { createdAt: "asc" } });
+    const asset = candidates.find((candidate) => {
+      const license = candidate.licenses[0];
+      const now = new Date();
+      return license?.status === "VERIFIED" && license.commercialUseAllowed && license.derivativeAllowed && (!license.validFrom || license.validFrom <= now) && (!license.validUntil || license.validUntil > now);
+    });
     return asset ? { assetId: asset.id, storageKey: asset.storageKey } : null;
   }
 
@@ -49,18 +65,19 @@ export class AssetRepository {
     return this.findAllowedFallback("AUDIO");
   }
 
-  async recordTtsCost(input: { contentItemId: string; model: string; totalCharacters: number; estimatedCostUsd: string; idempotencyKey: string }): Promise<void> {
+  async recordProviderCost(input: { contentItemId: string; productionJobId?: string; provider: string; model: string; operation: string; quantity: number; unit: string; category: string; estimatedCostUsd: string; idempotencyKey: string }): Promise<void> {
     await this.prisma.$transaction(async (tx) => {
       const existing = await tx.providerUsage.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
       if (existing) return;
-      const usage = await tx.providerUsage.create({ data: { contentItemId: input.contentItemId, provider: "tts", model: input.model, operation: "speech-synthesis", quantity: new Prisma.Decimal(input.totalCharacters), unit: "character", estimatedCost: new Prisma.Decimal(input.estimatedCostUsd), idempotencyKey: input.idempotencyKey } });
-      await tx.costLedger.create({ data: { contentItemId: input.contentItemId, providerUsageId: usage.id, direction: "ESTIMATED", category: "tts", amount: new Prisma.Decimal(input.estimatedCostUsd), note: `model:${input.model}` } });
+      const usage = await tx.providerUsage.create({ data: { contentItemId: input.contentItemId, productionJobId: input.productionJobId, provider: input.provider, model: input.model, operation: input.operation, quantity: new Prisma.Decimal(input.quantity), unit: input.unit, estimatedCost: new Prisma.Decimal(input.estimatedCostUsd), idempotencyKey: input.idempotencyKey } });
+      await tx.costLedger.create({ data: { contentItemId: input.contentItemId, providerUsageId: usage.id, direction: "ESTIMATED", category: input.category, amount: new Prisma.Decimal(input.estimatedCostUsd), note: `model:${input.model}` } });
     });
   }
 
   async attachUsage(input: { assetId: string; contentItemId: string; sceneVersionId?: string | null; purpose: string; snapshot: Record<string, unknown> }): Promise<void> {
-    const snapshot = input.snapshot as Prisma.InputJsonObject;
-    await this.prisma.assetUsage.upsert({ where: { assetId_contentItemId_purpose: { assetId: input.assetId, contentItemId: input.contentItemId, purpose: input.purpose } }, update: { sceneVersionId: input.sceneVersionId, usageSnapshot: snapshot }, create: { assetId: input.assetId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose: input.purpose, usageSnapshot: snapshot } });
+    const snapshot = { ...input.snapshot, originalPurpose: input.purpose } as Prisma.InputJsonObject;
+    const purpose = sceneAssetUsageKey(input.purpose, input.sceneVersionId);
+    await this.prisma.assetUsage.upsert({ where: { assetId_contentItemId_purpose: { assetId: input.assetId, contentItemId: input.contentItemId, purpose } }, update: { sceneVersionId: input.sceneVersionId, usageSnapshot: snapshot }, create: { assetId: input.assetId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose, usageSnapshot: snapshot } });
   }
 
   markContentNeedsReview(contentItemId: string): Promise<void> {
@@ -70,27 +87,29 @@ export class AssetRepository {
 
 export class AssetPreparationService {
   constructor(private readonly assets: AssetRepository, private readonly image: ImageProvider, private readonly tts: TtsProvider) {}
-  async prepareImage(input: { channelId: string; contentItemId: string | null; sceneVersionId?: string | null; purpose?: string; key: string; prompt: string; model: string; idempotencyKey: string }): Promise<{ assetId: string; fallback: boolean; needsReview: boolean }> {
+  async prepareImage(input: { channelId: string; contentItemId: string | null; sceneVersionId?: string | null; productionJobId?: string; purpose?: string; key: string; prompt: string; model: string; idempotencyKey: string }): Promise<{ assetId: string; fallback: boolean; needsReview: boolean }> {
     try {
       const result = await this.image.generate({ ...input, width: 1080, height: 1920 });
       const license = result.provider === "fake-image" ? { status: "verified" as const, commercialUseAllowed: true, derivativeAllowed: true, attributionRequired: false, attributionText: null, proofUrl: null } : { status: "unknown" as const, commercialUseAllowed: false, derivativeAllowed: false, attributionRequired: false, attributionText: null, proofUrl: null };
       const stored = await this.assets.store({ channelId: input.channelId, kind: "IMAGE", origin: "AI_GENERATED", key: input.key, body: result.bytes, mimeType: result.mimeType, source: { provider: result.provider, model: result.model, prompt: input.prompt }, license });
       if (input.contentItemId) await this.assets.attachUsage({ assetId: stored.assetId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose: input.purpose ?? "scene-image", snapshot: { prompt: input.prompt, provider: result.provider, model: result.model, license: "provider-generated" } });
+      if (input.contentItemId) await this.assets.recordProviderCost({ contentItemId: input.contentItemId, productionJobId: input.productionJobId, provider: result.provider, model: result.model, operation: "image-generation", quantity: 1, unit: "image", category: "image", estimatedCostUsd: result.estimatedCostUsd, idempotencyKey: `image:${input.idempotencyKey}` });
       const needsReview = assetNeedsReview(license);
       if (needsReview && input.contentItemId) await this.assets.markContentNeedsReview(input.contentItemId);
       return { assetId: stored.assetId, fallback: false, needsReview };
     } catch {
-      const fallback = await this.assets.findAllowedFallback("IMAGE");
+      const fallback = await this.assets.findAllowedFallback("IMAGE", input.channelId);
       if (!fallback) throw new Error("IMAGE_GENERATION_FAILED_NO_FALLBACK");
       if (input.contentItemId) await this.assets.attachUsage({ assetId: fallback.assetId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose: input.purpose ?? "scene-image", snapshot: { fallback: true, license: "verified" } });
       return { assetId: fallback.assetId, fallback: true, needsReview: false };
     }
   }
-  async prepareTts(input: { channelId: string; contentItemId: string; sceneVersionId?: string | null; purpose?: string; key: string; text: string; voice: string; model: string; idempotencyKey: string }): Promise<{ assetId: string; timings: { text: string; startSeconds: number; endSeconds: number }[] }> {
+  async prepareTts(input: { channelId: string; contentItemId: string; sceneVersionId?: string | null; productionJobId?: string; purpose?: string; key: string; text: string; voice: string; model: string; idempotencyKey: string }): Promise<{ assetId: string; timings: { text: string; startSeconds: number; endSeconds: number }[] }> {
     const result = await this.tts.synthesize({ model: input.model, voice: input.voice, text: input.text, idempotencyKey: input.idempotencyKey });
-    const stored = await this.assets.store({ channelId: input.channelId, kind: "AUDIO", origin: "AI_GENERATED", key: input.key, body: result.bytes, mimeType: result.mimeType, source: { provider: result.provider, model: result.model, prompt: input.text }, license: { status: "verified", commercialUseAllowed: true, derivativeAllowed: true, attributionRequired: false, attributionText: null, proofUrl: null } });
+    const fake = result.provider === "fake-tts";
+    const stored = await this.assets.store({ channelId: input.channelId, kind: "AUDIO", origin: "AI_GENERATED", key: input.key, body: result.bytes, mimeType: result.mimeType, source: { provider: result.provider, model: result.model, prompt: input.text }, license: { status: fake ? "verified" : "unknown", commercialUseAllowed: fake, derivativeAllowed: fake, attributionRequired: false, attributionText: null, proofUrl: null } });
     await this.assets.attachUsage({ assetId: stored.assetId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose: input.purpose ?? "tts-narration", snapshot: { timings: result.timings, provider: result.provider, model: result.model, license: "provider-generated" } });
-    await this.assets.recordTtsCost({ contentItemId: input.contentItemId, model: result.model, totalCharacters: input.text.length, estimatedCostUsd: result.estimatedCostUsd, idempotencyKey: `tts:${input.idempotencyKey}` });
+    await this.assets.recordProviderCost({ contentItemId: input.contentItemId, productionJobId: input.productionJobId, provider: result.provider, model: result.model, operation: "speech-synthesis", quantity: input.text.length, unit: "character", category: "tts", estimatedCostUsd: result.estimatedCostUsd, idempotencyKey: `tts:${input.idempotencyKey}` });
     return { assetId: stored.assetId, timings: result.timings };
   }
 }

@@ -1,4 +1,5 @@
 import { loadConfig } from "@postbot/config";
+import { readAssetUsagePurpose } from "@postbot/asset-library";
 import { RenderJobPayloadSchema } from "@postbot/contracts";
 import type { Prisma, PrismaClient } from "@postbot/database";
 import { FakeStorageProvider, S3StorageProvider, type StorageProvider } from "@postbot/providers";
@@ -28,6 +29,11 @@ const readCaptions = (snapshot: Prisma.JsonValue | null): CaptionTiming[] => {
   });
 };
 
+export const sceneIdFromImagePurpose = (purpose: string, platform: string): string | null => {
+  const prefix = `scene-image:${platform}:`;
+  return purpose.startsWith(prefix) && purpose.length > prefix.length ? purpose.slice(prefix.length) : null;
+};
+
 export class RenderProcessor {
   private readonly storage: StorageProvider;
   private readonly renderer: VideoRenderer;
@@ -55,13 +61,14 @@ export class RenderProcessor {
       return previous;
     }
     const sceneDocument = SceneDocumentSchema.parse(sceneVersion.sceneDocument);
+    const platformKey = sceneVersion.platform ?? "COMMON";
     const usages = await this.prisma.assetUsage.findMany({
-      where: { contentItemId: input.contentItemId, purpose: { in: ["tts-narration", `tts-narration:${sceneVersion.platform ?? "COMMON"}`, "bgm", "sfx"] } },
+      where: { contentItemId: input.contentItemId, sceneVersionId: sceneVersion.id },
       include: { asset: true },
       orderBy: { createdAt: "asc" }
     });
-    const narration = usages.find((usage) => usage.purpose === `tts-narration:${sceneVersion.platform ?? "COMMON"}`) ?? usages.find((usage) => usage.purpose === "tts-narration");
-    const background = usages.find((usage) => usage.purpose === "bgm" || usage.purpose === "sfx");
+    const narration = usages.find((usage) => readAssetUsagePurpose(usage) === `tts-narration:${platformKey}`) ?? usages.find((usage) => readAssetUsagePurpose(usage) === "tts-narration");
+    const background = usages.find((usage) => ["bgm", "sfx"].includes(readAssetUsagePurpose(usage)));
     const captions = narration ? readCaptions(narration.usageSnapshot) : [];
     const expectedDuration = sceneDocument.durationInFrames / sceneDocument.fps;
     if (captions.some((caption) => caption.startSeconds < 0 || caption.endSeconds <= caption.startSeconds || caption.endSeconds > expectedDuration + 0.25 || caption.text.length > 160)) throw new Error("SUBTITLE_SAFE_AREA_OR_TIMING_INVALID");
@@ -74,7 +81,14 @@ export class RenderProcessor {
       const backgroundPath = background ? join(directory, "background.audio") : undefined;
       if (narration && narrationPath) await writeFile(narrationPath, await this.storage.download(narration.asset.storageKey));
       if (background && backgroundPath) await writeFile(backgroundPath, await this.storage.download(background.asset.storageKey));
-      await this.withTimeout(this.renderer.render({ sceneDocument, captions, outputLocation: draftPath }));
+      const sceneAssets: Record<string, string> = {};
+      for (const usage of usages) {
+        const sceneId = sceneIdFromImagePurpose(readAssetUsagePurpose(usage), platformKey);
+        if (!sceneId) continue;
+        const bytes = await this.storage.download(usage.asset.storageKey);
+        sceneAssets[sceneId] = `data:${usage.asset.mimeType};base64,${Buffer.from(bytes).toString("base64")}`;
+      }
+      await this.withTimeout(this.renderer.render({ sceneDocument, captions, sceneAssets, outputLocation: draftPath }));
       await this.withTimeout(this.postProcessor.postprocess({ videoInput: draftPath, output: outputPath, narrationInput: narrationPath, backgroundInput: backgroundPath }));
       await this.withTimeout(this.postProcessor.thumbnail(outputPath, thumbnailPath));
       const qa = await this.withTimeout(this.postProcessor.probe(outputPath));
@@ -85,11 +99,12 @@ export class RenderProcessor {
       await this.storage.upload({ key: thumbnailKey, body: await readFile(thumbnailPath), mimeType: "image/jpeg" });
       const manifest = {
         idempotencyKey: input.idempotencyKey,
-        rendererVersion: "1.0.0",
+        rendererVersion: "1.1.0",
         schemaVersion: sceneDocument.schemaVersion,
         videoKey,
         thumbnailKey,
         captions: captions.length,
+        sceneAssets: Object.keys(sceneAssets),
         qa
       };
       await this.prisma.sceneVersion.update({ where: { id: sceneVersion.id }, data: { renderManifest: manifest } });

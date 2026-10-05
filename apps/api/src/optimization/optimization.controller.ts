@@ -11,6 +11,7 @@ export class OptimizationController {
   @Post("settings") updateSettings(@Req() req: AuthenticatedRequest, @Body() body: unknown) { return this.optimization.updateSettings(req.auth.workspaceId, req.auth.workspace.role, req.auth.userId, body); }
   @Post("suggestions/generate") generate(@Req() req: AuthenticatedRequest, @Body() body: unknown) { return this.optimization.generate(req.auth.workspaceId, body); }
   @Get("suggestions") suggestions(@Req() req: AuthenticatedRequest, @Query("channelId") channelId: string) { return this.optimization.listSuggestions(req.auth.workspaceId, channelId); }
+  @Get("channels/:channelId/strategies") strategies(@Req() req: AuthenticatedRequest, @Param("channelId") channelId: string) { return this.optimization.listStrategies(req.auth.workspaceId, channelId); }
   @Post("suggestions/:suggestionId/action") suggestionAction(@Req() req: AuthenticatedRequest, @Param("suggestionId") id: string, @Body() body: unknown) { return this.optimization.suggestionAction(req.auth.workspaceId, req.auth.workspace.role, req.auth.userId, id, body); }
   @Post("experiments") createExperiment(@Req() req: AuthenticatedRequest, @Body() body: unknown) { return this.optimization.createExperiment(req.auth.workspaceId, req.auth.workspace.role, body); }
   @Post("experiments/:experimentId/action") experimentAction(@Req() req: AuthenticatedRequest, @Param("experimentId") id: string, @Body() body: unknown) { return this.optimization.experimentAction(req.auth.workspaceId, req.auth.workspace.role, id, body); }

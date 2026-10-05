@@ -1039,6 +1039,39 @@ feature 목록, 비교·신뢰도 규칙, 자동 적용 허용 범위, 실험 �
 `release: Postbot v1 구현 및 배포 준비 완료`
 
 ---
+# 19.1단계. 출시 전 핵심 기능·UX 정합성 보완
+
+**상태:** 내부 구현·필수 로컬 검증 완료 — PASS_WITH_EXTERNAL_VERIFICATION_PENDING (지원 제외 기능과 외부/CI 검증 제한은 acceptance report 참조)
+
+### 범위
+
+* 아이디어에서 내부 ID 입력 없이 전체 제작 자동화를 시작하고 중복 클릭을 방지한다.
+* 채널 언어·대상·톤·훅·CTA·길이·최신 적용 전략을 스크립트/장면 생성에 전달한다.
+* 장면별 이미지 생성 결과를 정확한 SceneVersion에 연결하고 Remotion 결과에 합성한다.
+* 예상 비용은 클라이언트 입력을 신뢰하지 않고 서버 설정과 실제 작업량으로 계산하며, 단가 미확정 실 Provider는 fail-closed 한다.
+* 플랫폼별 최신 스크립트·장면·정책 스냅샷·편집 메타데이터를 검수/예약/게시 전 과정에서 일치시킨다.
+* 여러 플랫폼을 순차 예약할 수 있게 하고 동일 계정·동일 시각 예약 충돌을 차단한다.
+* 예산 설정, 실제 예약/게시 캘린더, 채널별 분석/최적화 선택, 로컬 시간 입력을 사용자 화면에서 제공한다.
+
+### 필수 검증
+
+* 변경 package/app lint 및 typecheck
+* 비용 추정·플랫폼별 게시 선택·채널 생성 설정 반영 unit test
+* 아이디어→제작, 검수, 예산, 채널 wizard Playwright 여정
+* 장면 이미지가 Remotion 프레임에 나타나는 실제 Chromium still smoke
+* 전체 lint, typecheck, test, build
+* FFmpeg/ffprobe 및 Docker 기반 통합 검증은 실행 가능 환경에서 수행하고, 불가하면 acceptance report에 환경 원인을 기록한다.
+
+### 문서
+
+`docs/pre-release-remediation.md`와 관련 API, 자동화, asset, renderer, acceptance 문서를 갱신한다.
+
+### Commit
+
+`fix: 출시 전 사용자 흐름과 제작 정합성 개선`
+
+---
+
 ## 요구사항 추적
 
 세부 제품 요구사항과 각 단계의 추적 관계는 기능 명세에서 관리한다.

@@ -4,14 +4,16 @@ import type { SceneDocument } from "@postbot/scene-schema";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import type { CaptionTiming } from "./scene-math.js";
 import { assertRenderableDocument } from "./scene-math.js";
 
-export const RENDERER_VERSION = "1.0.0";
+export const RENDERER_VERSION = "1.1.0";
 
 export type RenderInput = {
   readonly sceneDocument: SceneDocument;
   readonly captions: readonly CaptionTiming[];
+  readonly sceneAssets?: Readonly<Record<string, string>>;
   readonly outputLocation: string;
 };
 
@@ -28,9 +30,9 @@ export class RemotionVideoRenderer implements VideoRenderer {
   async render(input: RenderInput): Promise<RenderedMedia> {
     assertRenderableDocument(input.sceneDocument);
     await mkdir(dirname(input.outputLocation), { recursive: true });
-    const entryPoint = new URL("./remotion-entry.js", import.meta.url).pathname;
+    const entryPoint = fileURLToPath(new URL("./remotion-entry.js", import.meta.url));
     const serveUrl = await bundle({ entryPoint });
-    const inputProps = { sceneDocument: input.sceneDocument, captions: input.captions };
+    const inputProps = { sceneDocument: input.sceneDocument, captions: input.captions, sceneAssets: input.sceneAssets ?? {} };
     const composition = await selectComposition({ serveUrl, id: "PostbotShort", inputProps });
     await renderMedia({
       composition,

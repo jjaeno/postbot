@@ -354,6 +354,19 @@ export type LlmGenerationRequest = {
   readonly platform: "YOUTUBE" | "INSTAGRAM" | "TIKTOK" | null;
   readonly sources: readonly LlmGenerationSource[];
   readonly partial: "full" | "hook" | "body" | "metadata" | "scene";
+  readonly channelContext?: {
+    readonly language: string;
+    readonly targetAudience: string | null;
+    readonly tone: string | null;
+    readonly hookStyle: string | null;
+    readonly callToActionStyle: string | null;
+    readonly minDurationSeconds: number | null;
+    readonly maxDurationSeconds: number | null;
+    readonly captionStyle: string | null;
+    readonly voiceProfile?: string | null;
+    readonly visualStyle?: Readonly<Record<string, unknown>>;
+    readonly strategy: Readonly<Record<string, unknown>> | null;
+  };
 };
 
 export type LlmTokenUsage = {
@@ -379,21 +392,28 @@ const fakeStructuredOutput = (request: LlmGenerationRequest): Record<string, unk
   if (!source) {
     return { error: "missing source" };
   }
+  const context = request.channelContext;
+  const minimum = context?.minDurationSeconds ?? 45;
+  const maximum = context?.maxDurationSeconds ?? 45;
+  const strategyDuration = context?.strategy?.durationSeconds;
+  const durationSeconds = Math.max(1, Math.round(typeof strategyDuration === "number" ? Math.max(minimum, Math.min(maximum, strategyDuration)) : (minimum + maximum) / 2));
+  const hook = context?.hookStyle ? `${context.hookStyle}: ${request.title}` : `What changed in ${request.title}?`;
+  const callToAction = context?.callToActionStyle ?? "Check the source before sharing.";
   return {
     planning: {
       title: request.title,
       summary: request.summary,
       metadata: {
-        description: `AI generated explainer. ${request.summary}\n\nSource: ${source.url}`,
+        description: `${context?.tone ? `${context.tone}. ` : ""}AI generated explainer for ${context?.targetAudience ?? "a general audience"}. ${request.summary}\n\nSource: ${source.url}`,
         hashtags: ["postbot", "shorts", request.topic.toLowerCase().replaceAll(" ", "-").slice(0, 40)]
       }
     },
     script: {
-      hook: `What changed in ${request.title}?`,
+      hook,
       body: `A verified source reports: ${request.summary}`,
-      callToAction: "Check the source before sharing.",
-      language: "en",
-      durationSeconds: 45
+      callToAction,
+      language: context?.language ?? "en",
+      durationSeconds
     },
     facts: [
       {
@@ -407,12 +427,12 @@ const fakeStructuredOutput = (request: LlmGenerationRequest): Record<string, unk
       width: 1080,
       height: 1920,
       fps: 30,
-      durationInFrames: 1350,
+      durationInFrames: durationSeconds * 30,
       scenes: [
         {
           id: "scene-1",
           startFrame: 0,
-          durationInFrames: 1350,
+          durationInFrames: durationSeconds * 30,
           visualPrompt: `Vertical short explainer about ${request.title}`,
           narration: {
             text: request.summary,
@@ -479,6 +499,8 @@ type OpenAiLlmProviderOptions = {
   readonly apiKey: string;
   readonly baseUrl: string;
   readonly timeoutMs: number;
+  readonly inputUsdPerMillionTokens?: number;
+  readonly outputUsdPerMillionTokens?: number;
 };
 
 type OpenAiResponse = {
@@ -597,7 +619,8 @@ export class OpenAiLlmProvider implements LlmProvider {
             topic: request.topic,
             platform: request.platform,
             partial: request.partial,
-            sources: request.sources
+            sources: request.sources,
+            channelContext: request.channelContext
           }),
           text: {
             format: {
@@ -629,7 +652,7 @@ export class OpenAiLlmProvider implements LlmProvider {
           completionTokens,
           totalTokens: usage?.total_tokens ?? promptTokens + completionTokens
         },
-        estimatedCostUsd: "0.000000"
+        estimatedCostUsd: (((promptTokens * (this.options.inputUsdPerMillionTokens ?? 0)) + (completionTokens * (this.options.outputUsdPerMillionTokens ?? 0))) / 1_000_000).toFixed(6)
       };
     } finally {
       clearTimeout(timeout);
@@ -680,12 +703,12 @@ export interface ImageProvider { generate(request: ImageGenerationRequest): Prom
 export class FakeImageProvider implements ImageProvider {
   generate(request: ImageGenerationRequest): Promise<ImageGenerationResult> {
     if (request.prompt.includes("provider-failure")) throw new Error("IMAGE_PROVIDER_FAILED");
-    return Promise.resolve({ provider: "fake-image", idempotencyKey: request.idempotencyKey, createdAt: new Date().toISOString(), model: request.model, mimeType: "image/svg+xml", bytes: new TextEncoder().encode(`<svg xmlns="http://www.w3.org/2000/svg" width="${request.width}" height="${request.height}"><text x="20" y="40">${request.prompt.slice(0, 80)}</text></svg>`), width: request.width, height: request.height, estimatedCostUsd: "0.000000" });
+    return Promise.resolve({ provider: "fake-image", idempotencyKey: request.idempotencyKey, createdAt: new Date().toISOString(), model: request.model, mimeType: "image/svg+xml", bytes: new TextEncoder().encode(`<svg xmlns="http://www.w3.org/2000/svg" width="${request.width}" height="${request.height}"><rect width="100%" height="100%" fill="#0f766e"/><text x="54" y="120" fill="white" font-size="42">${request.prompt.slice(0, 80)}</text></svg>`), width: request.width, height: request.height, estimatedCostUsd: "0.001000" });
   }
 }
 
 export class GoogleImageProvider implements ImageProvider {
-  constructor(private readonly options: { apiKey: string; timeoutMs: number }) {}
+  constructor(private readonly options: { apiKey: string; timeoutMs: number; usdPerOutput?: number }) {}
   async generate(request: ImageGenerationRequest): Promise<ImageGenerationResult> {
     if (!this.options.apiKey) throw new Error("GOOGLE_API_KEY is required when IMAGE_PROVIDER=google.");
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
@@ -695,7 +718,7 @@ export class GoogleImageProvider implements ImageProvider {
       const payload = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ inlineData?: { mimeType?: string; data?: string } }> } }> };
       const image = payload.candidates?.flatMap((candidate) => candidate.content?.parts ?? []).find((part) => part.inlineData?.data)?.inlineData;
       if (!image?.data || !image.mimeType) throw new Error("Google image API did not return inline image data.");
-      return { provider: "google", idempotencyKey: request.idempotencyKey, createdAt: new Date().toISOString(), model: request.model, mimeType: image.mimeType, bytes: Uint8Array.from(Buffer.from(image.data, "base64")), width: request.width, height: request.height, estimatedCostUsd: "0.000000" };
+      return { provider: "google", idempotencyKey: request.idempotencyKey, createdAt: new Date().toISOString(), model: request.model, mimeType: image.mimeType, bytes: Uint8Array.from(Buffer.from(image.data, "base64")), width: request.width, height: request.height, estimatedCostUsd: (this.options.usdPerOutput ?? 0).toFixed(6) };
     } finally { clearTimeout(timer); }
   }
 }
@@ -731,12 +754,12 @@ export class FakeTtsProvider implements TtsProvider {
       const value = Math.round(Math.sin(2 * Math.PI * 440 * sample / sampleRate) * 4_000);
       bytes.writeInt16LE(value, 44 + sample * 2);
     }
-    return Promise.resolve({ provider: "fake-tts", idempotencyKey: request.idempotencyKey, createdAt: new Date().toISOString(), model: request.model, mimeType: "audio/wav", bytes, durationSeconds, timings, estimatedCostUsd: "0.000000" });
+    return Promise.resolve({ provider: "fake-tts", idempotencyKey: request.idempotencyKey, createdAt: new Date().toISOString(), model: request.model, mimeType: "audio/wav", bytes, durationSeconds, timings, estimatedCostUsd: (request.text.length / 1_000 * 0.01).toFixed(6) });
   }
 }
 
 export class ElevenLabsTtsProvider implements TtsProvider {
-  constructor(private readonly options: { apiKey: string; timeoutMs: number; fetchImplementation?: typeof fetch }) {}
+  constructor(private readonly options: { apiKey: string; timeoutMs: number; usdPerThousandCharacters?: number; fetchImplementation?: typeof fetch }) {}
   async synthesize(request: TtsRequest): Promise<TtsResult> {
     if (!this.options.apiKey) throw new Error("ELEVENLABS_API_KEY is required when TTS_PROVIDER=elevenlabs.");
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
@@ -751,7 +774,7 @@ export class ElevenLabsTtsProvider implements TtsProvider {
       if (timings.length === 0) throw new Error("ElevenLabs TTS alignment did not contain words.");
       const bytes = new Uint8Array(Buffer.from(body.audio_base64, "base64"));
       const durationSeconds = Math.max(...alignment.character_end_times_seconds);
-      return { provider: "elevenlabs", idempotencyKey: request.idempotencyKey, createdAt: new Date().toISOString(), model: request.model, mimeType: "audio/mpeg", bytes, durationSeconds, timings, estimatedCostUsd: "0.000000" };
+      return { provider: "elevenlabs", idempotencyKey: request.idempotencyKey, createdAt: new Date().toISOString(), model: request.model, mimeType: "audio/mpeg", bytes, durationSeconds, timings, estimatedCostUsd: (request.text.length / 1_000 * (this.options.usdPerThousandCharacters ?? 0)).toFixed(6) };
     } finally { clearTimeout(timer); }
   }
 }

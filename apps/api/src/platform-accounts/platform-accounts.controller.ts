@@ -1,4 +1,6 @@
-import { Body, Controller, Get, Inject, Param, Post, Query, Req, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Headers, Inject, Param, Post, Query, Req, Res, UseGuards } from "@nestjs/common";
+import type { Response } from "express";
+import { loadConfig } from "@postbot/config";
 import { ApiOkResponse, ApiTags } from "@nestjs/swagger";
 import type {
   DisconnectPlatformAccountResponse,
@@ -44,18 +46,34 @@ export class PlatformAccountsController {
 
   @Get("youtube/callback")
   @ApiOkResponse({ description: "Complete YouTube OAuth callback." })
-  completeYouTube(@Query() query: unknown): Promise<OAuthCallbackResult> {
-    return this.accounts.completeYouTube(query);
+  completeYouTube(@Query() query: unknown, @Headers("accept") accept: string | undefined, @Res({ passthrough: true }) response: Response): Promise<OAuthCallbackResult | undefined> {
+    return this.completeBrowserCallback(() => this.accounts.completeYouTube(query), accept, response);
   }
 
   @Get("instagram/callback")
-  completeInstagram(@Query() query: unknown): Promise<OAuthCallbackResult> {
-    return this.accounts.completeInstagram(query);
+  completeInstagram(@Query() query: unknown, @Headers("accept") accept: string | undefined, @Res({ passthrough: true }) response: Response): Promise<OAuthCallbackResult | undefined> {
+    return this.completeBrowserCallback(() => this.accounts.completeInstagram(query), accept, response);
   }
 
   @Get("tiktok/callback")
-  completeTikTok(@Query() query: unknown): Promise<OAuthCallbackResult> {
-    return this.accounts.completeTikTok(query);
+  completeTikTok(@Query() query: unknown, @Headers("accept") accept: string | undefined, @Res({ passthrough: true }) response: Response): Promise<OAuthCallbackResult | undefined> {
+    return this.completeBrowserCallback(() => this.accounts.completeTikTok(query), accept, response);
+  }
+
+  private async completeBrowserCallback(complete: () => Promise<OAuthCallbackResult>, accept: string | undefined, response: Response): Promise<OAuthCallbackResult | undefined> {
+    if (!accept?.includes("text/html")) return complete();
+    const target = new URL(loadConfig().WEB_BASE_URL);
+    target.hash = "channels";
+    try {
+      const result = await complete();
+      target.searchParams.set("oauth", "connected");
+      if (result.account.channelId) target.searchParams.set("channel", result.account.channelId);
+    } catch {
+      // No authorization code, token or provider error is reflected in the URL.
+      target.searchParams.set("oauth", "failed");
+    }
+    response.redirect(303, target.toString());
+    return undefined;
   }
 
   @Post(":platformAccountId/disconnect")

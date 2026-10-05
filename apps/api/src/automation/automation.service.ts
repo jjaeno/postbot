@@ -6,6 +6,7 @@ import {
   AutomationRunResponseSchema,
   AutomationSwitchRequestSchema,
   type AutomationRunResponse,
+  type AutomationBudgetResponse,
   type AutomationStage,
   type Platform
 } from "@postbot/contracts";
@@ -15,6 +16,9 @@ import { JobsService } from "../jobs/jobs.service.js";
 import { OperationsService } from "../operations/operations.service.js";
 import { isCostStage } from "./automation-safety.js";
 import { reserveAutomationCost } from "./automation-budget.js";
+import { estimateAutomationStageCost, type AutomationCostUsage } from "./automation-cost-estimator.js";
+import { nextZonedSchedule } from "./schedule-time.js";
+import { createScheduledPlan, localPublishDay } from "../publishing/publish-slots.js";
 
 export const automationStages = ["COLLECT", "SCRIPT", "ASSET", "TTS", "RENDER", "POLICY", "PUBLISH"] as const satisfies readonly AutomationStage[];
 const platformStages = automationStages.filter((stage): stage is Exclude<AutomationStage, "COLLECT"> => stage !== "COLLECT");
@@ -25,6 +29,7 @@ const isComplete = (status: string): boolean => status === "SUCCEEDED" || status
 const isTerminal = (status: string): boolean => ["SUCCEEDED", "FAILED", "CANCELLED"].includes(status);
 const asObject = (value: Prisma.JsonValue | null): Record<string, unknown> =>
   value && typeof value === "object" && !Array.isArray(value) ? value : {};
+const decimalNumber = (value: Prisma.Decimal | null): number | null => value === null ? null : value.toNumber();
 export const isAbandonedAutomationClaim = (updatedAt: Date, now = Date.now()): boolean => updatedAt.getTime() <= now - 60_000;
 
 export const inventoryDeficit = (
@@ -116,7 +121,11 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
       where: { idempotencyKey: input.idempotencyKey },
       include: { steps: { orderBy: [{ platform: "asc" }, { createdAt: "asc" }] } }
     });
-    if (existing) return this.toResponse(existing);
+    if (existing) {
+      const owned = await this.prisma.channel.findFirst({ where: { id: existing.channelId, workspaceId }, select: { id: true } });
+      if (!owned) throw new NotFoundException("AUTOMATION_RUN_NOT_FOUND");
+      return this.toResponse(existing);
+    }
 
     const channel = await this.prisma.channel.findFirst({
       where: { id: input.channelId, workspaceId, status: "ACTIVE" },
@@ -127,11 +136,15 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
       }
     });
     if (!channel) throw new NotFoundException("ACTIVE_CHANNEL_NOT_FOUND");
-    const platforms = [...new Set([
+    const availablePlatforms = [...new Set([
       ...channel.outputProfiles.map((profile) => profile.platform),
       ...channel.platformAccounts.filter((account) => account.status === "CONNECTED").map((account) => account.platform)
     ])].sort();
+    const platforms = input.platforms ? [...new Set(input.platforms)].sort() : availablePlatforms;
     if (platforms.length === 0) throw new ConflictException("ACTIVE_OUTPUT_PLATFORM_REQUIRED");
+    if (platforms.some((platform) => !availablePlatforms.includes(platform))) throw new ConflictException("REQUESTED_OUTPUT_PLATFORM_NOT_CONFIGURED");
+    const selectedIdea = input.ideaId ? await this.prisma.contentIdea.findFirst({ where: { id: input.ideaId, channelId: channel.id, channel: { workspaceId } } }) : null;
+    if (input.ideaId && !selectedIdea) throw new NotFoundException("CONTENT_IDEA_NOT_FOUND");
 
     const counts = await this.prisma.contentItem.groupBy({
       by: ["status"],
@@ -140,7 +153,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     });
     const count = (status: "GENERATING" | "REVIEW_REQUIRED" | "APPROVED" | "SCHEDULED"): number =>
       counts.find((entry) => entry.status === status)?._count._all ?? 0;
-    const deficit = inventoryDeficit(
+    const deficit = selectedIdea ? 1 : inventoryDeficit(
       channel.minInventoryCount,
       count("GENERATING"),
       count("REVIEW_REQUIRED"),
@@ -153,8 +166,13 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     );
     const heldReason = missingFullAutoSetup ? "NO_CONNECTED_ACCOUNT_OR_SCHEDULE" : null;
     const initialStatus: "SKIPPED" | "HELD" | "PENDING" = deficit === 0 ? "SKIPPED" : heldReason ? "HELD" : "PENDING";
+    const ideaSnapshot = selectedIdea ? {
+      id: selectedIdea.id, channelId: selectedIdea.channelId, title: selectedIdea.title, summary: selectedIdea.summary ?? "",
+      canonicalUrl: selectedIdea.canonicalUrl, sourceName: selectedIdea.sourceName, sourceKind: selectedIdea.sourceKind,
+      publishedAt: selectedIdea.publishedAt?.toISOString() ?? null, topic: channel.topic ?? channel.name, language: channel.language
+    } : null;
     const steps = [
-      { stage: "COLLECT" as const, platform: null, branchKey: "COMMON", status: initialStatus },
+      { stage: "COLLECT" as const, platform: null, branchKey: "COMMON", status: selectedIdea && !heldReason ? "SUCCEEDED" as const : initialStatus, ...(ideaSnapshot ? { output: { idea: ideaSnapshot }, finishedAt: new Date() } : {}) },
       ...platforms.flatMap((platform) => platformStages.map((stage) => ({
         stage,
         platform,
@@ -162,26 +180,37 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
         status: initialStatus
       })))
     ];
-    const run = await this.prisma.automationRun.create({
+    const reservation = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM channels WHERE id = ${channel.id} FOR UPDATE`;
+      const active = !selectedIdea ? await tx.automationRun.findFirst({ where: { channelId: channel.id, status: { in: ["QUEUED", "RUNNING", "PAUSED", "DRAINING"] } }, orderBy: { createdAt: "desc" }, include: { steps: { orderBy: [{ platform: "asc" }, { createdAt: "asc" }] } } }) : null;
+      if (active) return { run: active, created: false };
+      const created = await tx.automationRun.create({
       data: {
         channelId: channel.id,
         idempotencyKey: input.idempotencyKey,
         status: deficit === 0 ? "SUCCEEDED" : heldReason ? "PAUSED" : "QUEUED",
         pausedReason: heldReason,
         checkpoint: {
-          stage: deficit === 0 ? "inventory-satisfied" : "collect",
+          stage: deficit === 0 ? "inventory-satisfied" : selectedIdea ? "script" : "collect",
           deficit,
           completed: [],
           platforms,
-          estimatedCostsUsd: input.estimatedCostsUsd ?? {}
+          partial: input.partial
         },
         nextRunAt: deficit === 0 || heldReason ? null : new Date(),
         steps: { create: steps },
-        events: { create: { action: "START", details: { deficit, mode: channel.automationMode, platforms } } }
+        events: { create: { action: "START", details: { deficit, mode: channel.automationMode, platforms, source: selectedIdea ? "manual-idea" : "scheduler" } } }
       },
       include: { steps: { orderBy: [{ platform: "asc" }, { createdAt: "asc" }] } }
+      });
+      return { run: created, created: true };
     });
-    if (deficit > 0 && !heldReason) await this.enqueueStage(workspaceId, run.id, channel.id, "COLLECT", null);
+    const run = reservation.run;
+    if (!reservation.created) return this.toResponse(run);
+    if (deficit > 0 && !heldReason) {
+      if (selectedIdea) await Promise.all(platforms.map((platform) => this.enqueueStage(workspaceId, run.id, channel.id, "SCRIPT", platform)));
+      else await this.enqueueStage(workspaceId, run.id, channel.id, "COLLECT", null);
+    }
     return this.get(workspaceId, run.id);
   }
 
@@ -253,7 +282,15 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     await this.operations.audit(workspaceId, userId, "budget.update", "automation_budget", budget.id, {
       channelId: input.channelId ?? null
     });
-    return budget;
+    return this.toBudgetResponse(budget);
+  }
+
+  async listBudgets(workspaceId: string): Promise<AutomationBudgetResponse[]> {
+    const budgets = await this.prisma.automationBudget.findMany({
+      where: { workspaceId },
+      orderBy: [{ channelId: "asc" }, { updatedAt: "desc" }]
+    });
+    return budgets.map((budget) => this.toBudgetResponse(budget));
   }
 
   async setSwitch(workspaceId: string, raw: unknown) {
@@ -535,6 +572,8 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
       return null;
     }
     if (stage === "SCRIPT") {
+      const run = await this.prisma.automationRun.findUniqueOrThrow({ where: { id: runId }, select: { checkpoint: true } });
+      const partial = asObject(run.checkpoint).partial;
       const idea = (await priorOutput("COLLECT", null)).idea;
       if (!idea || typeof idea !== "object" || Array.isArray(idea) || typeof (idea as Record<string, unknown>).id !== "string") {
         await this.holdStep(runId, stage, platform, "COLLECT_OUTPUT_REQUIRED");
@@ -548,7 +587,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
               ideaId: (idea as Record<string, unknown>).id,
               platform,
               idempotencyKey: `automation:${runId}:${platform.toLowerCase()}:script`,
-              partial: "full"
+              partial: ["hook", "body", "metadata", "scene"].includes(String(partial)) ? partial : "full"
             },
             idea
           }
@@ -644,11 +683,12 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
-    const [item, policyCheck, scene, sourceCount, usages] = await Promise.all([
+    const [item, policyCheck, scene, sourceCount, usages, script] = await Promise.all([
       this.prisma.contentItem.findUnique({ where: { id: contentItemId } }),
       this.prisma.policyCheck.findFirst({
         where: { contentItemId, platform },
-        orderBy: { checkedAt: "desc" }
+        orderBy: { checkedAt: "desc" },
+        include: { snapshots: { orderBy: { createdAt: "desc" }, take: 1 } }
       }),
       this.prisma.sceneVersion.findFirst({
         where: { contentItemId, platform },
@@ -658,10 +698,10 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
       this.prisma.assetUsage.findMany({
         where: { contentItemId, sceneVersionId },
         include: { asset: { include: { licenses: { orderBy: { checkedAt: "desc" }, take: 1 } } } }
-      })
+      }),
+      this.prisma.scriptVersion.findFirst({ where: { contentItemId, platform }, orderBy: { version: "desc" } })
     ]);
-    const publishableStatuses = ["APPROVED", "SCHEDULED", "PUBLISHING", "PUBLISHED"];
-    if (!item || !publishableStatuses.includes(item.status)) {
+    if (!item || !script || asObject(script.qualitySnapshot).reviewStatus !== "APPROVED") {
       await this.holdStep(
         runId,
         stage,
@@ -674,7 +714,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
       usage.asset.licenses[0]?.status === "VERIFIED"
       && usage.asset.licenses[0]?.commercialUseAllowed === true
     );
-    if (policyCheck?.status !== "PASS" || sourceCount === 0 || !rightsVerified || !scene?.renderManifest) {
+    if (policyCheck?.status !== "PASS" || !script || policyCheck.checkedAt < script.createdAt || !scene || policyCheck.checkedAt < scene.createdAt || sourceCount === 0 || !rightsVerified || !scene.renderManifest) {
       await this.holdStep(runId, stage, platform, "PUBLISH_SAFETY_GATE_FAILED");
       return null;
     }
@@ -683,10 +723,17 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
       await this.holdStep(runId, stage, platform, "CONNECTED_PLATFORM_ACCOUNT_REQUIRED");
       return null;
     }
-    const scheduledAt = this.nextSchedule(
-      channel.scheduleRules.filter((rule) => rule.platform === null || rule.platform === platform),
-      new Date()
-    );
+    const rules = channel.scheduleRules.filter((rule) => rule.platform === null || rule.platform === platform);
+    const timezone = rules[0]?.timezone ?? "Asia/Seoul";
+    const occupiedPlans = await this.prisma.publishPlan.findMany({ where: { platform, contentItem: { channelId: channel.id }, status: { in: ["SCHEDULED", "PUBLISHING", "PUBLISHED"] }, scheduledAt: { gte: new Date(Date.now() - 48 * 3_600_000) } }, select: { scheduledAt: true, platformAccountId: true } });
+    let scheduledAt = this.nextSchedule(rules, new Date());
+    for (let attempt = 0; scheduledAt && attempt < 32; attempt += 1) {
+      const candidate = scheduledAt;
+      const occupied = occupiedPlans.some((plan) => plan.platformAccountId === account.id && plan.scheduledAt.getTime() === candidate.getTime());
+      const dayCount = occupiedPlans.filter((plan) => localPublishDay(plan.scheduledAt, timezone) === localPublishDay(candidate, timezone)).length;
+      if (!occupied && dayCount < channel.dailyPublishLimit) break;
+      scheduledAt = attempt === 31 ? null : this.nextSchedule(rules, candidate);
+    }
     if (!scheduledAt) {
       await this.holdStep(runId, stage, platform, "SCHEDULE_SLOT_REQUIRED");
       return null;
@@ -694,19 +741,30 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     const idempotencyKey = `automation:${runId}:publish-plan:${platform.toLowerCase()}`;
     let plan = await this.prisma.publishPlan.findUnique({ where: { idempotencyKey } });
     if (!plan) {
-      plan = await this.prisma.publishPlan.create({
-        data: {
+      const snapshot = asObject(script.qualitySnapshot);
+      const metadata = asObject(snapshot.metadata ?? null);
+      const title = typeof snapshot.reviewTitle === "string" ? snapshot.reviewTitle : item.title;
+      const description = typeof metadata.description === "string" ? metadata.description : item.summary;
+      const hashtags = Array.isArray(metadata.hashtags) ? metadata.hashtags.filter((tag): tag is string => typeof tag === "string") : [];
+      try {
+        plan = await createScheduledPlan(this.prisma, channel.id, timezone, channel.dailyPublishLimit, {
           contentItemId,
           platform,
           platformAccountId: account.id,
           sceneVersionId: scene.id,
+          policySnapshotId: policyCheck.snapshots[0]?.id,
           status: "SCHEDULED",
           scheduledAt,
           idempotencyKey,
-          title: item.title,
-          description: item.summary
-        }
-      });
+          title,
+          description,
+          hashtags
+        });
+      } catch (error) {
+        if (!(error instanceof ConflictException)) throw error;
+        await this.holdStep(runId, stage, platform, "SCHEDULE_CONFLICT_RETRY_REQUIRED");
+        return null;
+      }
     }
     if (item.status !== "PUBLISHED") {
       await this.prisma.contentItem.update({
@@ -721,30 +779,8 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  private nextSchedule(rules: Array<{ dayOfWeek: number; timeOfDayUtc: string }>, after: Date): Date | null {
-    const minimum = new Date(after.getTime() + 1_000);
-    const candidates: Date[] = [];
-    for (let offset = 0; offset <= 8; offset += 1) {
-      const day = new Date(Date.UTC(
-        minimum.getUTCFullYear(),
-        minimum.getUTCMonth(),
-        minimum.getUTCDate() + offset
-      ));
-      for (const rule of rules) {
-        if (day.getUTCDay() !== rule.dayOfWeek) continue;
-        const [hours, minutes, seconds] = rule.timeOfDayUtc.split(":").map(Number);
-        const candidate = new Date(Date.UTC(
-          day.getUTCFullYear(),
-          day.getUTCMonth(),
-          day.getUTCDate(),
-          hours ?? 0,
-          minutes ?? 0,
-          seconds ?? 0
-        ));
-        if (candidate > minimum) candidates.push(candidate);
-      }
-    }
-    return candidates.sort((left, right) => left.getTime() - right.getTime())[0] ?? null;
+  private nextSchedule(rules: Array<{ dayOfWeek: number; timeOfDayUtc: string; timezone?: string }>, after: Date): Date | null {
+    return nextZonedSchedule(rules, after);
   }
 
   private async reserveCost(
@@ -755,21 +791,22 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     platform: BranchPlatform
   ): Promise<boolean> {
     if (!platform || !isCostStage(stage)) return true;
-    const run = await this.prisma.automationRun.findUnique({
-      where: { id: runId },
-      select: { checkpoint: true }
-    });
-    const estimates = asObject(run?.checkpoint ?? null).estimatedCostsUsd;
-    const value = estimates && typeof estimates === "object" && !Array.isArray(estimates)
-      ? (estimates as Record<string, unknown>)[stage]
-      : null;
-    const estimate = typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+    const estimateDetails = await this.estimateCost(runId, channelId, stage, platform);
+    const estimate = estimateDetails?.amountUsd ?? null;
     const budget = await this.prisma.automationBudget.findFirst({
       where: { workspaceId, OR: [{ channelId }, { channelId: null }] },
       orderBy: { channelId: "desc" }
     });
     if (!budget || estimate === null) {
-      await this.holdStep(runId, stage, platform, "COST_ESTIMATE_OR_BUDGET_REQUIRED");
+      const reason = budget ? "COST_PRICING_REQUIRED" : "AUTOMATION_BUDGET_REQUIRED";
+      await this.holdStep(runId, stage, platform, reason);
+      await this.operations.notify(workspaceId, {
+        eventKey: budget ? "cost.pricing_required" : "budget.configuration_required",
+        severity: "WARNING",
+        channelId,
+        cooldownMinutes: 30,
+        payload: { automationRunId: runId, stage, platform, action: budget ? "configure_provider_pricing" : "configure_budget" }
+      });
       return false;
     }
     const costStage = stage as "SCRIPT" | "ASSET" | "TTS" | "RENDER";
@@ -794,6 +831,68 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
       return false;
     }
     return true;
+  }
+
+  private async estimateCost(
+    runId: string,
+    channelId: string,
+    stage: Stage,
+    platform: BranchPlatform
+  ) {
+    if (!platform || !isCostStage(stage)) return null;
+    const usage: AutomationCostUsage = {};
+    if (stage !== "SCRIPT") {
+      const scriptStep = await this.prisma.automationStep.findFirst({
+        where: { automationRunId: runId, stage: "SCRIPT", branchKey: platform },
+        select: { output: true }
+      });
+      const output = asObject(scriptStep?.output ?? null);
+      const contentItemId = typeof output.contentItemId === "string" ? output.contentItemId : null;
+      const sceneVersionId = typeof output.sceneVersionId === "string" ? output.sceneVersionId : null;
+      if (!contentItemId || !sceneVersionId) return null;
+      if (stage === "ASSET" || stage === "RENDER") {
+        const scene = await this.prisma.sceneVersion.findFirst({ where: { id: sceneVersionId, contentItemId, platform } });
+        const document = asObject(scene?.sceneDocument ?? null);
+        const scenes = Array.isArray(document.scenes) ? document.scenes : [];
+        if (stage === "ASSET") usage.imageCount = scenes.length;
+        else {
+          const frames = typeof document.durationInFrames === "number" ? document.durationInFrames : 0;
+          const fps = typeof document.fps === "number" ? document.fps : 0;
+          usage.durationSeconds = fps > 0 ? frames / fps : 0;
+        }
+      } else if (stage === "TTS") {
+        const script = await this.prisma.scriptVersion.findFirst({ where: { contentItemId, platform }, orderBy: { version: "desc" } });
+        usage.characters = script ? [script.hook, script.body, script.callToAction].filter(Boolean).join(" ").length : 0;
+      }
+    }
+    const estimate = estimateAutomationStageCost(loadConfig(), stage as "SCRIPT" | "ASSET" | "TTS" | "RENDER", usage);
+    if (estimate) {
+      const run = await this.prisma.automationRun.findUnique({ where: { id: runId }, select: { checkpoint: true } });
+      const checkpoint = asObject(run?.checkpoint ?? null);
+      const estimates = asObject(checkpoint.estimates ?? null);
+      await this.prisma.automationRun.update({
+        where: { id: runId },
+        data: { checkpoint: { ...checkpoint, estimates: { ...estimates, [`${platform}:${stage}`]: estimate } } as Prisma.InputJsonObject }
+      });
+    }
+    return estimate;
+  }
+
+  private toBudgetResponse(budget: {
+    id: string; channelId: string | null; currency: string;
+    dailySoftLimit: Prisma.Decimal | null; dailyHardLimit: Prisma.Decimal | null;
+    monthlySoftLimit: Prisma.Decimal | null; monthlyHardLimit: Prisma.Decimal | null; updatedAt: Date;
+  }): AutomationBudgetResponse {
+    return {
+      id: budget.id,
+      channelId: budget.channelId,
+      currency: budget.currency,
+      dailySoftLimit: decimalNumber(budget.dailySoftLimit),
+      dailyHardLimit: decimalNumber(budget.dailyHardLimit),
+      monthlySoftLimit: decimalNumber(budget.monthlySoftLimit),
+      monthlyHardLimit: decimalNumber(budget.monthlyHardLimit),
+      updatedAt: budget.updatedAt.toISOString()
+    };
   }
 
   private async holdStep(
@@ -911,6 +1010,8 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
 
   private toResponse(run: {
     id: string;
+    createdAt?: Date;
+    updatedAt?: Date;
     channelId: string;
     status: string;
     idempotencyKey: string;
@@ -934,6 +1035,8 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
   }): AutomationRunResponse {
     return AutomationRunResponseSchema.parse({
       id: run.id,
+      createdAt: run.createdAt?.toISOString(),
+      finishedAt: ["SUCCEEDED", "CANCELLED"].includes(run.status) ? run.updatedAt?.toISOString() ?? null : null,
       channelId: run.channelId,
       status: run.status,
       idempotencyKey: run.idempotencyKey,

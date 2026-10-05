@@ -27,17 +27,22 @@ describe("ScriptGenerationProcessor", () => {
     expect(merged.script).toMatchObject({ hook: "new hook", body: "previous body", callToAction: "previous cta", language: "ko", durationSeconds: 45 });
     expect(merged.metadata).toEqual({ description: "previous metadata", hashtags: ["previous"] });
     expect(merged.facts).toEqual([{ claim: "previous fact", sourceUrl: "https://example.org/source" }]);
-    expect(merged.sceneDocument).toEqual(previousScene);
+    expect(merged.sceneDocument.scenes[0]?.visualPrompt).toBe(previousScene.scenes[0]?.visualPrompt);
+    expect(merged.sceneDocument.scenes[0]?.narration.text).toBe("new hook");
+    expect(merged.sceneDocument.durationInFrames).toBe(previousScene.durationInFrames);
   });
 
-  it("uses the new SceneDocument but preserves facts for scene-only regeneration", () => {
+  it("changes scene visuals but preserves narration, timing and facts for scene-only regeneration", () => {
     const processor = new ScriptGenerationProcessor({} as PrismaClient);
     const merged = processor.merge("scene", generated, {
       hook: "previous hook", body: "previous body", callToAction: "previous cta", language: "en",
       durationSeconds: new Prisma.Decimal(45), qualitySnapshot: { metadata: { description: "previous metadata", hashtags: ["previous"] }, facts: [{ claim: "previous fact", sourceUrl: "https://example.org/source" }] }
     }, { sceneDocument: scene("previous scene") });
 
-    expect(merged.sceneDocument).toEqual(generated.sceneDocument);
+    expect(merged.sceneDocument.scenes[0]?.visualPrompt).toBe("new scene");
+    expect(merged.sceneDocument.scenes[0]?.narration.text).toBe("previous scene");
+    expect(merged.sceneDocument.durationInFrames).toBe(30);
+    expect(merged.script.body).toBe("previous body");
     expect(merged.facts).toEqual([{ claim: "previous fact", sourceUrl: "https://example.org/source" }]);
   });
 });

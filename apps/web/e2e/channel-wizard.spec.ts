@@ -102,6 +102,11 @@ const account = {
 };
 
 const mockApi = async (page: Page): Promise<void> => {
+  await page.route("**/operations/notifications", (route) => route.fulfill({ json: [] }));
+  await page.route("**/optimization/channels/*/strategies", (route) => route.fulfill({ json: [] }));
+  await page.route("**/optimization/suggestions?**", (route) => route.fulfill({ json: [] }));
+  await page.route("**/analytics/report?**", (route) => route.fulfill({ json: { channelId: "channel-1", periodStart: "2026-10-01T00:00:00.000Z", periodEnd: "2026-10-05T00:00:00.000Z", metrics: [], partial: false, lastSyncedAt: null } }));
+  await page.route("**/operations/costs?**", (route) => route.fulfill({ json: { currency: "USD", periodStart: "2026-10-01T00:00:00.000Z", periodEnd: "2026-10-05T00:00:00.000Z", estimated: 0, actual: 0, credit: 0, reconciled: true, discrepancy: 0, byProvider: [] } }));
   let connected = false;
   let channels = [channel("Science Today", connected)];
   let review = {
@@ -115,7 +120,9 @@ const mockApi = async (page: Page): Promise<void> => {
       { title: "Reusable rocket", url: "https://example.com/rocket", sourceName: "Example" }
     ],
     assets: [{ id: "asset-1", licenseStatus: "VERIFIED", purpose: "image" }],
-    policy: null as { status: "pass"; findings: never[]; snapshotId: string } | null
+    policy: null as { status: "pass"; findings: never[]; snapshotId: string } | null,
+    ideaId: "idea-1",
+    outputs: [{ platform: "YOUTUBE", scriptVersionId: "script-1", sceneVersionId: "scene-1", scriptStatus: "ready", renderStatus: "ready", videoReady: true, metadata: { description: "Verified science content", hashtags: ["science"] } }]
   };
 
   await page.route("**/auth/me", async (route) => {
@@ -172,8 +179,38 @@ const mockApi = async (page: Page): Promise<void> => {
     await route.fulfill({ json: review });
   });
 
+  await page.route("**/content/content-1/review/preview?**", async (route) => {
+    await route.fulfill({ json: { url: "https://example.com/preview.mp4", expiresInSeconds: 900 } });
+  });
+
+  await page.route("**/automation/budgets", async (route) => {
+    if (route.request().method() === "POST") {
+      const body = route.request().postDataJSON() as { channelId: string | null; currency: string; dailySoftLimit: number | null; dailyHardLimit: number | null; monthlySoftLimit: number | null; monthlyHardLimit: number | null };
+      await route.fulfill({ json: { id: "budget-1", ...body, updatedAt: "2026-10-02T00:00:00.000Z" } }); return;
+    }
+    await route.fulfill({ json: [] });
+  });
+
+  await page.route("**/publishing/plans", async (route) => {
+    if (route.request().method() === "GET") { await route.fulfill({ json: [] }); return; }
+    await route.fallback();
+  });
+
+  await page.route(/\/ideas\/channels\/channel-1(?:\?.*)?$/, async (route) => {
+    await route.fulfill({ json: { ideas: [{ id: "idea-1", channelId: "channel-1", status: "CANDIDATE", title: "Moon ice", summary: "Verified lunar science", canonicalUrl: "https://example.com/moon", sourceName: "Example", sourceKind: "OFFICIAL", provider: "fixture", publishedAt: null, collectedAt: "2026-10-02T00:00:00.000Z", suitabilityScore: 0.9, freshnessScore: 0.8, reliabilityScore: 0.9, expectedValueScore: 0.85, rejectionReason: null, createdAt: "2026-10-02T00:00:00.000Z", updatedAt: "2026-10-02T00:00:00.000Z" }] } });
+  });
+
+  await page.route("**/automation/runs", async (route) => {
+    if (route.request().method() === "POST") {
+      const body = route.request().postDataJSON() as { channelId: string; ideaId: string; platforms: string[]; idempotencyKey: string };
+      await route.fulfill({ status: 201, json: { id: "run-generation-1", channelId: body.channelId, status: "RUNNING", idempotencyKey: body.idempotencyKey, checkpoint: { source: "manual-idea" }, failureCount: 0, pausedReason: null, nextRunAt: null, heartbeatAt: "2026-10-02T00:00:00.000Z", lastErrorCode: null, lastErrorMessage: null, steps: [{ stage: "COLLECT", platform: null, status: "SUCCEEDED", attemptCount: 0, maxAttempts: 3, productionJobId: null, errorCode: null, errorMessage: null }, { stage: "SCRIPT", platform: "YOUTUBE", status: "QUEUED", attemptCount: 0, maxAttempts: 3, productionJobId: "job-1", errorCode: null, errorMessage: null }] } }); return;
+    }
+    await route.fulfill({ json: [] });
+  });
+
   await page.route("**/content/content-1/review/policy-check", async (route) => {
-    review = { ...review, policy: { status: "pass", findings: [], snapshotId: "snapshot-1" } };
+    const policy = { status: "pass" as const, findings: [], snapshotId: "snapshot-1" };
+    review = { ...review, policy, outputs: review.outputs.map((output) => ({ ...output, policy })) };
     await route.fulfill({ json: review });
   });
 
@@ -183,6 +220,7 @@ const mockApi = async (page: Page): Promise<void> => {
     };
     review = {
       ...review,
+      outputs: review.outputs.map((output) => ({ ...output, reviewStatus: action.action === "approve" ? "APPROVED" as const : action.action === "discard" ? "DISCARDED" as const : "HELD" as const })),
       status:
         action.action === "approve"
           ? "APPROVED"
@@ -208,7 +246,7 @@ const mockApi = async (page: Page): Promise<void> => {
     await route.fulfill({ json: { channels } });
   });
 
-  await page.route("**/channels/channel-1", async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/channels\/channel-1$/, async (route) => {
     const body = route.request().postDataJSON() as { name?: string } | null;
     channels = [channel(body?.name ?? "Science Today", connected)];
     await route.fulfill({ json: channels[0] });
@@ -243,7 +281,7 @@ test("creates and edits a channel through the eight-step wizard", async ({ page 
   await expect(page.getByTestId("channel-card-channel-1")).toContainText("연결 예정");
 
   await page.getByTestId("edit-channel-channel-1").click();
-  await page.locator("aside input").first().fill("Science Today Updated");
+  await page.getByLabel("채널 이름", { exact: true }).fill("Science Today Updated");
   await page.getByTestId("save-channel-settings").click();
 
   await expect(page.getByTestId("channel-card-channel-1")).toContainText("Science Today Updated");
@@ -255,7 +293,7 @@ test("connects and disconnects YouTube with the fake OAuth provider", async ({ p
   await page.goto("/");
   await page.getByTestId("connect-youtube-channel-1").click();
 
-  await expect(page.getByTestId("channel-card-channel-1")).toContainText("CONNECTED");
+  await expect(page.getByTestId("channel-card-channel-1")).toContainText("연결됨");
   await expect(page.getByTestId("disconnect-youtube-channel-1")).toBeVisible();
 
   await page.getByTestId("disconnect-youtube-channel-1").click();
@@ -265,9 +303,9 @@ test("connects and disconnects YouTube with the fake OAuth provider", async ({ p
 test("restores the operating dashboard and calendar after refresh", async ({ page }) => {
   await mockApi(page);
   await page.goto("/");
-  await expect(page.getByLabel("Operations overview")).toContainText("Needs review");
+  await expect(page.getByLabel("운영 현황")).toContainText("검토 필요");
   await expect(page.getByTestId("calendar-panel")).toContainText("09:00");
-  await expect(page.getByText("Reusable rocket")).toBeVisible();
+  await expect(page.getByRole("button", { name: /Reusable rocket/ })).toBeVisible();
   await page.reload();
   await expect(page.getByTestId("calendar-panel")).toContainText("Science Today");
 });
@@ -276,12 +314,12 @@ test("approves reviewed content through the fake API", async ({ page }) => {
   await mockApi(page);
 
   await page.goto("/");
-  await page.getByLabel("Content item ID").fill("content-1");
-  await page.getByRole("button", { name: "Run policy check" }).click();
-  await expect(page.getByText("pass", { exact: true })).toBeVisible();
+  await page.getByLabel("검토할 콘텐츠").selectOption("content-1");
+  await page.getByRole("button", { name: "정책 검사" }).click();
+  await expect(page.getByText("통과", { exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: "Approve", exact: true }).click();
-  await expect(page.getByText("APPROVED", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "승인", exact: true }).click();
+  await expect(page.getByText("승인됨", { exact: true })).toBeVisible();
 });
 
 test("creates a full-auto channel through the fake API", async ({ page }) => {
@@ -302,4 +340,50 @@ test("creates a full-auto channel through the fake API", async ({ page }) => {
 
   await expect(page.getByTestId("channel-card-channel-1")).toContainText("Auto Science");
   await expect(page.getByTestId("channel-card-channel-1")).toContainText("완전 자동형");
+});
+
+test("starts production from an idea without internal identifiers", async ({ page }) => {
+  await mockApi(page); await page.goto("/");
+  await page.getByLabel("제작 플랫폼").selectOption("YOUTUBE");
+  const request = page.waitForRequest((candidate) => candidate.url().endsWith("/automation/runs") && candidate.method() === "POST");
+  await page.getByRole("button", { name: "이 소재로 영상 만들기" }).click();
+  expect((await request).postDataJSON()).toMatchObject({ ideaId: "idea-1", platforms: ["YOUTUBE"] });
+  await expect(page.getByText(/제작 작업을 시작했습니다/)).toBeVisible();
+});
+
+test("configures a workspace budget from the screen", async ({ page }) => {
+  await mockApi(page); await page.goto("/");
+  await page.getByLabel("일간 중단 (USD)").fill("12.5");
+  const request = page.waitForRequest((candidate) => candidate.url().endsWith("/automation/budgets") && candidate.method() === "POST");
+  await page.getByRole("button", { name: "예산 저장" }).click();
+  expect((await request).postDataJSON()).toMatchObject({ channelId: null, currency: "USD", dailyHardLimit: 12.5 });
+});
+
+test("preserves review input across polling and restores the selected content", async ({ page }, testInfo) => {
+  await mockApi(page); await page.goto("/?content=content-1");
+  const title = page.getByTestId("review-panel").getByLabel("제목", { exact: true });
+  await expect(title).not.toHaveValue("");
+  await title.fill("검수 중인 제목");
+  await expect(title).toHaveValue("검수 중인 제목", { timeout: 8_000 });
+  await page.waitForResponse((response) => response.url().endsWith("/content/content-1/review"));
+  await expect(title).toHaveValue("검수 중인 제목");
+  await page.reload();
+  await expect(page.getByLabel("검토할 콘텐츠")).toHaveValue("content-1");
+  await page.screenshot({ path: testInfo.outputPath("review-dashboard.png"), fullPage: true });
+});
+
+test("validates timezone input without crashing and supports modal Escape", async ({ page }) => {
+  await mockApi(page); await page.goto("/"); await page.getByTestId("create-channel").click();
+  for (let index = 0; index < 5; index += 1) await page.getByTestId("wizard-next").click();
+  await page.locator('input[name="timezone"]').fill("Not/AZone"); await page.getByTestId("wizard-next").click();
+  await expect(page.getByRole("alert")).toContainText("IANA");
+  await page.keyboard.press("Escape"); await expect(page.getByRole("dialog")).not.toBeVisible();
+});
+
+test("explains OAuth return failure and does not display unavailable costs as zero", async ({ page }) => {
+  await mockApi(page);
+  await page.route("**/operations/costs?**", (route) => route.fulfill({ status: 503, json: { message: "Unavailable" } }));
+  await page.goto("/?oauth=failed#channels");
+  await expect(page.getByText(/권한 거절, 연결 만료/)).toBeVisible();
+  await expect(page.getByTestId("operations-panel")).toContainText("조회 실패");
 });

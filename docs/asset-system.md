@@ -1,5 +1,17 @@
 # Asset, Image, and TTS system
 
+## Scene asset and cost behavior
+
+ASSET automation reads the selected platform `SceneDocument` and creates one image for every scene `visualPrompt`. Each usage is attached to the exact `sceneVersionId` with purpose `scene-image:<platform>:<sceneId>`; renderer lookup therefore cannot reuse another platform or older version accidentally.
+
+The logical purpose is stored in `usageSnapshot.originalPurpose`. Scene-scoped DB purpose keys use an 80-character prefix plus a 128-bit digest of logical purpose and SceneVersion, within the existing VARCHAR(120) unique key. Identical fallback/image/audio bytes can therefore retain separate historical scene usages while retries remain idempotent. Renderer accepts legacy unsuffixed purposes but selects only the exact SceneVersion. No schema change or migration is introduced.
+
+Fallback lookup is channel-scoped and checks the latest license, commercial/derivative permission and validity dates; a historical approval cannot override a later rejection. Review/policy evidence also selects the current platform SceneVersion instead of combining older regeneration assets.
+
+Real image and TTS rights remain unknown, not implicitly commercial-use approved. The review screen records a human-reviewed HTTPS proof URL, license name, commercial/derivative confirmations and VERIFIED/REJECTED status. This records evidence, not automated legal verification. Changes invalidate policy/approval and hold scheduled plans until recheck/reapproval.
+
+Image and TTS Provider results record `ProviderUsage` and estimated `CostLedger` entries with the production job correlation. Configured real-provider rates are used for the estimate. A provider response is not mislabeled as an actual settled charge when the provider does not return billing settlement data.
+
 `ASSET` jobs generate an image through the configured Image Provider, store its bytes through the configured Storage Provider, and persist Asset, AssetSource, AssetLicense, and optional AssetUsage records. A failed image generation uses only an internally stored IMAGE asset with a verified license that allows commercial and derivative use; if none exists the job fails.
 
 Non-fixture generated images are stored with a pending license snapshot. Their job transitions to `NEEDS_REVIEW` and their ContentItem is `REVIEW_REQUIRED`; only an explicit verified license can later make such an asset eligible as a fallback.

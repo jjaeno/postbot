@@ -1,5 +1,11 @@
 # Renderer
 
+## Renderer 1.1 scene image contract
+
+`RenderInput.sceneAssets`는 scene ID와 storage에서 내려받은 image data URL의 배열이다. Remotion composition은 해당 scene 시간 구간에 이미지를 `object-fit: cover` 배경으로 표시하고, 가독성 overlay와 caption을 그 위에 합성한다. render manifest에는 사용한 scene asset ID와 목적이 기록된다.
+
+`pnpm --filter @postbot/renderer smoke:asset`는 외부 FFmpeg 없이 실제 Remotion Chromium으로 1080×1920 still을 렌더하고 fixture 이미지가 배경에 나타나는지 확인한다. 전체 MP4/audio/ffprobe 검증은 `smoke`로 수행하며 FFmpeg와 ffprobe 또는 production renderer image가 필요하다.
+
 `RENDER` 작업은 versioned `SceneDocument`를 Remotion composition으로 렌더하고 FFmpeg로 후처리한다. 입력은 항상 1080x1920이며, safe area와 TTS word/sentence timing은 frame 단위 caption으로 변환된다.
 
 각 작업은 OS 임시 폴더 아래에 독립 디렉터리를 사용한다. 완료 또는 실패 후 디렉터리는 삭제된다. 최종 MP4와 JPEG thumbnail은 Storage Provider에 업로드되고, `SceneVersion.renderManifest`에 schema/renderer version, storage key, caption 수, ffprobe QA 결과를 저장한다. 같은 idempotency key로 다시 실행하면 기존 manifest를 반환한다.

@@ -1,5 +1,19 @@
 # Postbot 자동 운영 시스템
 
+## 2026-10-02 실행·비용 계약 보완
+
+`POST /automation/runs`는 클라이언트 예상 금액을 받지 않는다. `ideaId`와 `platforms`가 있으면 이미 수집된 아이디어를 COLLECT 결과로 고정하고 같은 전체 pipeline을 실행한다. 플랫폼을 생략하면 채널 설정의 대상 플랫폼을 사용한다.
+
+각 단계의 예약 금액은 API의 공통 estimator가 Provider와 작업량으로 계산한다. LLM은 예상/실제 token, image는 장면 수, TTS는 문자 수, renderer는 frame/fps로 계산한다. 실제 Provider를 선택했지만 아래 단가가 0이면 해당 단계는 `COST_PRICING_REQUIRED`로 fail-closed 한다.
+
+* `LLM_INPUT_USD_PER_MILLION_TOKENS`
+* `LLM_OUTPUT_USD_PER_MILLION_TOKENS`
+* `IMAGE_USD_PER_OUTPUT`
+* `TTS_USD_PER_THOUSAND_CHARACTERS`
+* `RENDER_USD_PER_MINUTE`
+
+예상 token 기본값은 `AUTOMATION_EXPECTED_INPUT_TOKENS`, `AUTOMATION_EXPECTED_OUTPUT_TOKENS`로 설정한다. `GET /automation/budgets`는 UI가 workspace/channel 적용 범위와 현재 한도를 표시하는 조회 계약이다.
+
 15단계 자동화는 API 요청에서 장시간 작업을 수행하지 않는다. 운영자가 `POST /automation/runs`로 실행을 만들면 MySQL에 `AutomationRun`과 단계별 `AutomationStep`을 먼저 기록하고, 첫 BullMQ 작업만 생성한다. 모든 API는 workspace 소유 채널로 범위를 제한한다.
 
 실제 흐름은 `COLLECT → SCRIPT → ASSET → TTS → RENDER → POLICY → PUBLISH`이다. 각 processor output을 `AutomationStep.output`에 저장하고 다음 단계가 content idea, content item, scene version, asset, render manifest, immutable policy snapshot을 다시 조회·검증한다. PUBLISH 준비 단계는 연결 계정과 다음 예약 슬롯을 결정하고 `PublishPlan`을 만든 뒤에만 `publishPlanId`를 worker에 전달한다. 성공한 게시 후 동일 실행 idempotency key로 analytics sync를 enqueue한다.
@@ -35,5 +49,9 @@
 `POST /automation/budgets`는 workspace 기본 예산 또는 해당 workspace 소유 채널의 예산을 설정한다. soft limit은 운영자가 확인할 경고 기준이고, hard limit을 넘는 예약은 hold한다. soft limit은 hard limit보다 클 수 없다.
 
 ## Fake Provider 검증
+
+Scheduler와 비용 payload 없는 수동 시작은 같은 서버 비용 산정 경로를 사용한다. 소재가 명시되지 않은 시작은 채널 row lock 아래 활성 run을 재사용해 scheduler/manual 경합 중복 제작을 막는다. 명시적인 소재 재생성은 별도 run으로 추적한다. 응답의 생성·종료 시각으로 화면에 경과 시간과 완료 단계 수를 표시한다.
+
+반복 슬롯의 현지 날짜/요일은 IANA 시간대 기준으로 UTC 후보를 만들며 DST gap은 건너뛴다. 실제 점유와 플랫폼별 일간 한도를 검사하고 자동 예약은 점유 후보를 건너뛴 뒤 저장 transaction에서 다시 확인한다. 예약 취소는 게시 시작 전만 가능하며 변경은 기존 예약 취소와 새 예약 생성의 명시적인 두 단계다.
 
 `apps/api/src/automation/automation-simulator.spec.ts`는 가상 시간/입력 기반 안전장치를 검증한다. `apps/api/src/release/fake-journey.e2e.spec.ts`는 별도 API/worker/MySQL/Redis/MinIO 프로세스를 사용해 APPROVAL과 FULL_AUTO를 실제 renderer, Fake 외부 provider, PublishPlan/PlatformPost, analytics, optimization까지 연결한다. 실제 SNS 게시 검증은 별도 자격 증명 환경에서 수행한다.

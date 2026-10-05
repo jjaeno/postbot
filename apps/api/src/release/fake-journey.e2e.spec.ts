@@ -136,8 +136,8 @@ describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, 
       timings[`${type.toLowerCase()}JobMs`] = Math.round(performance.now() - startedAt);
       return result;
     };
-    await enqueue("ASSET", { assetPreparation: { channelId: channel.id, contentItemId, prompt: "Science", idempotencyKey: `image:${suffix}` } });
-    await enqueue("TTS", { ttsPreparation: { channelId: channel.id, contentItemId, text: idea.summary, voice: "neutral", idempotencyKey: `tts:${suffix}` } });
+    await enqueue("ASSET", { assetPreparation: { channelId: channel.id, contentItemId, sceneVersionId, platform: "YOUTUBE", prompt: "Science", idempotencyKey: `image:${suffix}` } });
+    await enqueue("TTS", { ttsPreparation: { channelId: channel.id, contentItemId, sceneVersionId, platform: "YOUTUBE", text: idea.summary, voice: "neutral", idempotencyKey: `tts:${suffix}` } });
     const render = await enqueue("RENDER", { render: { channelId: channel.id, contentItemId, sceneVersionId, idempotencyKey: `render:${suffix}` } });
     expect(render.result).toMatchObject({ qa: { width: 1080, height: 1920 } });
     const reviewed = ContentReviewResponseSchema.parse(await session.json(`/content/${contentItemId}/review/policy-check`, { platform: "YOUTUBE" }));
@@ -198,7 +198,7 @@ describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, 
       name: `${mode} ${suffix}`, language: "en", targetAudience: "Science readers", topic: "science", platforms,
       collectionRule: { keywords: ["rocket"], recencyHours: 24, collectionFrequencyMinutes: 1440 },
       template: { name: mode, tone: "clear", voiceProfile: "neutral", subtitleStyle: {}, visualStyle: {}, aiStockRatio: 1 },
-      outputProfiles: platforms.map((platform) => ({ platform, minDurationSeconds: 15, maxDurationSeconds: 60, hookStyle: "question", captionStyle: "simple", metadataRules: {} })),
+      outputProfiles: platforms.map((platform) => ({ platform, minDurationSeconds: 30, maxDurationSeconds: 30, hookStyle: "question", captionStyle: "simple", metadataRules: {} })),
       scheduleRules,
       automation: { mode, minInventoryCount: 1, dailyPublishLimit: 1, errorAction: { onPolicyFailure: "hold", onAssetLicenseUnknown: "hold", onConsecutiveFailures: "pause_channel" } }
     }));
@@ -218,7 +218,7 @@ describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, 
       OAuthCallbackResultSchema.parse(await session.json(`${callbackUrl.pathname}${callbackUrl.search}`));
     }
     await session.json("/automation/budgets", { channelId: channel.id, currency: "USD", dailySoftLimit: 50, dailyHardLimit: 100, monthlySoftLimit: 500, monthlyHardLimit: 1_000 });
-    const input = { channelId: channel.id, idempotencyKey: `automation:${mode.toLowerCase()}:${suffix}`, estimatedCostsUsd: { SCRIPT: 0.01, ASSET: 0.01, TTS: 0.01, RENDER: 0.01 } };
+    const input = { channelId: channel.id, idempotencyKey: `automation:${mode.toLowerCase()}:${suffix}` };
     const started = AutomationRunResponseSchema.parse(await session.json("/automation/runs", input));
     expect(AutomationRunResponseSchema.parse(await session.json("/automation/runs", input)).id).toBe(started.id);
 
@@ -229,7 +229,6 @@ describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, 
       const scriptJob = await prisma.productionJob.findUniqueOrThrow({ where: { id: scriptJobId } });
       const result = z.object({ contentItemId: z.string() }).parse(scriptJob.result);
       expect(ContentReviewResponseSchema.parse(await session.json(`/content/${result.contentItemId}/review/action`, { action: "approve" })).status).toBe("APPROVED");
-      await session.json(`/automation/runs/${started.id}/control`, { action: "retry", stage: "PUBLISH", reason: "acceptance approval complete" });
     }
 
     const completed = await session.automationRun(started.id, (run) => run.status === "SUCCEEDED");

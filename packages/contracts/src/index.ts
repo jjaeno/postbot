@@ -112,7 +112,7 @@ export const ScheduleRuleInputSchema = z.object({
   platform: PlatformSchema.nullable().default(null),
   dayOfWeek: z.number().int().min(0).max(6),
   timeOfDayLocal: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
-  timezone: z.string().min(1).max(64),
+  timezone: z.string().min(1).max(64).refine((value) => { try { new Intl.DateTimeFormat("en", { timeZone: value }); return true; } catch { return false; } }, "유효한 IANA 시간대를 입력해 주세요. 예: Asia/Seoul"),
   maxPosts: z.number().int().min(1).max(10)
 });
 
@@ -564,7 +564,7 @@ export type PolicyAutomationJobPayload = z.infer<typeof PolicyAutomationJobPaylo
 export const PolicyVerdictSchema = z.enum(["pass", "warning", "review", "block"]);
 export const ReviewActionSchema = z.enum(["approve", "hold", "discard", "schedule"]);
 export const RunPolicyCheckRequestSchema = z.object({ platform: PlatformSchema, region: z.string().min(2).max(32).default("GLOBAL") });
-export const ReviewActionRequestSchema = z.object({ action: ReviewActionSchema });
+export const ReviewActionRequestSchema = z.object({ action: ReviewActionSchema, platform: PlatformSchema.optional() });
 export const UpdateReviewMetadataRequestSchema = z.object({
   platform: PlatformSchema.nullable().default(null),
   title: z.string().min(1).max(255),
@@ -573,15 +573,21 @@ export const UpdateReviewMetadataRequestSchema = z.object({
 });
 export const PolicyFindingSchema = z.object({ code: z.string(), severity: PolicyVerdictSchema, message: z.string() });
 export const ContentReviewResponseSchema = z.object({
-  id: z.string(), channelId: z.string(), status: z.enum(["REVIEW_REQUIRED", "APPROVED", "SCHEDULED", "HELD", "FAILED"]), title: z.string(),
+  id: z.string(), channelId: z.string(), status: z.enum(["REVIEW_REQUIRED", "APPROVED", "SCHEDULED", "PUBLISHING", "PUBLISHED", "HELD", "FAILED"]), title: z.string(),
   description: z.string(), durationSeconds: z.number().positive().nullable(), sources: z.array(z.object({ title: z.string(), url: z.string(), sourceName: z.string() })),
-  assets: z.array(z.object({ id: z.string(), licenseStatus: z.string(), purpose: z.string() })),
+  assets: z.array(z.object({ id: z.string(), licenseStatus: z.string(), purpose: z.string(), sceneVersionId: z.string().nullable().optional() })),
   policy: z.object({ status: PolicyVerdictSchema, findings: z.array(PolicyFindingSchema), snapshotId: z.string().nullable() }).nullable(),
   ideaId: z.string().nullable().default(null),
   outputs: z.array(z.object({
     platform: PlatformSchema.nullable(), scriptVersionId: z.string(), sceneVersionId: z.string().nullable(),
     scriptStatus: z.enum(["ready", "missing"]), renderStatus: z.enum(["ready", "pending"]), videoReady: z.boolean(),
-    metadata: GeneratedMetadataSchema
+    metadata: GeneratedMetadataSchema,
+    title: z.string().default(""),
+    script: z.object({ hook: z.string(), body: z.string(), callToAction: z.string().nullable(), language: z.string() }).nullable().default(null),
+    durationSeconds: z.number().positive().nullable().default(null),
+    reviewStatus: z.enum(["REVIEW_REQUIRED", "APPROVED", "HELD", "DISCARDED"]).default("REVIEW_REQUIRED"),
+    policy: z.object({ status: PolicyVerdictSchema, findings: z.array(PolicyFindingSchema), snapshotId: z.string().nullable() }).nullable().default(null),
+    publishStatus: z.enum(["DRAFT", "SCHEDULED", "PUBLISHING", "PUBLISHED", "FAILED", "HELD", "CANCELLED"]).nullable().default(null)
   })).default([])
 });
 export const ReviewPreviewResponseSchema = z.object({ url: z.string().url(), expiresInSeconds: z.number().int().positive() });
@@ -590,10 +596,12 @@ export type RunPolicyCheckRequest = z.infer<typeof RunPolicyCheckRequestSchema>;
 export type ReviewActionRequest = z.infer<typeof ReviewActionRequestSchema>;
 export type UpdateReviewMetadataRequest = z.infer<typeof UpdateReviewMetadataRequestSchema>;
 export type ContentReviewResponse = z.infer<typeof ContentReviewResponseSchema>;
+export const ReviewAssetLicenseRequestSchema = z.object({ assetId: z.string().min(1), proofUrl: z.string().url().startsWith("https://"), licenseName: z.string().min(3).max(191), status: z.enum(["VERIFIED", "REJECTED"]), commercialUseAllowed: z.boolean(), derivativeAllowed: z.boolean() }).refine((value) => value.status !== "VERIFIED" || (value.commercialUseAllowed && value.derivativeAllowed), "검증 승인에는 상업 사용·변형 허용 증빙이 필요합니다.");
+export type ReviewAssetLicenseRequest = z.infer<typeof ReviewAssetLicenseRequestSchema>;
 
 export const ContentItemSummarySchema = z.object({
   id: z.string(), channelId: z.string(), title: z.string(), status: z.enum(["IDEA", "VALIDATING", "GENERATING", "REVIEW_REQUIRED", "APPROVED", "SCHEDULED", "PUBLISHING", "PUBLISHED", "FAILED", "HELD"]),
-  updatedAt: z.string().datetime(), sceneVersionId: z.string().nullable(), renderReady: z.boolean()
+  updatedAt: z.string().datetime(), sceneVersionId: z.string().nullable(), renderReady: z.boolean(), platforms: z.array(PlatformSchema).default([])
 });
 export const ContentItemListResponseSchema = z.object({ items: z.array(ContentItemSummarySchema) });
 export type ContentItemSummary = z.infer<typeof ContentItemSummarySchema>;
@@ -603,6 +611,13 @@ export const CreatePublishPlanRequestSchema = z.object({ contentItemId: z.string
 export const PublishPlanResponseSchema = z.object({ id: z.string(), contentItemId: z.string(), platformAccountId: z.string(), platform: PlatformSchema, status: z.enum(["DRAFT", "SCHEDULED", "PUBLISHING", "PUBLISHED", "FAILED", "HELD", "CANCELLED"]), scheduledAt: z.string().datetime(), idempotencyKey: z.string(), title: z.string(), duplicate: z.boolean().optional() });
 export type CreatePublishPlanRequest = z.infer<typeof CreatePublishPlanRequestSchema>;
 export type PublishPlanResponse = z.infer<typeof PublishPlanResponseSchema>;
+export const PublishCalendarItemSchema = z.object({
+  id: z.string(), contentItemId: z.string(), channelId: z.string(), platform: PlatformSchema,
+  status: z.enum(["DRAFT", "SCHEDULED", "PUBLISHING", "PUBLISHED", "FAILED", "HELD", "CANCELLED"]),
+  scheduledAt: z.string().datetime(), title: z.string(), postUrl: z.string().url().nullable(),
+  publishedAt: z.string().datetime().nullable(), failureReason: z.string().nullable()
+});
+export type PublishCalendarItem = z.infer<typeof PublishCalendarItemSchema>;
 
 export const AutomationRunStatusSchema = z.enum(["QUEUED", "RUNNING", "PAUSED", "DRAINING", "SUCCEEDED", "FAILED", "CANCELLED"]);
 export const AutomationStageSchema = z.enum(["COLLECT", "SCRIPT", "ASSET", "TTS", "RENDER", "POLICY", "PUBLISH"]);
@@ -610,11 +625,14 @@ export const AutomationStepStatusSchema = z.enum(["PENDING", "QUEUED", "RUNNING"
 export const AutomationRunRequestSchema = z.object({
   channelId: z.string().min(1),
   idempotencyKey: z.string().min(8).max(191),
-  estimatedCostsUsd: z.partialRecord(AutomationStageSchema, z.number().nonnegative().finite()).optional()
+  ideaId: z.string().min(1).optional(),
+  platforms: z.array(PlatformSchema).min(1).max(3).optional(),
+  partial: z.enum(["full", "hook", "body", "metadata", "scene"]).default("full")
 });
 export const AutomationControlRequestSchema = z.object({ action: z.enum(["pause", "resume", "drain", "kill", "retry", "hold", "skip"]), reason: z.string().max(500).optional(), stage: AutomationStageSchema.optional(), platform: PlatformSchema.optional() });
 export const AutomationRunResponseSchema = z.object({
   id: z.string(), channelId: z.string(), status: AutomationRunStatusSchema, idempotencyKey: z.string(),
+  createdAt: z.string().datetime().optional(), finishedAt: z.string().datetime().nullable().optional(),
   checkpoint: z.record(z.string(), z.unknown()).nullable(), failureCount: z.number().int(),
   pausedReason: z.string().nullable(),
   nextRunAt: z.string().datetime().nullable(), heartbeatAt: z.string().datetime().nullable(),
@@ -635,6 +653,13 @@ export type AutomationStage = z.infer<typeof AutomationStageSchema>;
 export type AutomationStepStatus = z.infer<typeof AutomationStepStatusSchema>;
 export type AutomationRunResponse = z.infer<typeof AutomationRunResponseSchema>;
 export type AutomationBudgetRequest = z.infer<typeof AutomationBudgetRequestSchema>;
+export const AutomationBudgetResponseSchema = z.object({
+  id: z.string(), channelId: z.string().nullable(), currency: z.string().length(3),
+  dailySoftLimit: z.number().nullable(), dailyHardLimit: z.number().nullable(),
+  monthlySoftLimit: z.number().nullable(), monthlyHardLimit: z.number().nullable(),
+  updatedAt: z.string().datetime()
+});
+export type AutomationBudgetResponse = z.infer<typeof AutomationBudgetResponseSchema>;
 export const AnalyticsSyncRequestSchema = z.object({ channelId: z.string().min(1), platform: PlatformSchema, periodStart: z.string().datetime(), periodEnd: z.string().datetime(), timezone: z.string().min(1).max(64), idempotencyKey: z.string().min(8).max(191) }).refine((value) => value.periodStart < value.periodEnd, { message: "periodStart must precede periodEnd" });
 export const AnalyticsMetricResponseSchema = z.object({ metric: z.string(), status: z.enum(["AVAILABLE", "UNAVAILABLE", "PARTIAL"]), value: z.number().nullable(), unit: z.string().nullable(), aggregation: z.string().nullable(), unavailableReason: z.string().nullable(), observedAt: z.string().datetime(), revision: z.number().int(), mappingVersion: z.string() });
 export const AnalyticsReportResponseSchema = z.object({ channelId: z.string(), platform: PlatformSchema.optional(), periodStart: z.string().datetime(), periodEnd: z.string().datetime(), metrics: z.array(AnalyticsMetricResponseSchema), partial: z.boolean(), lastSyncedAt: z.string().datetime().nullable() });
@@ -658,6 +683,8 @@ export const OptimizationSuggestionResponseSchema = z.object({ id: z.string(), c
 export const ExperimentResponseSchema = z.object({ id: z.string(), channelId: z.string(), status: z.enum(["DRAFT", "RUNNING", "PAUSED", "COMPLETED", "CANCELLED", "STOPPED", "INCONCLUSIVE"]), name: z.string(), hypothesis: z.string(), targetMetric: z.string().nullable(), minSampleSize: z.number().int(), allocation: z.unknown(), successCriteria: z.unknown(), stopCriteria: z.unknown().nullable(), result: z.unknown().nullable(), stopReason: z.string().nullable(), startedAt: z.string().datetime().nullable(), endedAt: z.string().datetime().nullable() });
 export type OptimizationSettings = z.infer<typeof OptimizationSettingsSchema>;
 export type OptimizationSuggestionResponse = z.infer<typeof OptimizationSuggestionResponseSchema>;
+export const StrategyVersionResponseSchema = z.object({ version: z.number().int(), name: z.string(), appliedAt: z.string().datetime().nullable(), strategy: JsonObjectSchema });
+export type StrategyVersionResponse = z.infer<typeof StrategyVersionResponseSchema>;
 export type ExperimentResponse = z.infer<typeof ExperimentResponseSchema>;
 
 export const CostReportQuerySchema = z.object({ periodStart: z.string().datetime(), periodEnd: z.string().datetime(), channelId: z.string().min(1).optional(), provider: z.string().min(1).max(80).optional() }).refine((value) => value.periodStart < value.periodEnd, { message: "periodStart must precede periodEnd" });

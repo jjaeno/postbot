@@ -10,7 +10,9 @@ export class LlmProviderFactory {
       ? new OpenAiLlmProvider({
           apiKey: config.OPENAI_API_KEY,
           baseUrl: config.OPENAI_BASE_URL,
-          timeoutMs: config.LLM_TIMEOUT_MS
+        timeoutMs: config.LLM_TIMEOUT_MS,
+        inputUsdPerMillionTokens: config.LLM_INPUT_USD_PER_MILLION_TOKENS,
+        outputUsdPerMillionTokens: config.LLM_OUTPUT_USD_PER_MILLION_TOKENS
         })
       : new FakeLlmProvider();
   }

@@ -90,6 +90,12 @@ export class OptimizationService {
     return suggestions.map((suggestion) => this.suggestionResponse(suggestion));
   }
 
+  async listStrategies(workspaceId: string, channelId: string) {
+    await this.channel(workspaceId, channelId);
+    const versions = await this.prisma.strategyVersion.findMany({ where: { channelId }, orderBy: { version: "desc" } });
+    return versions.map((version) => ({ version: version.version, name: version.name, appliedAt: version.appliedAt?.toISOString() ?? null, strategy: asRecord(version.strategy) }));
+  }
+
   async suggestionAction(workspaceId: string, role: string, userId: string, suggestionId: string, raw: unknown): Promise<OptimizationSuggestionResponse> {
     this.requireOwner(role);
     const input = SuggestionActionRequestSchema.parse(raw);
@@ -121,6 +127,7 @@ export class OptimizationService {
   async experimentAction(workspaceId: string, role: string, experimentId: string, raw: unknown): Promise<ExperimentResponse> {
     this.requireOwner(role);
     const input = ExperimentActionRequestSchema.parse(raw);
+    if (input.action === "complete") throw new ConflictException("EXPERIMENT_RESULT_ANALYSIS_NOT_IMPLEMENTED");
     const experiment = await this.prisma.experiment.findFirst({ where: { id: experimentId, channel: { workspaceId } } });
     if (!experiment) throw new NotFoundException("EXPERIMENT_NOT_FOUND");
     if (terminalExperiment.has(experiment.status)) throw new ConflictException("EXPERIMENT_TERMINAL");
@@ -158,9 +165,15 @@ export class OptimizationService {
 
   private async applyStrategy(suggestion: { id: string; channelId: string; targetStrategy: Prisma.JsonValue | null }) {
     const target = asRecord(suggestion.targetStrategy);
-    if (Object.keys(target).length === 0 || Object.keys(target).some((field) => field !== "durationSeconds")) throw new ConflictException("UNSAFE_STRATEGY_FIELD");
+    if (typeof target.durationSeconds !== "number" || !Number.isFinite(target.durationSeconds) || target.durationSeconds <= 0 || Object.keys(target).some((field) => !["durationSeconds", "maxChangeRatio"].includes(field))) throw new ConflictException("UNSAFE_STRATEGY_FIELD");
     return this.prisma.$transaction(async (tx) => {
-      const current = await tx.strategyVersion.aggregate({ where: { channelId: suggestion.channelId }, _max: { version: true } });
+      let current = await tx.strategyVersion.aggregate({ where: { channelId: suggestion.channelId }, _max: { version: true } });
+      if (!current._max.version) {
+        const profile = await tx.platformOutputProfile.findFirst({ where: { channelId: suggestion.channelId, isActive: true }, orderBy: { version: "desc" } });
+        if (!profile) throw new ConflictException("OUTPUT_PROFILE_REQUIRED");
+        await tx.strategyVersion.create({ data: { channelId: suggestion.channelId, version: 1, name: "Initial channel settings", strategy: { durationSeconds: (profile.minDurationSeconds + profile.maxDurationSeconds) / 2 }, appliedAt: new Date() } });
+        current = { _max: { version: 1 } };
+      }
       const version = await tx.strategyVersion.create({ data: { channelId: suggestion.channelId, version: (current._max.version ?? 0) + 1, name: "Approved optimization", strategy: toInputJson(target), appliedAt: new Date() } });
       return tx.optimizationSuggestion.update({ where: { id: suggestion.id }, data: { status: "APPLIED", appliedAt: new Date(), strategyVersionId: version.id, rollbackStrategyVersionId: (current._max.version ?? 0) > 0 ? (await tx.strategyVersion.findUnique({ where: { channelId_version: { channelId: suggestion.channelId, version: current._max.version ?? 0 } }, select: { id: true } }))?.id ?? null : null } });
     });

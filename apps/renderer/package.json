@@ -15,6 +15,7 @@
     "dev": "remotion studio src/remotion-entry.ts --port 3001",
     "build": "tsc -p tsconfig.build.json",
     "smoke": "node scripts/smoke.mjs",
+    "smoke:asset": "node scripts/scene-asset-smoke.mjs",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run src --passWithNoTests"

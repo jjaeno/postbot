@@ -1,6 +1,6 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { Prisma, type PrismaClient } from "@postbot/database";
-import type { ContentReviewResponse, PolicyVerdict, UpdateReviewMetadataRequest } from "@postbot/contracts";
+import type { ContentReviewResponse, PolicyVerdict, UpdateReviewMetadataRequest, ReviewAssetLicenseRequest } from "@postbot/contracts";
 import type { PolicyEvidence, PolicyRuleRecord, ReviewRepository } from "./review.repository.js";
 
 const json = (value: Prisma.JsonValue | null): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -18,37 +18,59 @@ const lexicalSimilarity = (left: string, right: string): number => {
 @Injectable()
 export class PrismaReviewRepository implements ReviewRepository {
   constructor(@Inject("PRISMA_CLIENT") private readonly prisma: PrismaClient) {}
+  async reviewAssetLicense(workspaceId: string, userId: string, contentItemId: string, input: ReviewAssetLicenseRequest): Promise<boolean> {
+    const asset = await this.prisma.asset.findFirst({ where: { id: input.assetId, channel: { workspaceId }, usages: { some: { contentItemId, contentItem: { channel: { workspaceId } } } } } });
+    if (!asset) return false;
+    await this.prisma.$transaction(async (tx) => {
+      await tx.assetLicense.create({ data: { assetId: asset.id, status: input.status, licenseName: input.licenseName, proofUrl: input.proofUrl, commercialUseAllowed: input.commercialUseAllowed, derivativeAllowed: input.derivativeAllowed, checkedAt: new Date() } });
+      await tx.auditLog.create({ data: { workspaceId, userId, action: "asset.license.review", targetType: "asset", targetId: asset.id, metadata: { status: input.status } } });
+      const scripts = await tx.scriptVersion.findMany({ where: { contentItemId } });
+      for (const script of scripts) await tx.scriptVersion.update({ where: { id: script.id }, data: { qualitySnapshot: { ...json(script.qualitySnapshot), reviewStatus: "REVIEW_REQUIRED" } } });
+      const checks = await tx.policyCheck.findMany({ where: { contentItemId }, orderBy: { checkedAt: "desc" }, distinct: ["platform"] });
+      for (const check of checks) await tx.policyCheck.create({ data: { contentItemId, platform: check.platform, policyRuleId: check.policyRuleId, status: "UNKNOWN", reasons: [{ code: "LICENSE_REVIEW_CHANGED", message: "권리 증빙 변경 후 정책 재검사가 필요합니다." }] } });
+      await tx.publishPlan.updateMany({ where: { contentItemId, status: "SCHEDULED" }, data: { status: "HELD" } });
+      await tx.contentItem.update({ where: { id: contentItemId }, data: { status: "REVIEW_REQUIRED" } });
+    });
+    return true;
+  }
 
   async get(workspaceId: string, contentItemId: string): Promise<ContentReviewResponse | null> {
     const item = await this.prisma.contentItem.findFirst({ where: { id: contentItemId, channel: { workspaceId } }, include: {
-      sourceReferences: true, assetUsages: { include: { asset: { include: { licenses: true } } } }, scriptVersions: { orderBy: { version: "desc" } }, sceneVersions: { orderBy: { version: "desc" } }, contentIdeas: { take: 1 },
-      policyChecks: { orderBy: { checkedAt: "desc" }, take: 1, include: { snapshots: { orderBy: { createdAt: "desc" }, take: 1 } } }
+      sourceReferences: true, assetUsages: { include: { asset: { include: { licenses: { orderBy: { checkedAt: "desc" }, take: 1 } } } } }, scriptVersions: { orderBy: { version: "desc" } }, sceneVersions: { orderBy: { version: "desc" } }, contentIdeas: { take: 1 },
+      policyChecks: { orderBy: { checkedAt: "desc" }, include: { snapshots: { orderBy: { createdAt: "desc" }, take: 1 } } },
+      publishPlans: { orderBy: { createdAt: "desc" } }
     } });
     if (!item) return null;
+    const readPolicy = (policyCheck: (typeof item.policyChecks)[number] | undefined) => {
+      const policySnapshot = policyCheck?.snapshots[0];
+      const policySnapshotData = json(policySnapshot?.snapshot ?? null);
+      const policyFindings = (Array.isArray(policySnapshotData.findings) ? policySnapshotData.findings : []).flatMap((finding) => {
+        if (!finding || typeof finding !== "object" || Array.isArray(finding)) return [];
+        const value = finding as Record<string, unknown>;
+        return typeof value.code === "string" && typeof value.message === "string" && ["pass", "warning", "review", "block"].includes(String(value.severity)) ? [{ code: value.code, message: value.message, severity: value.severity as PolicyVerdict }] : [];
+      });
+      return policyCheck ? { status: verdictFromDb(policyCheck.status, policyFindings), findings: policyFindings, snapshotId: policySnapshot?.id ?? null } : null;
+    };
     const scriptMetadata = json(item.scriptVersions[0]?.qualitySnapshot ?? null).metadata;
     const metadata = scriptMetadata && typeof scriptMetadata === "object" && !Array.isArray(scriptMetadata) ? scriptMetadata as Record<string, unknown> : {};
     const check = item.policyChecks[0];
-    const snapshot = check?.snapshots[0];
-    const snapshotData = json(snapshot?.snapshot ?? null);
-    const rawFindings = Array.isArray(snapshotData.findings) ? snapshotData.findings : [];
-    const findings = rawFindings.flatMap((finding) => {
-      if (!finding || typeof finding !== "object" || Array.isArray(finding)) return [];
-      const value = finding as Record<string, unknown>;
-      return typeof value.code === "string" && typeof value.message === "string" && ["pass", "warning", "review", "block"].includes(String(value.severity)) ? [{ code: value.code, message: value.message, severity: value.severity as PolicyVerdict }] : [];
-    });
     const seenPlatforms = new Set<string>();
     const outputs = item.scriptVersions.flatMap((script) => {
       const key = script.platform ?? "COMMON"; if (seenPlatforms.has(key)) return []; seenPlatforms.add(key);
       const scene = item.sceneVersions.find((candidate) => candidate.platform === script.platform && candidate.scriptVersionId === script.id) ?? item.sceneVersions.find((candidate) => candidate.platform === script.platform);
       const rawMetadata = json(script.qualitySnapshot).metadata; const outputMetadata = rawMetadata && typeof rawMetadata === "object" && !Array.isArray(rawMetadata) ? rawMetadata as Record<string, unknown> : {};
-      return [{ platform: script.platform, scriptVersionId: script.id, sceneVersionId: scene?.id ?? null, scriptStatus: "ready" as const, renderStatus: scene?.renderManifest ? "ready" as const : "pending" as const, videoReady: Boolean(scene?.renderManifest), metadata: { description: typeof outputMetadata.description === "string" ? outputMetadata.description : item.summary ?? item.title, hashtags: Array.isArray(outputMetadata.hashtags) ? outputMetadata.hashtags.filter((tag): tag is string => typeof tag === "string") : [] } }];
+      const platformCheck = item.policyChecks.find((candidate) => candidate.platform === script.platform);
+      const publishPlan = item.publishPlans.find((candidate) => candidate.platform === script.platform);
+      const scriptQuality = json(script.qualitySnapshot);
+      const reviewStatus = scriptQuality.reviewStatus === "APPROVED" ? "APPROVED" as const : scriptQuality.reviewStatus === "HELD" ? "HELD" as const : scriptQuality.reviewStatus === "DISCARDED" ? "DISCARDED" as const : "REVIEW_REQUIRED" as const;
+      return [{ script: { hook: script.hook, body: script.body, callToAction: script.callToAction, language: script.language }, durationSeconds: script.durationSeconds?.toNumber() ?? null, title: typeof scriptQuality.reviewTitle === "string" ? scriptQuality.reviewTitle : item.title, reviewStatus, platform: script.platform, scriptVersionId: script.id, sceneVersionId: scene?.id ?? null, scriptStatus: "ready" as const, renderStatus: scene?.renderManifest ? "ready" as const : "pending" as const, videoReady: Boolean(scene?.renderManifest), metadata: { description: typeof outputMetadata.description === "string" ? outputMetadata.description : item.summary ?? item.title, hashtags: Array.isArray(outputMetadata.hashtags) ? outputMetadata.hashtags.filter((tag): tag is string => typeof tag === "string") : [] }, policy: platformCheck && platformCheck.checkedAt >= script.createdAt && (!scene || platformCheck.checkedAt >= scene.createdAt) ? readPolicy(platformCheck) : null, publishStatus: publishPlan?.status ?? null }];
     });
     return {
       id: item.id, channelId: item.channelId, status: item.status as ContentReviewResponse["status"], title: item.title, durationSeconds: item.scriptVersions[0]?.durationSeconds?.toNumber() ?? null,
       description: typeof metadata.description === "string" ? metadata.description : item.summary ?? "",
       sources: item.sourceReferences.map((source) => ({ title: source.title, url: source.url, sourceName: source.sourceName })),
-      assets: item.assetUsages.map((usage) => ({ id: usage.assetId, licenseStatus: usage.asset.licenses[0]?.status ?? "PENDING", purpose: usage.purpose })),
-      policy: check ? { status: verdictFromDb(check.status, findings), findings, snapshotId: snapshot?.id ?? null } : null,
+      assets: item.assetUsages.map((usage) => ({ id: usage.assetId, sceneVersionId: usage.sceneVersionId, licenseStatus: usage.asset.licenses[0]?.status ?? "PENDING", purpose: usage.purpose })),
+      policy: readPolicy(check),
       ideaId: item.contentIdeas[0]?.id ?? null,
       outputs
     };
@@ -57,12 +79,12 @@ export class PrismaReviewRepository implements ReviewRepository {
   async updateMetadata(workspaceId: string, contentItemId: string, input: UpdateReviewMetadataRequest): Promise<ContentReviewResponse | null> {
     const item = await this.prisma.contentItem.findFirst({ where: { id: contentItemId, channel: { workspaceId } }, include: { scriptVersions: { where: { platform: input.platform }, orderBy: { version: "desc" }, take: 1 }, sceneVersions: { where: { platform: input.platform }, orderBy: { version: "desc" }, take: 1 } } });
     const script = item?.scriptVersions[0]; if (!item || !script) return null;
-    const priorQuality = json(script.qualitySnapshot);
+    const priorQuality = { ...json(script.qualitySnapshot), reviewStatus: "REVIEW_REQUIRED" };
     await this.prisma.$transaction(async (tx) => {
       const nextVersion = script.version + 1;
-      const created = await tx.scriptVersion.create({ data: { contentItemId, version: nextVersion, platform: input.platform, hook: script.hook, body: script.body, callToAction: script.callToAction, language: script.language, durationSeconds: script.durationSeconds, promptVersion: script.promptVersion, qualitySnapshot: { ...priorQuality, metadata: { description: input.description, hashtags: input.hashtags }, editedBy: "review" } } });
-      const scene = item.sceneVersions[0];
-      if (scene) await tx.sceneVersion.create({ data: { contentItemId, scriptVersionId: created.id, version: nextVersion, schemaVersion: scene.schemaVersion, platform: input.platform, sceneDocument: scene.sceneDocument as Prisma.InputJsonValue, renderManifest: scene.renderManifest === null ? undefined : scene.renderManifest as Prisma.InputJsonValue, durationSeconds: scene.durationSeconds } });
+      await tx.scriptVersion.create({ data: { contentItemId, version: nextVersion, platform: input.platform, hook: script.hook, body: script.body, callToAction: script.callToAction, language: script.language, durationSeconds: script.durationSeconds, promptVersion: script.promptVersion, qualitySnapshot: { ...priorQuality, reviewTitle: input.title, metadata: { description: input.description, hashtags: input.hashtags }, editedBy: "review" } } });
+      // Metadata edits reuse the rendered scene and its asset/license evidence.
+      if (input.platform) await tx.publishPlan.updateMany({ where: { contentItemId, platform: input.platform, status: "SCHEDULED" }, data: { status: "HELD" } });
       await tx.contentItem.update({ where: { id: contentItemId }, data: { title: input.title, status: "REVIEW_REQUIRED", approvedAt: null } });
     });
     return this.get(workspaceId, contentItemId);
@@ -79,11 +101,12 @@ export class PrismaReviewRepository implements ReviewRepository {
     return rule;
   }
 
-  async getEvidence(workspaceId: string, contentItemId: string, restrictedTerms: readonly string[], minDurationSeconds: number): Promise<PolicyEvidence | null> {
+  async getEvidence(workspaceId: string, contentItemId: string, platform: PolicyRuleRecord["platform"], restrictedTerms: readonly string[], minDurationSeconds: number): Promise<PolicyEvidence | null> {
+    const currentScene = await this.prisma.sceneVersion.findFirst({ where: { contentItemId, platform, contentItem: { channel: { workspaceId } } }, orderBy: { version: "desc" } });
     const item = await this.prisma.contentItem.findFirst({ where: { id: contentItemId, channel: { workspaceId } }, include: {
       sourceReferences: true,
-      assetUsages: { include: { asset: { include: { licenses: { orderBy: { checkedAt: "desc" }, take: 1 } } } } },
-      scriptVersions: { orderBy: { version: "desc" }, take: 1 },
+      assetUsages: { where: currentScene ? { sceneVersionId: currentScene.id } : { id: { in: [] } }, include: { asset: { include: { licenses: { orderBy: { checkedAt: "desc" }, take: 1 } } } } },
+      scriptVersions: { where: { platform }, orderBy: { version: "desc" }, take: 1 },
       channel: { select: { contentItems: { where: { id: { not: contentItemId } }, include: { scriptVersions: { orderBy: { version: "desc" }, take: 1 } }, take: 50 } } }
     } });
     if (!item) return null;
@@ -128,14 +151,51 @@ export class PrismaReviewRepository implements ReviewRepository {
     return this.get(workspaceId, contentItemId);
   }
 
-  async act(workspaceId: string, contentItemId: string, action: "approve" | "hold" | "discard" | "schedule"): Promise<ContentReviewResponse | "POLICY_GATE" | "INVALID_TRANSITION" | null> {
-    const item = await this.prisma.contentItem.findFirst({ where: { id: contentItemId, channel: { workspaceId } }, include: { policyChecks: { orderBy: { checkedAt: "desc" }, take: 1 }, publishPlans: { where: { status: "SCHEDULED" }, take: 1 } } });
+  async act(workspaceId: string, contentItemId: string, action: "approve" | "hold" | "discard" | "schedule", platform?: PolicyRuleRecord["platform"]): Promise<ContentReviewResponse | "POLICY_GATE" | "INVALID_TRANSITION" | null> {
+    const item = await this.prisma.contentItem.findFirst({ where: { id: contentItemId, channel: { workspaceId } }, include: {
+      policyChecks: { where: platform ? { platform } : undefined, orderBy: { checkedAt: "desc" }, take: 1 },
+      scriptVersions: { where: platform ? { platform } : undefined, orderBy: { version: "desc" }, take: 1 },
+      sceneVersions: { where: platform ? { platform } : undefined, orderBy: { version: "desc" }, take: 1 },
+      publishPlans: { where: { status: "SCHEDULED", ...(platform ? { platform } : {}) }, take: 1 }
+    } });
     if (!item) return null;
-    if (action === "approve" && item.policyChecks[0]?.status !== "PASS") return "POLICY_GATE";
+    const check = item.policyChecks[0];
+    const script = item.scriptVersions[0];
+    const scene = item.sceneVersions[0];
+    if (action === "approve" && (check?.status !== "PASS" || !script || !scene || !scene.renderManifest || check.checkedAt < script.createdAt || check.checkedAt < scene.createdAt)) return "POLICY_GATE";
     const target = action === "approve" ? "APPROVED" : action === "schedule" ? "SCHEDULED" : "HELD";
     if (action === "schedule" && (item.status !== "APPROVED" || item.publishPlans.length === 0)) return "INVALID_TRANSITION";
-    if (action === "approve" && !["REVIEW_REQUIRED", "HELD"].includes(item.status)) return "INVALID_TRANSITION";
-    await this.prisma.contentItem.update({ where: { id: contentItemId }, data: { status: target, approvedAt: action === "approve" ? new Date() : null, heldReason: action === "hold" ? "MANUAL_HOLD" : action === "discard" ? "DISCARDED" : null } });
+    if (action === "approve" && !["REVIEW_REQUIRED", "HELD", "APPROVED", "SCHEDULED", "PUBLISHING", "PUBLISHED"].includes(item.status)) return "INVALID_TRANSITION";
+    const affectedScripts = await this.prisma.scriptVersion.findMany({ where: { contentItemId, ...(platform ? { platform } : {}) }, orderBy: { version: "desc" } });
+    const seen = new Set<string>();
+    const latestScripts = affectedScripts.filter((candidate) => { const key = candidate.platform ?? "COMMON"; if (seen.has(key)) return false; seen.add(key); return true; });
+    if (action === "approve") {
+      for (const candidate of latestScripts) {
+        const [currentCheck, currentScene] = await Promise.all([
+          this.prisma.policyCheck.findFirst({ where: { contentItemId, ...(candidate.platform ? { platform: candidate.platform } : {}) }, orderBy: { checkedAt: "desc" } }),
+          this.prisma.sceneVersion.findFirst({ where: { contentItemId, platform: candidate.platform }, orderBy: { version: "desc" } })
+        ]);
+        if (currentCheck?.status !== "PASS" || !currentScene?.renderManifest || currentCheck.checkedAt < candidate.createdAt || currentCheck.checkedAt < currentScene.createdAt) return "POLICY_GATE";
+      }
+    }
+    for (const candidate of latestScripts) {
+      await this.prisma.scriptVersion.update({ where: { id: candidate.id }, data: { qualitySnapshot: { ...json(candidate.qualitySnapshot), reviewStatus: action === "approve" ? "APPROVED" : action === "discard" ? "DISCARDED" : action === "hold" ? "HELD" : "APPROVED" }  } });
+    }
+    const retainPublishingStatus = platform && ["SCHEDULED", "PUBLISHING", "PUBLISHED"].includes(item.status);
+    await this.prisma.contentItem.update({ where: { id: contentItemId }, data: { status: retainPublishingStatus ? item.status : platform && action !== "approve" ? "REVIEW_REQUIRED" : target, approvedAt: action === "approve" ? new Date() : undefined, heldReason: platform ? undefined : action === "hold" ? "MANUAL_HOLD" : action === "discard" ? "DISCARDED" : null } });
+    if (action === "approve") {
+      const scriptSteps = await this.prisma.automationStep.findMany({
+        where: { stage: "SCRIPT", automationRun: { channelId: item.channelId } },
+        select: { automationRunId: true, output: true }
+      });
+      const runIds = scriptSteps.filter((step) => json(step.output).contentItemId === contentItemId).map((step) => step.automationRunId);
+      if (runIds.length > 0) {
+        await this.prisma.$transaction([
+          this.prisma.automationStep.updateMany({ where: { automationRunId: { in: runIds }, stage: "PUBLISH", status: "HELD", errorCode: "AWAITING_APPROVAL", ...(platform ? { platform } : {}) }, data: { status: "PENDING", errorCode: null, errorMessage: null, finishedAt: null } }),
+          this.prisma.automationRun.updateMany({ where: { id: { in: runIds }, status: "PAUSED" }, data: { status: "QUEUED", pausedReason: null, nextRunAt: new Date() } })
+        ]);
+      }
+    }
     return this.get(workspaceId, contentItemId);
   }
 }

@@ -28,6 +28,11 @@ export class AutomationController {
     return this.automation.setBudget(req.auth.workspaceId, req.auth.userId, body);
   }
 
+  @Get("budgets")
+  listBudgets(@Req() req: AuthenticatedRequest) {
+    return this.automation.listBudgets(req.auth.workspaceId);
+  }
+
   @Post("switches")
   setSwitch(@Req() req: AuthenticatedRequest, @Body() body: unknown) {
     return this.automation.setSwitch(req.auth.workspaceId, body);

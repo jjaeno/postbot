@@ -1,4 +1,4 @@
-import type { ContentReviewResponse, PolicyVerdict, UpdateReviewMetadataRequest } from "@postbot/contracts";
+import type { ContentReviewResponse, PolicyVerdict, UpdateReviewMetadataRequest, ReviewAssetLicenseRequest } from "@postbot/contracts";
 
 export const REVIEW_REPOSITORY = Symbol("REVIEW_REPOSITORY");
 
@@ -14,11 +14,12 @@ export type PolicyEvidence = {
 };
 
 export type ReviewRepository = {
+  reviewAssetLicense?(workspaceId: string, userId: string, contentItemId: string, input: ReviewAssetLicenseRequest): Promise<boolean>;
   get(workspaceId: string, contentItemId: string): Promise<ContentReviewResponse | null>;
   getRule(platform: PolicyRuleRecord["platform"], region: string, at: Date): Promise<PolicyRuleRecord | null>;
-  getEvidence(workspaceId: string, contentItemId: string, restrictedTerms: readonly string[], minDurationSeconds: number): Promise<PolicyEvidence | null>;
+  getEvidence(workspaceId: string, contentItemId: string, platform: PolicyRuleRecord["platform"], restrictedTerms: readonly string[], minDurationSeconds: number): Promise<PolicyEvidence | null>;
   updateMetadata(workspaceId: string, contentItemId: string, input: UpdateReviewMetadataRequest): Promise<ContentReviewResponse | null>;
   getPreviewKey(workspaceId: string, contentItemId: string, platform: PolicyRuleRecord["platform"] | null): Promise<string | null>;
   saveCheck(workspaceId: string, contentItemId: string, rule: PolicyRuleRecord, status: PolicyVerdict, findings: readonly { code: string; severity: PolicyVerdict; message: string }[]): Promise<ContentReviewResponse | null>;
-  act(workspaceId: string, contentItemId: string, action: "approve" | "hold" | "discard" | "schedule"): Promise<ContentReviewResponse | "POLICY_GATE" | "INVALID_TRANSITION" | null>;
+  act(workspaceId: string, contentItemId: string, action: "approve" | "hold" | "discard" | "schedule", platform?: PolicyRuleRecord["platform"]): Promise<ContentReviewResponse | "POLICY_GATE" | "INVALID_TRANSITION" | null>;
 };

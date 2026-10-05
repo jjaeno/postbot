@@ -25,9 +25,10 @@ const StructuredGenerationSchema = z.object({
 type StructuredGeneration = z.infer<typeof StructuredGenerationSchema>;
 type GenerationResult = { contentItemId: string; scriptVersionId: string; sceneVersionId: string; version: number };
 type MergedGeneration = { metadata: z.infer<typeof GeneratedMetadataSchema>; script: z.infer<typeof GeneratedScriptSchema>; facts: z.infer<typeof FactSourceLinkSchema>[]; sceneDocument: SceneDocument };
+type GeneratedWithUsage = StructuredGeneration & { model: string; usage: { promptTokens: number; completionTokens: number; totalTokens: number }; estimatedCostUsd: string; generationContext: Prisma.JsonObject; strategyVersion: number | null };
 
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
-const jsonObject = (value: Prisma.JsonValue | null): Record<string, unknown> =>
+const jsonObject = (value: Prisma.JsonValue | null): Prisma.JsonObject =>
   value && typeof value === "object" && !Array.isArray(value) ? value : {};
 
 export class ScriptGenerationProcessor {
@@ -43,21 +44,47 @@ export class ScriptGenerationProcessor {
     return this.save(jobId, input.generation.idea, input.generation.request, generated);
   }
 
-  private async generate(input: ScriptGenerationJobPayload["generation"]): Promise<StructuredGeneration & { model: string; usage: { promptTokens: number; completionTokens: number; totalTokens: number }; estimatedCostUsd: string }> {
+  private async generate(input: ScriptGenerationJobPayload["generation"]): Promise<GeneratedWithUsage> {
     const config = loadConfig();
     const provider: LlmProvider = config.LLM_PROVIDER === "openai"
-      ? new OpenAiLlmProvider({ apiKey: config.OPENAI_API_KEY, baseUrl: config.OPENAI_BASE_URL, timeoutMs: config.LLM_TIMEOUT_MS })
+      ? new OpenAiLlmProvider({ apiKey: config.OPENAI_API_KEY, baseUrl: config.OPENAI_BASE_URL, timeoutMs: config.LLM_TIMEOUT_MS, inputUsdPerMillionTokens: config.LLM_INPUT_USD_PER_MILLION_TOKENS, outputUsdPerMillionTokens: config.LLM_OUTPUT_USD_PER_MILLION_TOKENS })
       : new FakeLlmProvider();
     let lastError: unknown;
     for (let attempt = 1; attempt <= config.LLM_MAX_RETRIES + 1; attempt += 1) {
       try {
+        const channel = await this.prisma.channel.findUnique({
+          where: { id: input.idea.channelId },
+          include: {
+            templates: { where: { isActive: true }, orderBy: { version: "desc" }, take: 1 },
+            outputProfiles: { where: { ...(input.request.platform ? { platform: input.request.platform } : {}), isActive: true }, orderBy: { version: "desc" }, take: 1 },
+            strategyVersions: { where: { appliedAt: { not: null } }, orderBy: { version: "desc" }, take: 1 }
+          }
+        });
+        const template = channel?.templates[0];
+        const profile = channel?.outputProfiles[0];
+        const subtitle = jsonObject(template?.subtitleStyle ?? null);
+        const strategy = jsonObject(channel?.strategyVersions[0]?.strategy ?? null);
+        const generationContext = {
+          language: channel?.language ?? input.idea.language,
+          targetAudience: channel?.targetAudience ?? null,
+          tone: template?.tone ?? null,
+          hookStyle: profile?.hookStyle ?? null,
+          callToActionStyle: typeof subtitle.cta === "string" ? subtitle.cta : null,
+          minDurationSeconds: profile?.minDurationSeconds ?? null,
+          maxDurationSeconds: profile?.maxDurationSeconds ?? null,
+          captionStyle: profile?.captionStyle ?? null,
+          voiceProfile: template?.voiceProfile ?? null,
+          visualStyle: jsonObject(template?.visualStyle ?? null),
+          strategy: Object.keys(strategy).length > 0 ? strategy : null
+        };
         const response = await provider.generateScriptAndScene({
           model: config.LLM_MODEL, promptVersion, idempotencyKey: `${input.request.idempotencyKey}:attempt:${attempt}`,
           title: input.idea.title, summary: input.idea.summary, topic: input.idea.topic, platform: input.request.platform,
-          partial: input.request.partial, sources: [{ title: input.idea.title, summary: input.idea.summary, url: input.idea.canonicalUrl }]
+          partial: input.request.partial, sources: [{ title: input.idea.title, summary: input.idea.summary, url: input.idea.canonicalUrl }],
+          channelContext: generationContext
         });
         const structured = this.parse(response.structuredOutput, input.idea);
-        return { ...structured, model: response.model, usage: response.usage, estimatedCostUsd: response.estimatedCostUsd };
+        return { ...structured, model: response.model, usage: response.usage, estimatedCostUsd: response.estimatedCostUsd, generationContext, strategyVersion: channel?.strategyVersions[0]?.version ?? null };
       } catch (error) {
         lastError = error;
       }
@@ -78,7 +105,7 @@ export class ScriptGenerationProcessor {
     jobId: string,
     idea: GenerationIdeaSnapshot,
     request: ScriptGenerationJobPayload["generation"]["request"],
-    generated: StructuredGeneration & { model: string; usage: { promptTokens: number; completionTokens: number; totalTokens: number }; estimatedCostUsd: string }
+    generated: GeneratedWithUsage
   ): Promise<GenerationResult> {
     for (let transactionAttempt = 0; transactionAttempt < 3; transactionAttempt += 1) {
       try {
@@ -100,7 +127,7 @@ export class ScriptGenerationProcessor {
           const latestScene = await tx.sceneVersion.findFirst({ where: { contentItemId: contentItem.id, platform: request.platform }, orderBy: { version: "desc" } });
           const merged = this.merge(request.partial, generated, latestScript, latestScene);
           const version = (latestScript?.version ?? 0) + 1;
-          const scriptVersion = await tx.scriptVersion.create({ data: { contentItemId: contentItem.id, version, platform: request.platform, ...merged.script, durationSeconds: new Prisma.Decimal(merged.script.durationSeconds.toFixed(3)), promptVersion, qualitySnapshot: { metadata: merged.metadata, facts: merged.facts, model: generated.model } } });
+          const scriptVersion = await tx.scriptVersion.create({ data: { contentItemId: contentItem.id, version, platform: request.platform, ...merged.script, durationSeconds: new Prisma.Decimal(merged.script.durationSeconds.toFixed(3)), promptVersion, qualitySnapshot: { metadata: merged.metadata, facts: merged.facts, model: generated.model, generationContext: generated.generationContext, strategyVersion: generated.strategyVersion } } });
           const sceneVersion = await tx.sceneVersion.create({ data: { contentItemId: contentItem.id, scriptVersionId: scriptVersion.id, version, platform: request.platform, schemaVersion: merged.sceneDocument.schemaVersion, sceneDocument: merged.sceneDocument, durationSeconds: new Prisma.Decimal(merged.script.durationSeconds.toFixed(3)) } });
           const result = { contentItemId: contentItem.id, scriptVersionId: scriptVersion.id, sceneVersionId: sceneVersion.id, version };
           const usage = await tx.providerUsage.create({ data: { contentItemId: contentItem.id, productionJobId: jobId, provider: configProviderName(), model: generated.model, operation: "script-scene-generation", quantity: new Prisma.Decimal(generated.usage.totalTokens), unit: "token", estimatedCost: new Prisma.Decimal(generated.estimatedCostUsd), idempotencyKey: `script-job:${jobId}`, providerResponse: result } });
@@ -127,7 +154,10 @@ export class ScriptGenerationProcessor {
       metadata: partial === "metadata" ? generated.planning.metadata : storedMetadata,
       script: partial === "hook" ? { ...storedScript, hook: generated.script.hook } : partial === "body" ? { ...storedScript, body: generated.script.body } : storedScript,
       facts: storedFacts,
-      sceneDocument: partial === "scene" ? generated.sceneDocument : storedScene
+      sceneDocument: partial === "scene" ? { ...storedScene, scenes: storedScene.scenes.map((scene, index) => ({ ...scene, visualPrompt: generated.sceneDocument.scenes[index]?.visualPrompt ?? scene.visualPrompt })) }
+        : partial === "hook" ? { ...storedScene, scenes: storedScene.scenes.map((scene, index) => index === 0 ? { ...scene, narration: { ...scene.narration, text: generated.script.hook } } : scene) }
+          : partial === "body" ? { ...storedScene, scenes: storedScene.scenes.map((scene, index) => index > 0 ? { ...scene, narration: { ...scene.narration, text: generated.sceneDocument.scenes[index]?.narration.text ?? scene.narration.text } } : scene) }
+            : storedScene
     };
   }
 

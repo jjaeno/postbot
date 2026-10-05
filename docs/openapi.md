@@ -42,18 +42,24 @@ Current v1 endpoint summary (the generated Swagger document is authoritative for
 | POST | `/content/:contentItemId/review/policy-check` | Access cookie + CSRF | Evaluate the effective versioned policy rule and preserve an immutable snapshot |
 | POST | `/content/:contentItemId/review/action` | Access cookie + CSRF | Approve, hold, discard, or mark content scheduled; approval requires a passing policy check |
 | PATCH | `/content/:contentItemId/review/metadata` | Access cookie + CSRF | Create a new platform metadata version |
+| POST | `/content/:contentItemId/review/asset-license` | Owner + CSRF | Record human-reviewed HTTPS rights proof, commercial/derivative permission and VERIFIED/REJECTED status; invalidate approval/policy and hold affected reservations |
 | GET | `/content/:contentItemId/review/preview` | Access cookie | Return a short-lived render preview/direct recovery URL |
 | GET | `/content` | Access cookie | List up to 100 workspace-scoped content items for operational status and calendar workflows |
 | POST | `/publishing/plans` | Access cookie + CSRF | Create or return an idempotent YouTube publish plan after policy, account, and render gates pass |
+| GET | `/publishing/plans` | Access cookie | List workspace-scoped publish plans and outcomes for the calendar |
+| POST | `/publishing/plans/:id/cancel` | Access cookie + CSRF | Atomically cancel only an unstarted scheduled plan and its queued publish job; reschedule explicitly with a new plan |
 | GET | `/automation/runs` | Access cookie | List workspace-scoped automation runs and step states |
 | GET | `/automation/runs/:runId` | Access cookie | Read one automation run, heartbeat, error, and checkpoints |
-| POST | `/automation/runs` | Access cookie + CSRF | Start an idempotent automation run; optional stage cost estimates enable reserved-cost processing |
+| POST | `/automation/runs` | Access cookie + CSRF | Start an idempotent automation run; optional `ideaId` and `platforms` start the full pipeline from a selected idea and costs are estimated server-side |
 | POST | `/automation/runs/:runId/control` | Access cookie + CSRF | Pause, resume, drain, kill, retry, hold, or skip an automation run step |
 | POST | `/automation/budgets` | Access cookie + CSRF | Configure workspace or channel daily/monthly soft and hard limits |
+| GET | `/automation/budgets` | Access cookie | List workspace and channel budget limits |
 | POST | `/automation/switches` | Access cookie + CSRF | Set workspace or provider kill switches |
 | POST | `/analytics/sync` | Access cookie + CSRF | Create an idempotent ANALYTICS sync job for one channel/platform/period |
 | GET | `/analytics/report` | Access cookie | Return normalized metrics, availability, mapping version, and latest sync state |
 | POST | `/optimization/suggestions/generate` | Access cookie + CSRF | Generate an evidence/sample-aware optimization suggestion |
+| GET | `/optimization/channels/:channelId/strategies` | Access cookie | List owned-channel versioned strategy history |
+| POST | `/optimization/channels/:channelId/rollback/:version` | Owner + CSRF | Restore a historical strategy for future generation without altering scheduled snapshots |
 | GET | `/operations/costs` | Access cookie | Return usage/cost reconciliation |
 | GET | `/operations/notifications` | Access cookie | List deduplicated in-app notifications |
 | POST | `/operations/data-lifecycle` | Access cookie + CSRF | Enqueue retention, workspace deletion, or current-user deletion |
@@ -102,6 +108,16 @@ Each `POST /platform-accounts/<youtube|instagram|tiktok>/connect` accepts an opt
 The callback validates OAuth `state`, consumes it once, uses the stored PKCE verifier where supported, validates platform scopes, encrypts access/refresh tokens at application level, records the encryption key version, and links the external account within one workspace/channel.
 
 Real selectors fail closed when credentials or scopes are missing. Fake selectors remain explicit local/test providers.
+
+For callbacks accepting HTML, the server redirects with HTTP 303 to the configured trusted frontend and original channel. Success/failure indicators contain no OAuth codes, tokens or provider error detail. JSON clients retain the existing callback response.
+
+## Pre-release automation and review changes
+
+`POST /automation/runs` supports `ideaId`, `platforms` and `partial`. Clients do not supply stage prices. Scheduler and manual starts share server estimation; absent real-provider pricing holds with `COST_PRICING_REQUIRED`. A channel row lock reuses active non-idea runs when scheduler/manual requests race. Responses expose `createdAt` and terminal `finishedAt` for elapsed-time display.
+
+Approval, policy and metadata are platform-scoped. Editing metadata preserves the rendered SceneVersion and rights evidence, creates a new ScriptVersion, requires recheck/reapproval and holds old scheduled plans. Reservations enforce actual occupied slots and channel daily platform limits within a channel lock. A worker claims a scheduled plan atomically before upload, so cancellation cannot race an already-started publish.
+
+Experiment completion is rejected with `EXPERIMENT_RESULT_ANALYSIS_NOT_IMPLEMENTED`: automatic production assignment/result comparison is not a supported feature. Stored experiment state alone is not a completed analysis.
 
 ## Generation Contract
 

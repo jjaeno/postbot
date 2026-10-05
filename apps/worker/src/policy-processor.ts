@@ -17,11 +17,12 @@ export class PolicyProcessor {
 
   async process(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
     const input = PolicyAutomationJobPayloadSchema.parse(payload).policy;
+    const currentScene = await this.prisma.sceneVersion.findFirst({ where: { contentItemId: input.contentItemId, platform: input.platform }, orderBy: { version: "desc" } });
     const item = await this.prisma.contentItem.findUniqueOrThrow({ where: { id: input.contentItemId }, include: {
       channel: { include: { contentItems: { where: { id: { not: input.contentItemId } }, include: { scriptVersions: { where: { platform: input.platform }, orderBy: { version: "desc" }, take: 1 } }, take: 50 } } },
       sourceReferences: true,
       assetUsages: {
-        where: { OR: [{ sceneVersion: { platform: input.platform } }, { sceneVersionId: null }] },
+        where: currentScene ? { sceneVersionId: currentScene.id } : { id: { in: [] } },
         include: { asset: { include: { licenses: { orderBy: { checkedAt: "desc" }, take: 1 } } } }
       },
       scriptVersions: { where: { platform: input.platform }, orderBy: { version: "desc" }, take: 1 }
@@ -54,6 +55,7 @@ export class PolicyProcessor {
       const check = await tx.policyCheck.create({ data: { contentItemId: item.id, policyRuleId: ruleRecord.id, platform: input.platform, status: dbStatus, reasons: evaluation.findings } });
       const snapshot = JSON.parse(JSON.stringify({ policy: rule, status: evaluation.status, findings: evaluation.findings })) as Prisma.InputJsonObject;
       await tx.policySnapshot.create({ data: { channelId: item.channelId, policyRuleId: ruleRecord.id, policyCheckId: check.id, checkedAt: now, snapshot } });
+      if (script) await tx.scriptVersion.update({ where: { id: script.id }, data: { qualitySnapshot: { ...metadata, reviewStatus: evaluation.status === "pass" && item.channel.automationMode === "FULL_AUTO" ? "APPROVED" : evaluation.status === "block" ? "HELD" : "REVIEW_REQUIRED" }  } });
       await tx.contentItem.update({ where: { id: item.id }, data: evaluation.status === "block" ? { status: "HELD", heldReason: "POLICY_BLOCK" } : evaluation.status !== "pass" ? { status: "REVIEW_REQUIRED", heldReason: "POLICY_REVIEW" } : item.channel.automationMode === "FULL_AUTO" ? { status: "APPROVED", approvedAt: now, heldReason: null } : { status: "REVIEW_REQUIRED", heldReason: null } });
     });
     return { contentItemId: item.id, status: evaluation.status, findings: evaluation.findings, rightsVerified: licenses.length > 0 && licenses.every((license) => license?.status === "VERIFIED" && license.commercialUseAllowed), policyVersion: rule.version, effectiveAt: rule.effectiveAt, checkedAt: now.toISOString() };

@@ -1,5 +1,61 @@
 # Postbot v1 Acceptance Report
 
+## 2026-10-05 출시 전 정합성 보완 — 최신 판정
+
+대상: `implementation-plan.md` 19.1단계. 시작/원격 기준 SHA: `ab8758d898fe4a4c90f4ce5398b479a0d1c363ac`. 최신 원격 main도 동일함을 확인했다. 검증된 구현 commit SHA는 로컬 구현 커밋 후 기록한다. 푸시·병합·production 배포와 실제 유료 API/SNS 호출은 하지 않았다.
+
+최종 판정: **PASS_WITH_EXTERNAL_VERIFICATION_PENDING** — 19.1단계의 지원 범위에 대한 내부/Fake/local 검증 판정이며 production 출시 승인이나 전체 로드맵 완료 판정이 아니다. 자동 실험 제작 배정/성과 비교, 자유 비율·해상도·자막 테마는 내부 미지원으로 명시하며 전체 로드맵 완료나 근거 없는 blocker 0을 선언하지 않는다. 구현·제외 범위는 `feature-ux-pre-release-addendum.md`, 문제별 근거·실 Provider smoke는 `pre-release-remediation.md`를 따른다. 아래 미실행한 CI/scanner와 moderate 의존성 위험은 staging 승격 전에 확인해야 한다.
+
+### 환경과 증거 구분
+
+Windows 11 / Node 20.19.4 / pnpm 10.34.5, Docker Desktop을 복구해 MySQL 8.4·Redis 7.4·MinIO를 실행했다. 전용 `postbot_test`와 격리 Compose `postbot_acceptance_test`를 사용했으며 운영 DB를 초기화하지 않았다. API/worker는 production runtime, renderer는 실제 Chromium/FFmpeg, 외부 LLM/Image/TTS/OAuth/Publishing/Analytics는 Fake다.
+
+브라우저 테스트는 API mock 기반이며 실제 DB/queue 여정과 구분한다. 승인형·완전 자동형 통합 실행은 runtime image에 최신 compiled API/worker/contracts/asset-library를 read-only mount했다. 최종 이미지 재빌드 후 수동 여정은 dist mount 없이 baked image로 통과했다. 테스트 fixture의 15초 길이는 seed 정책의 최소 30초에 정상 차단돼 fixture를 30초로 수정했다. scheduler/manual 경합으로 중복 run이 생기는 결함을 수정하고 전용 acceptance DB의 미완료 fixture 실행만 취소했으며 데이터 삭제는 하지 않았다. 마지막 수동 재검증 격리를 위해 기존 acceptance fixture 채널만 PAUSED 처리했다.
+
+### 실행 명령과 결과
+
+| 검증/명령 | 최신 결과 |
+| --- | --- |
+| `pnpm exec turbo run lint typecheck build --concurrency=2` | PASS — 42/42 tasks (각 14개 package/app) |
+| `pnpm exec turbo run test --concurrency=2` | 전체 24개 성공, API의 5초 HTTP fixture가 Docker build 동시 부하로 timeout. 실패 app만 낮은 동시성으로 재검증 |
+| `pnpm --filter @postbot/api test --maxWorkers=2` | PASS — 70 passed, 11 skipped. 환경 의존 DB/release 제외는 아래 별도 실행 |
+| `RUN_DB_INTEGRATION=1`, 전용 DB의 worker/asset 테스트 | Worker 18/18, asset 5/5 PASS. 최신 SceneVersion 권리·fallback 이력 보존 포함 |
+| API DB integration: budget isolation/branching/start race/slot race (`--maxWorkers=1`) | PASS — 4 files, 8/8. workspace/currency/orphan/동시 예산 초과 및 예약 경합 포함 |
+| 최종 예약 멱등 키 소유권 보완 후 API lint/typecheck/build 및 publishing unit/slot DB | PASS — unit 4/4 (추가 workspace 격리 1건 포함), DB 1/1. 영향 없는 이전 성공 검증은 반복하지 않음 |
+| `pnpm --filter @postbot/web e2e` | Chromium 10/10 PASS — wizard/OAuth/refresh/승인/완전 자동 설정/소재 제작/예산/polling 입력/잘못된 시간대·Escape/OAuth 실패·조회 실패 |
+| 동일 Playwright 10개 여정의 390×844 viewport (`--config ../../.artifacts/pre-release/mobile.playwright.config.mjs`) | PASS — 10/10, 25.7초. 임시 config는 Git 제외, webServer cwd를 web app으로 제한 |
+| `pnpm --filter @postbot/renderer smoke:asset` | 실제 Chromium still, 1080×1920, 이미지 합성 PASS |
+| production renderer image의 `node node_modules/@postbot/renderer/scripts/smoke.mjs` | 15초/60초 MP4 PASS — 15.001/60.001초, 1080×1920, audio true, 평균 -21.1dB, black ratio 0, 이미지 픽셀 RGB [199,4,205]. 두 실행 exit 0; Chromium 종료 경고는 비치명적 |
+| Compose acceptance `vitest run src/release/fake-journey.e2e.spec.ts -t 'runs the'` | 실제 APPROVAL/FULL_AUTO 2/2 PASS, 수동 1개는 이 명령에서 제외. 승인 567,997ms, 완전 자동 365,709ms. 각 3-platform 제작·게시·분석·최적화, 중복 재요청 확인 |
+| 최종 baked image: Compose acceptance `vitest run src/release/fake-journey.e2e.spec.ts -t registers` | PASS — 수동 1/1, 다른 2개는 별도 실행. 전체 121,869ms; SSE 6ms, script 2,083ms, asset/TTS 각각 2,053ms, 37.5초 영상 render 96,752ms, analytics 2,013ms. 게시/비용 중복 없음 |
+| `docker compose -f docker-compose.acceptance.yml build api worker acceptance` + `up -d --force-recreate --wait api worker` | PASS — 최종 API 재빌드 포함, baked image 실행(no dist override), non-root node UID 1000, readiness DB/Redis/storage 모두 ok |
+| final acceptance image의 기존 DB `prisma migrate deploy` | PASS — 11 migrations, pending 0; seed 완료. schema 변경 없음 |
+| `pnpm audit --prod --audit-level=high` | exit 0; moderate 2건(js-yaml, brace-expansion). 취약점 0으로 보고하지 않음 |
+
+최종 로컬 image IDs: API `sha256:78b50265d786033ef32d6dec54f021b277fba5779dbff98ec20a9387ce356ca9`, worker `sha256:0c6f5b737ab6db8f39df41703054e1e52ae01d217a2d7df35258302b809ae3d5`. 이는 로컬 image ID이며 registry 승격 digest가 아니다. Fake release 세 여정은 분리 명령으로 총 3/3 통과했으며 동일 최종 baked image에서 세 여정을 한꺼번에 재실행한 것으로 과장하지 않는다.
+
+최종 수동 MP4의 저장된 ffprobe QA: 38.016초 (37.5초 SceneDocument 대비 허용 1초 이내), 1080×1920, audio true, 평균 -36.3dB, black frame 비율 0. 최종 검증 후 격리 acceptance 컨테이너는 정지하고 DB/object 데이터는 보존한다. 기존 개발 인프라·사용자 DB는 정지/삭제하지 않는다.
+
+화면 증거: `apps/web/test-results/channel-wizard-preserves-r-95435-stores-the-selected-content-chromium/review-dashboard.png`. 영상 프레임 증거: `.artifacts/pre-release/scene-asset-smoke.png`. 둘 다 실제 파일을 열어 확인했다. 브라우저 mock의 example video URL을 실제 영상 재생 증거로 사용하지 않는다.
+
+모바일 화면 증거: `.artifacts/pre-release/mobile-results/channel-wizard-preserves-r-95435-stores-the-selected-content-chromium-mobile/review-dashboard.png` (390×7348 full-page). 초기 임시 config가 root dev script를 실행해 중단했고 cwd를 web으로 제한해 재실행했다. 현재 실제 완료 증거는 수정 config의 10/10 결과다.
+
+### 미실행·제한과 후속 검증
+
+* 실제 Provider/SNS/Sentry: staging 자격 증명·사업자/앱 승인 계정이 없으며 유료 호출/실 게시 금지 범위다. Fake 성공으로 실 연동을 보증하지 않는다.
+* Gitleaks/Trivy CLI 및 GitHub-hosted CI 실행: 로컬 도구 없음, push 금지. workflow 정의는 유지하고 dependency audit와 권한/CSRF/rate-limit HTTP 회귀는 로컬 실행했다. 최종 SHA의 filesystem/image scan은 CI에서 필요하다.
+* 이번에는 Prisma schema/migration 변경이 없다. 빈/기존 DB migration·backup/restore/rollback의 2026-09-29 결과는 아래 역사적 증거이며 이번에 다시 실행했다는 뜻은 아니다. 최종 acceptance image의 deploy/status는 별도 기록한다.
+* 실제 청구 정산, 증빙 진위·voice 상업권 검토, production 부하·용량, registry digest 승격, KMS·TLS·backup/restore rehearsal은 배포 전 별도 운영 검증이다.
+* 재생성 화면은 단계별 예상 비용 예약·추가 비용 발생을 안내하지만 클릭 전 정확한 총 견적 숫자를 제공하지 않는다. 서로 다른 플랫폼 정책/권리 gate는 독립적으로 유지한다.
+
+실 Provider 최소 smoke: source 1건으로 script→이미지 1장→짧은 TTS→영상 QA, configured price/usage/실 청구 대사, 낮은 budget 허용/차단, 각 SNS OAuth 승인·거절·만료/refresh→테스트 게시 1건→URL/analytics/정리, 최종 이미지 readiness·backup/restore/rollback을 수행한다. 세부 환경/명령은 `external-verification-checklist.md`와 운영 runbook에 있다.
+
+---
+
+## 역사적 baseline — 2026-09-29 (최신 판정이 아님)
+
+이하의 PASS/보안 0건/내부 blocker 0 주장은 당시 SHA와 검증일에 한정된다. 최신 구현과 보안 상태는 위 2026-10-05 절을 따른다.
+
 검증일: 2026-09-29 (Asia/Seoul)
 
 Validated implementation SHA: `a2b6103e93e532ef1f164e2dd98b6c9bd5061777`

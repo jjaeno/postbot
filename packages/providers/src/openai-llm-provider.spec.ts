@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { OpenAiLlmProvider } from "./index.js";
+import { FakeLlmProvider, OpenAiLlmProvider } from "./index.js";
 import { FakeStorageProvider } from "./index.js";
 
 const responseBody = {
@@ -71,5 +71,25 @@ describe("FakeStorageProvider", () => {
     await expect(storage.presignedUrl(stored.key, 60)).resolves.toContain("expiresIn=60");
     await storage.delete(stored.key);
     await expect(Promise.resolve().then(() => storage.download(stored.key))).rejects.toThrow("STORAGE_OBJECT_NOT_FOUND");
+  });
+});
+
+describe("FakeLlmProvider channel context", () => {
+  it("applies channel language, audience, tone, hook, CTA, and duration settings", async () => {
+    const result = await new FakeLlmProvider().generateScriptAndScene({
+      model: "fake-v1", promptVersion: "v1", idempotencyKey: "context-job", title: "Product update", summary: "A useful change shipped.",
+      topic: "software", platform: "YOUTUBE", partial: "full", sources: [{ title: "Release", summary: "A useful change shipped.", url: "https://example.org/release" }],
+      channelContext: {
+        language: "ko-KR", targetAudience: "초보 창업자", tone: "차분한 설명", hookStyle: "숫자로 시작", callToActionStyle: "저장해 두세요",
+        minDurationSeconds: 30, maxDurationSeconds: 50, captionStyle: "큰 자막", strategy: { emphasis: "practical" }
+      }
+    });
+    const serialized = JSON.stringify(result.structuredOutput);
+    expect(serialized).toContain("ko-KR");
+    expect(serialized).toContain("초보 창업자");
+    expect(serialized).toContain("차분한 설명");
+    expect(serialized).toContain("숫자로 시작");
+    expect(serialized).toContain("저장해 두세요");
+    expect(serialized).toContain('"durationSeconds":40');
   });
 });

@@ -1,5 +1,5 @@
-import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { PlatformSchema, ReviewActionRequestSchema, RunPolicyCheckRequestSchema, UpdateReviewMetadataRequestSchema, type ContentReviewResponse, type UpdateReviewMetadataRequest } from "@postbot/contracts";
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { PlatformSchema, ReviewActionRequestSchema, ReviewAssetLicenseRequestSchema, RunPolicyCheckRequestSchema, UpdateReviewMetadataRequestSchema, type ContentReviewResponse, type UpdateReviewMetadataRequest } from "@postbot/contracts";
 import { evaluatePolicy, type PolicyRule } from "@postbot/policy-engine";
 import { loadConfig } from "@postbot/config";
 import { FakeStorageProvider, S3StorageProvider, type StorageProvider } from "@postbot/providers";
@@ -40,17 +40,24 @@ export class ReviewService {
     if (!review) throw new NotFoundException({ code: "CONTENT_NOT_FOUND", message: "Content was not found." });
     return review;
   }
+  async reviewAssetLicense(workspaceId: string, role: string, userId: string, contentItemId: string, raw: unknown): Promise<ContentReviewResponse> {
+    if (role !== "OWNER") throw new ForbiddenException("OWNER_ROLE_REQUIRED");
+    const input = ReviewAssetLicenseRequestSchema.parse(raw);
+    const saved = await this.repository.reviewAssetLicense?.(workspaceId, userId, contentItemId, input);
+    if (!saved) throw new NotFoundException("OWNED_ASSET_NOT_FOUND");
+    return this.get(workspaceId, contentItemId);
+  }
   async check(workspaceId: string, contentItemId: string, raw: unknown): Promise<ContentReviewResponse> {
     const input = RunPolicyCheckRequestSchema.parse(raw);
     const review = await this.get(workspaceId, contentItemId);
     const rule = await this.repository.getRule(input.platform, input.region, new Date());
     if (!rule) throw new ConflictException({ code: "POLICY_RULE_NOT_FOUND", message: "No effective policy rule is configured." });
     const normalizedRule = toRule(rule);
-    const evidence = await this.repository.getEvidence(workspaceId, contentItemId, normalizedRule.restrictedTerms, asNumber(rule.durationRule, ["minDurationSeconds", "minSeconds"], 0));
+    const evidence = await this.repository.getEvidence(workspaceId, contentItemId, input.platform, normalizedRule.restrictedTerms, asNumber(rule.durationRule, ["minDurationSeconds", "minSeconds"], 0));
     if (!evidence) throw new NotFoundException({ code: "CONTENT_NOT_FOUND", message: "Content was not found." });
     const evaluation = evaluatePolicy(normalizedRule, {
-      durationSeconds: review.durationSeconds, description: review.description,
-      hasAiDisclosure: /(?:ai|인공지능)\s*(?:생성|generated|사용)/i.test(review.description),
+      durationSeconds: review.outputs.find((output) => output.platform === input.platform)?.durationSeconds ?? review.durationSeconds, description: review.outputs.find((output) => output.platform === input.platform)?.metadata.description ?? review.description,
+      hasAiDisclosure: /(?:ai|인공지능)\s*(?:생성|generated|사용)/i.test(review.outputs.find((output) => output.platform === input.platform)?.metadata.description ?? review.description),
       ...evidence
     });
     const saved = await this.repository.saveCheck(workspaceId, contentItemId, rule, evaluation.status, evaluation.findings);
@@ -59,7 +66,7 @@ export class ReviewService {
   }
   async action(workspaceId: string, contentItemId: string, raw: unknown): Promise<ContentReviewResponse> {
     const input = ReviewActionRequestSchema.parse(raw);
-    const result = await this.repository.act(workspaceId, contentItemId, input.action);
+    const result = await this.repository.act(workspaceId, contentItemId, input.action, input.platform);
     if (!result) throw new NotFoundException({ code: "CONTENT_NOT_FOUND", message: "Content was not found." });
     if (result === "POLICY_GATE") throw new ConflictException({ code: "POLICY_GATE", message: "A passing policy check is required." });
     if (result === "INVALID_TRANSITION") throw new BadRequestException({ code: "INVALID_REVIEW_TRANSITION", message: "Invalid content state transition." });

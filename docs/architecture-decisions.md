@@ -228,6 +228,26 @@ DB UNIQUE 제약과 application validation을 함께 적용한다.
 
 ---
 
+## ADR-013 — 자동화 비용은 서버에서 산정하고 미확정 단가는 차단
+
+**결정**
+
+자동화 실행 요청은 단계별 예상 비용을 받지 않는다. API가 선택된 Provider, 설정 단가, 예상 또는 실제 작업량을 사용해 각 단계의 예약 금액을 계산한다.
+
+Fake Provider는 회귀 테스트를 위한 결정적 비영(非零) 단가를 사용한다. 실제 LLM/Image/TTS/Renderer Provider를 선택했는데 해당 단가가 설정되지 않았으면 비용을 0으로 간주하지 않고 `COST_PRICING_REQUIRED`로 작업을 보류한다.
+
+Provider 응답에 실제 청구 금액이 있을 때만 actual ledger로 확정하고, 그렇지 않으면 estimated ledger와 외부 청구 대사 상태를 구분한다.
+
+**이유**
+
+클라이언트가 제공한 금액은 조작 가능하고 scheduler 요청에는 존재하지 않아 hard limit을 우회하거나 정상 자동화를 영구 보류시킬 수 있다. 서버 단일 계산 경로가 수동·예약 자동화와 모든 UI의 동일한 예산 정책을 보장한다.
+
+**제약**
+
+단가는 환경 설정 또는 향후 versioned pricing table에서 관리하며 코드에 실제 Provider 가격을 상수로 고정하지 않는다. 금액 저장과 합산은 DECIMAL을 유지한다.
+
+---
+
 # 2. 패키지 경계
 
 ## Applications

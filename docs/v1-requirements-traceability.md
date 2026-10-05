@@ -1,6 +1,25 @@
 # Postbot v1 요구사항 추적성
 
-기준일: 2026-09-29. `PASS`는 저장소 내부 구현과 Fake/local 검증의 통과를 뜻한다. 실제 사업자 계정, 앱 심사 또는 production 인프라가 필요한 항목은 내부 계약이 통과했더라도 `EXTERNAL_VERIFICATION_PENDING`으로 분리한다.
+## 2026-10-05 보완 추적
+
+| Requirement ID | 보완 내용 | 구현 | 검증 | 상태 |
+| --- | --- | --- | --- | --- |
+| GEN-01 | 채널 template/output profile/applied strategy를 LLM context와 snapshot에 전달 | `ScriptGenerationProcessor`, provider contract | Provider unit, worker typecheck | PASS |
+| ASSET-01 / RENDER-01 | 장면별 이미지 생성, 정확한 SceneVersion 사용, Remotion 합성 | asset processor, render processor/composition 1.1 | renderer unit + Chromium still smoke | PASS |
+| REVIEW-01 | 내부 ID 없는 콘텐츠 선택, 플랫폼별 정책/미리보기/상태, 수정 후 재검사 | web review + review repository | Playwright approval flow, API unit | PASS |
+| AUTO-01 | 선택 아이디어에서 전체 자동화 시작, 승인 후 branch 자동 재개 | automation service + ideas UI | Playwright idea-to-production | PASS |
+| BUDGET-01 | 서버 비용 산정, 미확정 실 Provider 단가 fail-closed, 예산 UI | estimator + budget API/UI | estimator unit + Playwright budget | PASS; actual billing reconciliation pending |
+| PUBLISH-01 | 플랫폼별 최신 산출물/정책/편집 metadata, 순차 플랫폼 예약, 시각 충돌 차단 | publishing service + calendar | API unit + Playwright calendar surface | PASS; real SNS pending |
+| ASSET-02 | 재생성/fallback 사용 이력 보존, 최신 권리 증빙과 장면만 검사 | asset library/review/PolicyProcessor | asset DB + policy DB + render DB | PASS |
+| AUTO-04 | scheduler/manual 경합 중복 방지, 승인 후 재개 | channel row lock/review | DB race + 실제 3-platform APPROVAL 여정 | PASS |
+| TIME-01 | Seoul 날짜·요일, DST, 예약 점유·일간 한도 | schedule-time/publish-slots | timezone unit + slot DB race | PASS |
+| UX-01 | 입력 보존·URL 복구·OAuth 실패·조회 실패·modal Escape | web/controller | Chromium 10 journeys + callback unit | PASS (browser API mock) |
+| OPT-02 | 적용 전략/rollback을 후속 생성에 반영 | strategy history/generation context | worker unit + optimization unit | PASS; 실제 성과 미검증 |
+| EXP-01 | 자동 제작 실험 배정·결과 비교 | 완료 API fail-closed, 미지원 안내 | 구현 범위 제외 | NOT_IMPLEMENTED; 완료로 선언하지 않음 |
+
+---
+
+아래 표는 2026-09-29 역사적 baseline이며 최신 재검증은 위 표와 acceptance report 첫 절을 따른다. `PASS`는 저장소 내부 구현과 Fake/local 검증의 통과를 뜻한다. 실제 사업자 계정, 앱 심사 또는 production 인프라가 필요한 항목은 내부 계약이 통과했더라도 `EXTERNAL_VERIFICATION_PENDING`으로 분리한다. Experiment 상태/수동 배정 저장은 성과 비교 완료를 의미하지 않는다.
 
 | Requirement ID | Requirement | Implementation | API | DB | Test | Status | External Verification |
 | --- | --- | --- | --- | --- | --- | --- | --- |
