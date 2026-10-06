@@ -101,7 +101,12 @@ export class DeterministicJobProcessor {
 
   async process(input: EnqueueJobInput): Promise<void> {
     const persisted = await this.prisma.productionJob.findUnique({ where: { id: input.id }, select: { status: true } });
-    if (persisted?.status === "SUCCEEDED") return;
+    if (persisted?.status === "SUCCEEDED" || persisted?.status === "CANCELLED") return;
+    const runId = automationRunId(input.payload);
+    if (runId && (await this.prisma.automationRun.findUnique({ where: { id: runId }, select: { status: true } }))?.status === "CANCELLED") {
+      await this.cancel(input.id, null);
+      return;
+    }
     if (await this.isProviderDisabled(input.id, input.type)) {
       await this.holdForProviderSwitch(input.id, input.type);
       return;
@@ -299,7 +304,7 @@ export class DeterministicJobProcessor {
       const previousCheckpoint = run?.checkpoint && typeof run.checkpoint === "object" && !Array.isArray(run.checkpoint) ? run.checkpoint : {};
       await this.prisma.$transaction([
         this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "SUCCEEDED", attemptCount: attemptNumber, output: result as Prisma.InputJsonObject, finishedAt: now } }),
-        this.prisma.automationRun.update({ where: { id: runId }, data: { status: "RUNNING", heartbeatAt: now, checkpoint: { ...previousCheckpoint, stage: job.type.toLowerCase(), platform: automationPlatform(job.payload as Record<string, unknown>), lastJobId: jobId, completedAt: now.toISOString() } } })
+        this.prisma.automationRun.updateMany({ where: { id: runId, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "RUNNING", heartbeatAt: now, checkpoint: { ...previousCheckpoint, stage: job.type.toLowerCase(), platform: automationPlatform(job.payload as Record<string, unknown>), lastJobId: jobId, completedAt: now.toISOString() } } })
       ]);
       await this.settleReservation(runId, jobId, job.type, false);
     }
@@ -321,7 +326,7 @@ export class DeterministicJobProcessor {
     if (!runId) return;
     await this.prisma.$transaction([
       this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "HELD", errorCode: "PROVIDER_SWITCH_DISABLED", errorMessage: "The provider kill switch is enabled.", finishedAt: new Date() } }),
-      this.prisma.automationRun.update({ where: { id: runId }, data: { status: "RUNNING", pausedReason: null, nextRunAt: new Date() } }),
+      this.prisma.automationRun.updateMany({ where: { id: runId, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "RUNNING", pausedReason: null, nextRunAt: new Date() } }),
       this.prisma.automationEvent.create({ data: { automationRunId: runId, action: "HOLD", reason: "PROVIDER_SWITCH_DISABLED", details: { provider: providerForJobType(type), platform: automationPlatform(job?.payload as Record<string, unknown>) } } })
     ]);
   }
@@ -343,13 +348,13 @@ export class DeterministicJobProcessor {
       const now = new Date();
       await this.prisma.$transaction([
         this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "FAILED", attemptCount: attemptNumber, errorCode, errorMessage, finishedAt: now } }),
-        this.prisma.automationRun.update({ where: { id: runId }, data: { status: "RUNNING", failureCount: { increment: 1 }, heartbeatAt: now, nextRunAt: now, lastErrorCode: errorCode, lastErrorMessage: errorMessage } })
+        this.prisma.automationRun.updateMany({ where: { id: runId, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "RUNNING", failureCount: { increment: 1 }, heartbeatAt: now, nextRunAt: now, lastErrorCode: errorCode, lastErrorMessage: errorMessage } })
       ]);
       await this.settleReservation(runId, jobId, job.type, true);
       const run = await this.prisma.automationRun.findUnique({ where: { id: runId }, select: { failureCount: true } });
       if (run && run.failureCount >= 3) {
         await this.prisma.$transaction([
-          this.prisma.automationRun.update({ where: { id: runId }, data: { status: "PAUSED", pausedReason: "CONSECUTIVE_FAILURE_THRESHOLD" } }),
+          this.prisma.automationRun.updateMany({ where: { id: runId, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "PAUSED", pausedReason: "CONSECUTIVE_FAILURE_THRESHOLD" } }),
           this.prisma.automationEvent.create({ data: { automationRunId: runId, action: "AUTO_PAUSE", reason: "CONSECUTIVE_FAILURE_THRESHOLD", details: { failureCount: run.failureCount, errorCode } } })
         ]);
         const provider = providerForJobType(job?.type ?? "COLLECT");
@@ -387,7 +392,7 @@ export class DeterministicJobProcessor {
     const now = new Date();
     await this.prisma.$transaction([
       this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "RUNNING", attemptCount: attemptNumber, startedAt: now } }),
-      this.prisma.automationRun.update({ where: { id: runId }, data: { status: "RUNNING", heartbeatAt: now } })
+      this.prisma.automationRun.updateMany({ where: { id: runId, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "RUNNING", heartbeatAt: now } })
     ]);
   }
 
@@ -403,7 +408,7 @@ export class DeterministicJobProcessor {
     const runId = job ? automationRunId(job.payload as Record<string, unknown>) : null;
     if (runId) await this.prisma.$transaction([
       this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "HELD", attemptCount: attemptNumber, output: result as Prisma.InputJsonObject, errorCode, errorMessage: "Manual review is required.", finishedAt: new Date() } }),
-      this.prisma.automationRun.update({ where: { id: runId }, data: { status: "RUNNING", pausedReason: null, heartbeatAt: new Date(), nextRunAt: new Date() } })
+      this.prisma.automationRun.updateMany({ where: { id: runId, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "RUNNING", pausedReason: null, heartbeatAt: new Date(), nextRunAt: new Date() } })
     ]);
   }
 

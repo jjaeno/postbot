@@ -1,5 +1,11 @@
 # Postbot v1 Acceptance Report
 
+## 2026-10-06 직접 UX 보완 — 19.4
+
+최종 판정: **PASS_WITH_EXTERNAL_VERIFICATION_PENDING**. [직접 UX 보완 결과](ux-remediation-2026-10-06.md)를 우선 확인한다. 실제 API 브라우저 점검 21개·page error 0, Playwright 18/18, API 96/96, worker 23/23, Fake 전체 여정 3/3, 변경 app/package lint·typecheck·build 및 실제 오디오 합성 4모드·기존/빈 DB migration을 통과했다. 신규 격리 전체 여정에서 DB deadlock 1회는 기존 재시도로 복구됐고 실패 attempt를 보존했다. production 이미지 재빌드/운영 배포/원격 CI/실 Provider·SNS는 이번 검증에 포함되지 않는다.
+
+아래 19.3의 blocker 0은 당시 지원 범위 검증 기록이며 최초 명세 전체 기능의 화면 사용성 완료를 의미하지 않는다. 19.4에서 재예약·플랫폼 격리·누락 운영 화면과 추가 재생성/음원 경로를 보완했지만 커버 직접 편집·외부 자동 스톡 구매·고급 훅/게시 시각 최적화는 지원하지 않는다. 따라서 최초 명세 전체가 API 키 설정만 남은 상태라고 판정하지 않는다.
+
 ## 2026-10-06 출시 전체 내부 회귀·운영 보완 — 19.3단계
 
 최종 판정: **PASS_WITH_EXTERNAL_VERIFICATION_PENDING**. 19.3의 지원 v1 범위에서 발견한 내부 출시 차단 결함을 보완했고 필수 로컬 검증을 모두 통과했다. 알려진 내부 release blocker는 0개이며 모든 미래 버그가 없다는 보장은 아니다. 아래는 19.3의 최신 증거이며, 이후의 19.2/19.1 기록은 과거 검증이다. 대상은 `feature-ux-pre-release-addendum.md`의 지원 v1 범위다. 자유 편집기·자유 화면 비율·외부 스톡 자동 구매·인과 효과 실험 등 명시적 제외 로드맵까지 완료했다고 주장하지 않는다. 실제 Provider/SNS, 운영 배포, 사용자 설정은 내부 Fake 검증과 구분한다. 시작 SHA: `592a55e`; 최종 구현 commit은 `git log -1 --format=%H`로 확인한다. push는 수행하지 않았다.

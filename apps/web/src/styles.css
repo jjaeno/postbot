@@ -10,3 +10,18 @@ body {
   margin: 0;
   min-width: 320px;
 }
+
+/* Grid/flex children and native controls must shrink even with long asset names. */
+section, article, main, aside, form, fieldset, details {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+input, select, textarea, video {
+  min-width: 0;
+  max-width: 100%;
+}
+@media (max-width: 639px) {
+  #content select { width: 100%; min-width: 0; margin-left: 0; }
+  #content label input:not([type="checkbox"]), #content label textarea { margin-left: 0; }
+  #content > div:first-child > div:last-child { flex-wrap: wrap; min-width: 0; }
+}

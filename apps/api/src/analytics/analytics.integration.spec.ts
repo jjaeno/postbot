@@ -1,0 +1,32 @@
+import "reflect-metadata";
+import { PrismaClient } from "@postbot/database";
+import { afterAll, describe, expect, it, vi } from "vitest";
+import { randomUUID } from "node:crypto";
+import type { JobsService } from "../jobs/jobs.service.js";
+import { AnalyticsService } from "./analytics.service.js";
+const prisma = new PrismaClient();
+const suite = process.env.RUN_DB_INTEGRATION === "1" ? describe : describe.skip;
+suite("analytics synchronization isolation and recovery", () => {
+  afterAll(() => prisma.$disconnect());
+  it("retries an interrupted queue handoff with one sync key and never reports failed or sibling-platform sync as success", async () => {
+    const key = randomUUID();
+    const user = await prisma.user.create({ data: { email: `${key}@analytics.test`, displayName: "Fixture", passwordHash: "fixture" } });
+    const workspace = await prisma.workspace.create({ data: { ownerId: user.id, name: "Fixture", slug: key } });
+    const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Fixture", slug: key } });
+    const create = vi.fn().mockRejectedValueOnce(new Error("Queue unavailable")).mockResolvedValue({ id: "job" });
+    const service = new AnalyticsService(prisma, { create } as unknown as JobsService);
+    const input = { channelId: channel.id, platform: "YOUTUBE", periodStart: new Date(Date.now() - 86400000).toISOString(), periodEnd: new Date().toISOString(), timezone: "UTC", idempotencyKey: key };
+    await expect(service.sync(workspace.id, input)).rejects.toThrow("Queue unavailable");
+    await service.sync(workspace.id, input);
+    expect(await prisma.analyticsSync.count({ where: { idempotencyKey: key } })).toBe(1);
+    expect(create.mock.calls[0]).toEqual(create.mock.calls[1]);
+    await expect(service.sync(workspace.id, { ...input, platform: "INSTAGRAM" })).rejects.toThrow("ANALYTICS_IDEMPOTENCY_CONFLICT");
+    await expect(service.sync("foreign-workspace", input)).rejects.toThrow("CHANNEL_NOT_FOUND");
+    const sync = await prisma.analyticsSync.findUniqueOrThrow({ where: { idempotencyKey: key } });
+    await prisma.analyticsSync.update({ where: { id: sync.id }, data: { status: "FAILED", syncedAt: new Date() } });
+    const otherTime = new Date(Date.now() - 10000);
+    await prisma.analyticsSync.create({ data: { channelId: channel.id, platform: "INSTAGRAM", status: "SUCCEEDED", syncedAt: otherTime, idempotencyKey: `${key}:other`, periodStart: new Date(input.periodStart), periodEnd: new Date(input.periodEnd), timezone: "UTC" } });
+    expect((await service.report(workspace.id, channel.id, input.periodStart, input.periodEnd, "YOUTUBE")).lastSyncedAt).toBeNull();
+    expect((await service.report(workspace.id, channel.id, input.periodStart, input.periodEnd, "INSTAGRAM")).lastSyncedAt).toBe(otherTime.toISOString());
+  });
+});

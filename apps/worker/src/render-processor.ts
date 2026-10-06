@@ -11,7 +11,7 @@ import type { CaptionTiming } from "@postbot/renderer";
 import { SceneDocumentSchema } from "@postbot/scene-schema";
 
 export interface MediaPostProcessor {
-  postprocess(input: { videoInput: string; output: string; narrationInput?: string; backgroundInput?: string }): Promise<void>;
+  postprocess(input: { videoInput: string; output: string; narrationInput?: string; backgroundInput?: string; effectsInput?: string; backgroundVolume?: number; effectsVolume?: number }): Promise<void>;
   thumbnail(videoInput: string, output: string): Promise<void>;
   probe(videoInput: string): Promise<FfprobeResult>;
 }
@@ -69,13 +69,21 @@ export class RenderProcessor {
       await new AssetRepository(this.prisma, this.storage).attachUsage({ assetId: logo.id, contentItemId: input.contentItemId, sceneVersionId: sceneVersion.id, purpose: "brand-logo", snapshot: { license: "verified" } });
     }
     const platformKey = sceneVersion.platform ?? "COMMON";
+    const audioAssets = new AssetRepository(this.prisma, this.storage);
+    for (const [purpose, assetId] of [["bgm", sceneDocument.audio?.bgmAssetId], ["sfx", sceneDocument.audio?.sfxAssetId]] as const) {
+      if (!assetId) continue;
+      const asset = await this.prisma.asset.findFirst({ where: { id: assetId, channelId: input.channelId, kind: "AUDIO", origin: "STOCK_FREE" } });
+      if (!asset || assetNeedsReview(await audioAssets.getLicense(assetId))) throw new Error("AUDIO_ASSET_LICENSE_REQUIRED");
+      await audioAssets.attachUsage({ assetId, contentItemId: input.contentItemId, sceneVersionId: sceneVersion.id, purpose, snapshot: { license: "verified" } });
+    }
     const usages = await this.prisma.assetUsage.findMany({
       where: { contentItemId: input.contentItemId, sceneVersionId: sceneVersion.id },
       include: { asset: true },
       orderBy: { createdAt: "asc" }
     });
     const narration = usages.find((usage) => readAssetUsagePurpose(usage) === `tts-narration:${platformKey}`) ?? usages.find((usage) => readAssetUsagePurpose(usage) === "tts-narration");
-    const background = usages.find((usage) => ["bgm", "sfx"].includes(readAssetUsagePurpose(usage)));
+    const background = usages.find((usage) => readAssetUsagePurpose(usage) === "bgm");
+    const effects = usages.find((usage) => readAssetUsagePurpose(usage) === "sfx");
     const captions = narration ? readCaptions(narration.usageSnapshot) : [];
     const expectedDuration = sceneDocument.durationInFrames / sceneDocument.fps;
     if (captions.some((caption) => caption.startSeconds < 0 || caption.endSeconds <= caption.startSeconds || caption.endSeconds > expectedDuration + 0.25 || caption.text.length > 160)) throw new Error("SUBTITLE_SAFE_AREA_OR_TIMING_INVALID");
@@ -86,8 +94,10 @@ export class RenderProcessor {
       const thumbnailPath = join(directory, "thumbnail.jpg");
       const narrationPath = narration ? join(directory, "narration.audio") : undefined;
       const backgroundPath = background ? join(directory, "background.audio") : undefined;
+      const effectsPath = effects ? join(directory, "effects.audio") : undefined;
       if (narration && narrationPath) await writeFile(narrationPath, await this.storage.download(narration.asset.storageKey));
       if (background && backgroundPath) await writeFile(backgroundPath, await this.storage.download(background.asset.storageKey));
+      if (effects && effectsPath) await writeFile(effectsPath, await this.storage.download(effects.asset.storageKey));
       const sceneAssets: Record<string, string> = {};
       for (const usage of usages) {
         const sceneId = sceneIdFromImagePurpose(readAssetUsagePurpose(usage), platformKey);
@@ -96,7 +106,7 @@ export class RenderProcessor {
         sceneAssets[sceneId] = `data:${usage.asset.mimeType};base64,${Buffer.from(bytes).toString("base64")}`;
       }
       await this.withTimeout(this.renderer.render({ sceneDocument, captions, sceneAssets, brandLogo, outputLocation: draftPath }));
-      await this.withTimeout(this.postProcessor.postprocess({ videoInput: draftPath, output: outputPath, narrationInput: narrationPath, backgroundInput: backgroundPath }));
+      await this.withTimeout(this.postProcessor.postprocess({ videoInput: draftPath, output: outputPath, narrationInput: narrationPath, backgroundInput: backgroundPath, effectsInput: effectsPath, backgroundVolume: sceneDocument.audio?.bgmVolume ?? 0.2, effectsVolume: sceneDocument.audio?.sfxVolume ?? 0.2 }));
       await this.withTimeout(this.postProcessor.thumbnail(outputPath, thumbnailPath));
       const qa = await this.withTimeout(this.postProcessor.probe(outputPath));
       if (qa.width !== 1080 || qa.height !== 1920 || qa.durationSeconds <= 0 || Math.abs(qa.durationSeconds - expectedDuration) > 1 || (narration && qa.hasAudio === false) || (narration && qa.meanVolumeDb !== undefined && (qa.meanVolumeDb === null || qa.meanVolumeDb < -60)) || (qa.blackFrameRatio ?? 0) > 0.98) throw new Error("RENDER_QA_FAILED");

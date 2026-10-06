@@ -128,3 +128,15 @@ Owner-only `POST /channels/:channelId/stock-assets` accepts PNG/JPEG bodyBase64 
 ## Generation Contract
 
 `POST /generation/script-scene` accepts `ideaId`, optional `platform`, `idempotencyKey`, and `partial` (`full`, `hook`, `body`, `metadata`, or `scene`). It verifies CSRF, workspace ownership, and idea ownership, then creates or returns the idempotent `SCRIPT` job. The API does not call an LLM in this request; completion is available through the job REST and SSE endpoints.
+
+## 19.4 UX remediation API (2026-10-06)
+
+* `GET /automation/policy-profiles`: authenticated effective GLOBAL policy duration bounds, version and checkedAt. Creation rejects missing/out-of-range selected output profiles before paid jobs. Stored policy is not a guarantee of current external SNS rules; operations owns policy updates.
+* `GET /automation/switches`: current workspace/provider state, fail-safe when historical global rows disagree. `POST` is owner-only, audited and serialized. Restoring a switch does not automatically retry failed jobs.
+* `PATCH /content/:id/review/script`: owner-only platform, hook/body/callToAction, an already registered sourceUrl and `confirmFacts: true`. Creates immutable script/scene versions, copies image evidence, requires a new voice/render/policy check/approval and holds that platform's old reservation. Confirmation is a human assertion, not automatic fact verification; sensitive hook/CTA checks remain enforced.
+* `partial: voice | subtitle` adds local script/image reuse and requires a selected platform for direct generation requests. Voice requires a new TTS; subtitle reuses TTS and applies current subtitle style. Both re-render and re-check policy. Full/hook/body/metadata/scene behavior is unchanged.
+* `GET/POST /channels/:channelId/audio-assets`: GET lists currently eligible owned stock AUDIO. Owner-only POST accepts bounded (1MB) PCM WAV bodyBase64, name, licenseName, HTTPS proofUrl and explicit commercialUseAllowed/derivativeAllowed true. Duplicate uploads cannot change foreign ownership or revive revoked/expired proof. Normal JSON requests retain the 100kb limit; this upload uses the existing bounded asset-upload limit.
+* Template `visualStyle.audio` stores bgmAssetId/sfxAssetId and bgmVolume/sfxVolume (0..1). Immutable scenes snapshot settings and rights usages. BGM loops; SFX plays once at the beginning. No external audio purchase/search or timeline editing is provided.
+* `GET /operations/costs` additionally accepts contentItemId; channel/content/provider filters apply consistently to both usage and ledger within workspace ownership.
+* Cancelled PublishPlans remain history; a fresh idempotency key may reserve the same content/platform again. Any noncancelled plan blocks a second plan. Same-account time/daily quota checks remain serialized. Plan metadata snapshots publicSetting so later channel changes do not alter existing reservations.
+* Analytics sync keys cannot be reused across channels/platforms; interrupted queue handoffs retry the same job key. lastSyncedAt reflects successful selected-platform syncs only.

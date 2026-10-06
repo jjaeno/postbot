@@ -19,6 +19,13 @@ suite("serialized platform slot reservations", () => {
     const reservations = await Promise.allSettled([createScheduledPlan(prisma, channel.id, "Asia/Seoul", 1, { ...input, idempotencyKey: `${key}:1` }), createScheduledPlan(prisma, channel.id, "Asia/Seoul", 1, { ...input, idempotencyKey: `${key}:2` })]);
     expect(reservations.filter((result) => result.status === "fulfilled")).toHaveLength(1);
     expect(reservations.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const first = reservations.find((result) => result.status === "fulfilled");
+    if (!first || first.status !== "fulfilled") throw new Error("Missing reservation fixture");
+    await prisma.publishPlan.update({ where: { id: first.value.id }, data: { status: "CANCELLED" } });
+    const replacement = await createScheduledPlan(prisma, channel.id, "Asia/Seoul", 1, { ...input, idempotencyKey: `${key}:replacement` });
+    expect(replacement.id).not.toBe(first.value.id);
+    expect(await prisma.publishPlan.count({ where: { contentItemId: content.id, platform: "YOUTUBE" } })).toBe(2);
+    await expect(createScheduledPlan(prisma, channel.id, "Asia/Seoul", 1, { ...input, idempotencyKey: `${key}:replacement` })).resolves.toMatchObject({ id: replacement.id });
     await expect(createScheduledPlan(prisma, channel.id, "Asia/Seoul", 1, { ...input, scheduledAt: new Date("2099-01-01T02:00:00Z"), idempotencyKey: `${key}:3` })).rejects.toThrow();
     await expect(createScheduledPlan(prisma, channel.id, "Asia/Seoul", 1, { ...input, platform: "INSTAGRAM", platformAccountId: instagram.id, idempotencyKey: `${key}:ig` })).resolves.toMatchObject({ platform: "INSTAGRAM" });
   });

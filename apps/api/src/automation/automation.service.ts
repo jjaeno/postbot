@@ -1,4 +1,4 @@
-import { ConflictException, Inject, Injectable, NotFoundException, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
+import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import {
   AutomationBudgetRequestSchema,
   AutomationControlRequestSchema,
@@ -132,10 +132,18 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
       include: {
         platformAccounts: true,
         scheduleRules: { where: { isActive: true } },
-        outputProfiles: { where: { isActive: true } }
+        outputProfiles: { where: { isActive: true } },
+        templates: { where: { isActive: true }, orderBy: { version: "desc" }, take: 1 }
       }
     });
     if (!channel) throw new NotFoundException("ACTIVE_CHANNEL_NOT_FOUND");
+    const audio = asObject(asObject(channel.templates[0]?.visualStyle ?? null).audio ?? null);
+    for (const key of ["bgmAssetId", "sfxAssetId"]) {
+      const assetId = audio[key]; if (typeof assetId !== "string") continue;
+      const asset = await this.prisma.asset.findFirst({ where: { id: assetId, channelId: channel.id, kind: "AUDIO", origin: "STOCK_FREE" }, include: { licenses: { orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 1 } } });
+      const license = asset?.licenses[0]; const now = new Date();
+      if (!license || license.status !== "VERIFIED" || !license.commercialUseAllowed || !license.derivativeAllowed || (license.validFrom && license.validFrom > now) || (license.validUntil && license.validUntil <= now)) throw new ConflictException({ code: "AUDIO_ASSET_LICENSE_REQUIRED", message: "선택 음원의 채널 소유권·상업 사용·변형 권리를 확인해 주세요. 비용 발생 전에 중단했습니다." });
+    }
     const availablePlatforms = [...new Set([
       ...channel.outputProfiles.map((profile) => profile.platform),
       ...channel.platformAccounts.filter((account) => account.status === "CONNECTED").map((account) => account.platform)
@@ -143,6 +151,13 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     const platforms = input.platforms ? [...new Set(input.platforms)].sort() : availablePlatforms;
     if (platforms.length === 0) throw new ConflictException("ACTIVE_OUTPUT_PLATFORM_REQUIRED");
     if (platforms.some((platform) => !availablePlatforms.includes(platform))) throw new ConflictException("REQUESTED_OUTPUT_PLATFORM_NOT_CONFIGURED");
+    const policies = await this.policyProfiles();
+    for (const platform of platforms) {
+      const profile = channel.outputProfiles.find((candidate) => candidate.platform === platform);
+      const policy = policies.find((candidate) => candidate.platform === platform);
+      if (!policy) throw new ConflictException({ code: "POLICY_RULE_NOT_FOUND", message: `${platform}의 유효 정책이 없습니다. 운영 정책을 설정한 뒤 제작해 주세요.` });
+      if (!profile || profile.minDurationSeconds < policy.minDurationSeconds || profile.maxDurationSeconds > policy.maxDurationSeconds) throw new ConflictException({ code: "OUTPUT_DURATION_POLICY_CONFLICT", message: `${platform} 출력 길이를 유효 정책 범위 ${policy.minDurationSeconds}~${policy.maxDurationSeconds}초 안으로 설정해 주세요. 제작 비용 발생 전에 중단했습니다.` });
+    }
     const selectedIdea = input.ideaId ? await this.prisma.contentIdea.findFirst({ where: { id: input.ideaId, channelId: channel.id, channel: { workspaceId } } }) : null;
     if (input.ideaId && !selectedIdea) throw new NotFoundException("CONTENT_IDEA_NOT_FOUND");
 
@@ -238,7 +253,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     }
     await this.prisma.$transaction([
       this.prisma.channel.update({ where: { id: run.channelId }, data: { status: "ACTIVE" } }),
-      this.prisma.automationRun.update({ where: { id: run.id }, data: { status: "SUCCEEDED", pausedReason: null, nextRunAt: null } }),
+      this.prisma.automationRun.update({ where: { id: run.id }, data: { status: "SUCCEEDED", pausedReason: null, nextRunAt: null, lastErrorCode: null, lastErrorMessage: null } }),
       this.prisma.automationStep.updateMany({ where: { automationRunId: run.id, stage: "PUBLISH" }, data: { status: "CANCELLED", finishedAt: new Date() } })
     ]);
     return { ok: true };
@@ -314,15 +329,37 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     return budgets.map((budget) => this.toBudgetResponse(budget));
   }
 
-  async setSwitch(workspaceId: string, raw: unknown) {
-    const input = AutomationSwitchRequestSchema.parse(raw);
-    const existing = await this.prisma.automationSwitch.findFirst({
-      where: { workspaceId, provider: input.provider }
+  async policyProfiles() {
+    const rules = await this.prisma.policyRule.findMany({ where: { region: "GLOBAL", effectiveAt: { lte: new Date() } }, orderBy: [{ effectiveAt: "desc" }, { version: "desc" }] });
+    const seen = new Set<string>();
+    return rules.flatMap((rule) => {
+      if (seen.has(rule.platform)) return [];
+      seen.add(rule.platform);
+      const duration = asObject(rule.durationRule);
+      return [{ platform: rule.platform, region: rule.region, version: rule.version, checkedAt: rule.checkedAt.toISOString(), minDurationSeconds: Number(duration.minDurationSeconds ?? duration.minSeconds ?? 0), maxDurationSeconds: Number(duration.maxDurationSeconds ?? duration.maxSeconds ?? 60) }];
     });
+  }
+
+  async listSwitches(workspaceId: string) {
+    const switches = await this.prisma.automationSwitch.findMany({ where: { workspaceId }, select: { provider: true, isEnabled: true, reason: true }, orderBy: { updatedAt: "desc" } });
+    const providers = [...new Set(switches.map((entry) => entry.provider))];
+    return providers.map((provider) => switches.find((entry) => entry.provider === provider && !entry.isEnabled) ?? switches.find((entry) => entry.provider === provider)!);
+  }
+
+  async setSwitch(workspaceId: string, raw: unknown, role: string, userId: string) {
+    if (role !== "OWNER") throw new ForbiddenException("OWNER_ROLE_REQUIRED");
+    const input = AutomationSwitchRequestSchema.parse(raw);
     const data = { isEnabled: input.isEnabled, reason: input.reason ?? null };
-    return existing
-      ? this.prisma.automationSwitch.update({ where: { id: existing.id }, data })
-      : this.prisma.automationSwitch.create({ data: { workspaceId, provider: input.provider, ...data } });
+    const saved = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM workspaces WHERE id = ${workspaceId} FOR UPDATE`;
+      const existing = await tx.automationSwitch.findFirst({ where: { workspaceId, provider: input.provider } });
+      if (!existing) return tx.automationSwitch.create({ data: { workspaceId, provider: input.provider, ...data } });
+      // Older circuit-breaker races may have left duplicate rows: all must agree.
+      await tx.automationSwitch.updateMany({ where: { workspaceId, provider: input.provider }, data });
+      return { ...existing, ...data };
+    });
+    await this.operations.audit(workspaceId, userId, "automation.switch.update", "automation_switch", saved.id);
+    return { provider: saved.provider, isEnabled: saved.isEnabled, reason: saved.reason };
   }
 
   async control(workspaceId: string, runId: string, raw: unknown): Promise<AutomationRunResponse> {
@@ -430,8 +467,12 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
           }
         }),
         this.prisma.automationStep.updateMany({
-          where: { automationRunId: run.id, status: "PENDING" },
+          where: { automationRunId: run.id, status: input.action === "kill" ? { in: ["PENDING", "QUEUED", "HELD"] } : "PENDING" },
           data: { status: input.action === "kill" ? "CANCELLED" : "PENDING" }
+        }),
+        this.prisma.productionJob.updateMany({
+          where: { automationSteps: { some: { automationRunId: run.id } }, status: input.action === "kill" ? { in: ["QUEUED", "RETRY_WAIT", "NEEDS_REVIEW"] } : { in: [] } },
+          data: { status: "CANCELLED", finishedAt: new Date() }
         }),
         this.prisma.automationCostReservation.updateMany({
           where: { automationRunId: run.id, releasedAt: null, settledAt: null },
@@ -452,6 +493,8 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     stage: Stage,
     platform: BranchPlatform
   ): Promise<void> {
+    const currentRun = await this.prisma.automationRun.findUnique({ where: { id: runId }, select: { status: true } });
+    if (!currentRun || !["QUEUED", "RUNNING"].includes(currentRun.status)) return;
     const step = await this.prisma.automationStep.findFirst({
       where: { automationRunId: runId, stage, branchKey: branchKey(platform) }
     });
@@ -520,12 +563,12 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
       runAfter: prepared.runAfter
     });
     await this.prisma.$transaction([
-      this.prisma.automationStep.update({
-        where: { id: step.id },
+      this.prisma.automationStep.updateMany({
+        where: { id: step.id, status: { not: "CANCELLED" } },
         data: { status: "QUEUED", productionJobId: job.id }
       }),
-      this.prisma.automationRun.update({
-        where: { id: runId },
+      this.prisma.automationRun.updateMany({
+        where: { id: runId, status: { in: ["QUEUED", "RUNNING"] } },
         data: { status: "RUNNING", heartbeatAt: new Date(), nextRunAt: null }
       })
     ]);
@@ -615,7 +658,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
               ideaId: (idea as Record<string, unknown>).id,
               platform,
               idempotencyKey: `automation:${runId}:${platform.toLowerCase()}:script`,
-              partial: ["hook", "body", "metadata", "scene"].includes(String(partial)) ? partial : "full"
+              partial: ["hook", "body", "metadata", "scene", "voice", "subtitle"].includes(String(partial)) ? partial : "full"
             },
             idea
           }
@@ -786,7 +829,8 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
           idempotencyKey,
           title,
           description,
-          hashtags
+          hashtags,
+          metadata: { publicSetting: channel.outputProfiles.find((profile) => profile.platform === platform)?.publicSetting ?? "PUBLIC" }
         });
       } catch (error) {
         if (!(error instanceof ConflictException)) throw error;
@@ -868,6 +912,9 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     platform: BranchPlatform
   ) {
     if (!platform || !isCostStage(stage)) return null;
+    const run = await this.prisma.automationRun.findUniqueOrThrow({ where: { id: runId }, select: { checkpoint: true } });
+    const partial = asObject(run.checkpoint).partial;
+    if (["voice", "subtitle"].includes(String(partial)) && (stage === "SCRIPT" || stage === "ASSET" || (stage === "TTS" && partial === "subtitle"))) return { stage, provider: "local-reuse", model: "version-reuse", amountUsd: 0, usage: {}, pricing: {} };
     const usage: AutomationCostUsage = {};
     if (stage !== "SCRIPT") {
       const scriptStep = await this.prisma.automationStep.findFirst({
@@ -935,8 +982,8 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     });
     if (!step) return;
     await this.prisma.$transaction([
-      this.prisma.automationStep.update({
-        where: { id: step.id },
+      this.prisma.automationStep.updateMany({
+        where: { id: step.id, status: { not: "CANCELLED" } },
         data: {
           status: "HELD",
           errorCode: reason,
@@ -944,8 +991,8 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
           finishedAt: new Date()
         }
       }),
-      this.prisma.automationRun.update({
-        where: { id: runId },
+      this.prisma.automationRun.updateMany({
+        where: { id: runId, status: { in: ["QUEUED", "RUNNING"] } },
         data: { status: "RUNNING", pausedReason: null, nextRunAt: new Date() }
       }),
       this.prisma.automationEvent.create({
@@ -1014,18 +1061,19 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     channelId: string;
     status: string;
     channel: { workspaceId: string };
-    steps: Array<{ id: string; stage: string; platform: Platform | null; status: string; errorCode: string | null }>;
+    steps: Array<{ id: string; stage: string; platform: Platform | null; status: string; errorCode: string | null; errorMessage?: string | null }>;
   }): Promise<void> {
     const decision = evaluateAutomationBranches(run.steps);
     if (decision.status !== "RUNNING") {
       const failure = run.steps.find((step) => step.status === "FAILED");
       const held = run.steps.find((step) => step.status === "HELD");
-      await this.prisma.automationRun.update({
-        where: { id: run.id },
+      await this.prisma.automationRun.updateMany({
+        where: { id: run.id, status: { in: ["QUEUED", "RUNNING"] } },
         data: {
           status: decision.status,
           pausedReason: decision.status === "PAUSED" ? held?.errorCode ?? "BRANCH_HELD" : null,
           lastErrorCode: decision.status === "FAILED" ? failure?.errorCode ?? "BRANCH_FAILED" : null,
+          lastErrorMessage: decision.status === "FAILED" ? failure?.errorMessage ?? null : null,
           nextRunAt: null
         }
       });

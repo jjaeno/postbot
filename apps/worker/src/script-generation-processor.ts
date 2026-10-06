@@ -9,10 +9,11 @@ import {
 } from "@postbot/contracts";
 import { Prisma, type PrismaClient } from "@postbot/database";
 import { FakeLlmProvider, OpenAiLlmProvider, type LlmProvider } from "@postbot/providers";
-import { SceneDocumentSchema, VideoStyleSchema, type SceneDocument } from "@postbot/scene-schema";
+import { AudioStyleSchema, SceneDocumentSchema, VideoStyleSchema, type SceneDocument } from "@postbot/scene-schema";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { assignProductionExperiment } from "@postbot/optimization";
+import { readAssetUsagePurpose, sceneAssetUsageKey } from "@postbot/asset-library";
 
 const promptVersion = "script-scene-v1";
 
@@ -40,9 +41,40 @@ export class ScriptGenerationProcessor {
     const existing = await this.prisma.providerUsage.findUnique({ where: { idempotencyKey: `script-job:${jobId}` } });
     const prior = this.readResult(existing?.providerResponse ?? null);
     if (prior) return prior;
+    if (input.generation.request.partial === "voice" || input.generation.request.partial === "subtitle") return this.reuseVersion(jobId, input.generation);
 
     const generated = await this.generate(input.generation);
     return this.save(jobId, input.generation.idea, input.generation.request, generated);
+  }
+
+  private async reuseVersion(jobId: string, input: ScriptGenerationJobPayload["generation"]): Promise<GenerationResult> {
+    if (!input.request.platform) throw new Error("PARTIAL_PLATFORM_REQUIRED");
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM channels WHERE id = ${input.idea.channelId} FOR UPDATE`;
+      const existing = await tx.providerUsage.findUnique({ where: { idempotencyKey: `script-job:${jobId}` } });
+      const prior = this.readResult(existing?.providerResponse ?? null); if (prior) return prior;
+      const content = await tx.contentItem.findUniqueOrThrow({ where: { channelId_topicKey: { channelId: input.idea.channelId, topicKey: `idea:${input.idea.id}` } } });
+      const script = await tx.scriptVersion.findFirstOrThrow({ where: { contentItemId: content.id, platform: input.request.platform }, orderBy: { version: "desc" } });
+      const scene = await tx.sceneVersion.findFirstOrThrow({ where: { contentItemId: content.id, platform: input.request.platform }, orderBy: { version: "desc" } });
+      const template = await tx.channelTemplate.findFirst({ where: { channelId: input.idea.channelId, isActive: true }, orderBy: { version: "desc" } });
+      const document = SceneDocumentSchema.parse(scene.sceneDocument); const visual = jsonObject(template?.visualStyle ?? null); const subtitle = jsonObject(template?.subtitleStyle ?? null);
+      if (input.request.partial === "subtitle") document.style = VideoStyleSchema.parse({ ...(document.style ?? {}), captionColor: subtitle.color, captionBackground: subtitle.backgroundColor, captionFontSize: subtitle.fontSize });
+      if (visual.audio) document.audio = AudioStyleSchema.parse(visual.audio); else delete document.audio;
+      const version = script.version + 1;
+      const nextScript = await tx.scriptVersion.create({ data: { contentItemId: content.id, platform: script.platform, version, hook: script.hook, body: script.body, callToAction: script.callToAction, language: script.language, durationSeconds: script.durationSeconds, promptVersion: script.promptVersion, qualitySnapshot: { ...jsonObject(script.qualitySnapshot), reviewStatus: "REVIEW_REQUIRED", reusedFor: input.request.partial } } });
+      const nextScene = await tx.sceneVersion.create({ data: { contentItemId: content.id, scriptVersionId: nextScript.id, platform: scene.platform, version, schemaVersion: scene.schemaVersion, sceneDocument: document, durationSeconds: scene.durationSeconds } });
+      const usages = await tx.assetUsage.findMany({ where: { sceneVersionId: scene.id } });
+      for (const usage of usages) {
+        const purpose = readAssetUsagePurpose(usage);
+        if (purpose === "bgm" || purpose === "sfx" || (input.request.partial === "voice" && purpose.startsWith("tts-narration"))) continue;
+        await tx.assetUsage.create({ data: { assetId: usage.assetId, contentItemId: content.id, sceneVersionId: nextScene.id, purpose: sceneAssetUsageKey(purpose, nextScene.id), usageSnapshot: { ...jsonObject(usage.usageSnapshot), originalPurpose: purpose } } });
+      }
+      await tx.publishPlan.updateMany({ where: { contentItemId: content.id, platform: script.platform ?? undefined, status: "SCHEDULED" }, data: { status: "HELD" } });
+      await tx.contentItem.update({ where: { id: content.id }, data: { status: "REVIEW_REQUIRED", approvedAt: null } });
+      const result = { contentItemId: content.id, scriptVersionId: nextScript.id, sceneVersionId: nextScene.id, version };
+      await tx.providerUsage.create({ data: { contentItemId: content.id, productionJobId: jobId, provider: "local-reuse", model: "version-reuse", operation: input.request.partial, quantity: 0, unit: "request", estimatedCost: 0, idempotencyKey: `script-job:${jobId}`, providerResponse: result } });
+      return result;
+    });
   }
 
   private async generate(input: ScriptGenerationJobPayload["generation"]): Promise<GeneratedWithUsage> {
@@ -94,6 +126,7 @@ export class ScriptGenerationProcessor {
         if (experiment && (Math.abs(structured.script.durationSeconds - experiment.strategy.durationSeconds) > 1 || Math.abs(structured.sceneDocument.durationInFrames / structured.sceneDocument.fps - experiment.strategy.durationSeconds) > 1)) throw new Error("EXPERIMENT_DURATION_NOT_APPLIED");
         structured.sceneDocument.style = VideoStyleSchema.parse({ ...visual, captionColor: subtitle.color, captionBackground: subtitle.backgroundColor, captionFontSize: subtitle.fontSize, watermark: typeof visual.watermark === "string" ? visual.watermark : channel?.name ?? "Postbot" });
         structured.sceneDocument.aiStockRatio = template?.aiStockRatio.toNumber() ?? 1;
+        if (visual.audio) structured.sceneDocument.audio = AudioStyleSchema.parse(visual.audio);
         return { ...structured, model: response.model, usage: response.usage, estimatedCostUsd: response.estimatedCostUsd, generationContext, strategyVersion: channel?.strategyVersions[0]?.version ?? null };
       } catch (error) {
         lastError = error;

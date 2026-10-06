@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { PlatformSchema, ReviewActionRequestSchema, ReviewAssetLicenseRequestSchema, RunPolicyCheckRequestSchema, UpdateReviewMetadataRequestSchema, type ContentReviewResponse, type UpdateReviewMetadataRequest } from "@postbot/contracts";
+import { PlatformSchema, ReviewActionRequestSchema, ReviewAssetLicenseRequestSchema, RunPolicyCheckRequestSchema, UpdateReviewMetadataRequestSchema, UpdateReviewScriptRequestSchema, type ContentReviewResponse, type UpdateReviewMetadataRequest } from "@postbot/contracts";
 import { evaluatePolicy, type PolicyRule } from "@postbot/policy-engine";
 import { loadConfig } from "@postbot/config";
 import { FakeStorageProvider, S3StorageProvider, type StorageProvider } from "@postbot/providers";
@@ -46,6 +46,14 @@ export class ReviewService {
     const saved = await this.repository.reviewAssetLicense?.(workspaceId, userId, contentItemId, input);
     if (!saved) throw new NotFoundException("OWNED_ASSET_NOT_FOUND");
     return this.get(workspaceId, contentItemId);
+  }
+  async updateScript(workspaceId: string, role: string, userId: string, contentItemId: string, raw: unknown): Promise<ContentReviewResponse> {
+    if (role !== "OWNER") throw new ForbiddenException("OWNER_ROLE_REQUIRED");
+    const parsed = UpdateReviewScriptRequestSchema.safeParse(raw);
+    if (!parsed.success) throw new BadRequestException("SCRIPT_AND_SOURCE_CONFIRMATION_REQUIRED");
+    const result = await this.repository.updateScript?.(workspaceId, userId, contentItemId, parsed.data);
+    if (!result) throw new NotFoundException("CONTENT_SCRIPT_OR_SOURCE_NOT_FOUND");
+    return result;
   }
   async check(workspaceId: string, contentItemId: string, raw: unknown): Promise<ContentReviewResponse> {
     const input = RunPolicyCheckRequestSchema.parse(raw);

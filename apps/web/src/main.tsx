@@ -19,7 +19,7 @@ import {
   UserPlus
 } from "lucide-react";
 import type { FormEvent, ReactElement } from "react";
-import { StrictMode, useEffect, useMemo, useRef, useState } from "react";
+import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { useForm, type UseFormRegisterReturn } from "react-hook-form";
 import {
@@ -66,6 +66,15 @@ import {
 import { z } from "zod";
 import { Button } from "./components/ui/button";
 import "./styles.css";
+import { createSessionFetch } from "./session-fetch";
+import { ChannelOperationsEditor, channelOperations } from "./channel-operations-editor";
+import { UpdateChannelRequestSchema, type UpdateChannelRequest } from "@postbot/contracts";
+import { InsightControls } from "./insight-controls";
+import { ProviderControls } from "./provider-controls";
+import { PolicyProfileNotice } from "./policy-profile-notice";
+import { policyHelp } from "./policy-help";
+import { ChannelAudioEditor } from "./channel-audio-editor";
+import { ScriptEditor } from "./script-editor";
 
 const queryClient = new QueryClient();
 const viteEnv = import.meta.env as Readonly<Record<string, string | undefined>>;
@@ -79,11 +88,22 @@ const csrfFromCookie = (): string | null => {
   catch { return null; }
 };
 
+const sessionFetch = createSessionFetch(async () => {
+  await request("/auth/refresh", { method: "POST", body: "{}" }, AuthResponseSchema);
+}, () => {
+  sessionCsrfToken = null;
+  // Do not destroy the in-flight /auth/me observer: that would strand the login screen.
+  queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== "auth" });
+  queryClient.setQueryData(["auth", "me"], null);
+  window.dispatchEvent(new Event("postbot-session-expired"));
+});
+
 const request = async <Result,>(
   path: string,
   options: RequestInit,
   parser: { parse(value: unknown): Result }
 ): Promise<Result> => {
+  const makeInit = (): RequestInit => {
   const headers = new Headers(options.headers);
   headers.set("content-type", "application/json");
   const csrfToken = csrfFromCookie() ?? sessionCsrfToken;
@@ -91,11 +111,13 @@ const request = async <Result,>(
     headers.set("x-csrf-token", csrfToken);
   }
 
-  const response = await fetch(`${apiBaseUrl}${path}`, {
+  return {
     ...options,
     headers,
     credentials: "include"
-  });
+  };
+  };
+  const response = await sessionFetch(`${apiBaseUrl}${path}`, makeInit, !["/auth/login", "/auth/register", "/auth/refresh", "/auth/logout"].includes(path));
   const body = (await response.json().catch(() => null)) as unknown;
   if (!response.ok) {
     const message =
@@ -132,7 +154,7 @@ const fetchAnalyticsReport = (channelId: string, platform: string, days: number)
 };
 const fetchSuggestions = (channelId: string): Promise<OptimizationSuggestionResponse[]> =>
   request(`/optimization/suggestions?channelId=${encodeURIComponent(channelId)}`, { method: "GET" }, { parse: (value: unknown) => OptimizationSuggestionResponseSchema.array().parse(value) });
-const fetchCosts = (): Promise<CostReportResponse> => { const end = new Date(); const start = new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000); return request(`/operations/costs?periodStart=${encodeURIComponent(start.toISOString())}&periodEnd=${encodeURIComponent(end.toISOString())}`, { method: "GET" }, CostReportResponseSchema); };
+const fetchCosts = (channelId: string, contentItemId: string, provider: string, days: number): Promise<CostReportResponse> => { const end = new Date(); const start = new Date(end.getTime() - days * 24 * 60 * 60 * 1000); return request(`/operations/costs?periodStart=${encodeURIComponent(start.toISOString())}&periodEnd=${encodeURIComponent(end.toISOString())}${channelId ? `&channelId=${encodeURIComponent(channelId)}` : ""}${contentItemId ? `&contentItemId=${encodeURIComponent(contentItemId)}` : ""}${provider ? `&provider=${encodeURIComponent(provider)}` : ""}`, { method: "GET" }, CostReportResponseSchema); };
 const fetchNotifications = (): Promise<NotificationResponse[]> => request("/operations/notifications", { method: "GET" }, { parse: (value: unknown) => NotificationResponseSchema.array().parse(value) });
 const fetchPublishPlans = (): Promise<PublishCalendarItem[]> => request("/publishing/plans", { method: "GET" }, { parse: (value: unknown) => PublishCalendarItemSchema.array().parse(value) });
 
@@ -511,10 +533,13 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
   const [error, setError] = useState<string | null>(null);
   const [wizardOpen, setWizardOpen] = useState(() => readWizardDraft() !== null);
   const [editing, setEditing] = useState<ChannelResponse | null>(null);
+  const [selectedReviewPlatform, setSelectedReviewPlatform] = useState<Platform>(() => { const value = new URLSearchParams(window.location.search).get("platform"); return value === "INSTAGRAM" || value === "TIKTOK" ? value : "YOUTUBE"; });
+  const selectReviewPlatform = (platform: Platform) => { setSelectedReviewPlatform(platform); const url = new URL(window.location.href); url.searchParams.set("platform", platform); window.history.replaceState({}, "", url); };
   const [selectedContentId, setSelectedContentId] = useState<string | null>(() => new URLSearchParams(window.location.search).get("content"));
   const [insightChannelId, setInsightChannelId] = useState("");
   const [insightPlatform, setInsightPlatform] = useState("");
   const [insightDays, setInsightDays] = useState(7);
+  const [costChannel, setCostChannel] = useState(""); const [costContent, setCostContent] = useState(""); const [costProvider, setCostProvider] = useState(""); const [costDays, setCostDays] = useState(30);
   const oauthResult = new URLSearchParams(window.location.search).get("oauth");
   useEffect(() => {
     if (!oauthResult) return;
@@ -525,7 +550,8 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
   const logout = useMutation({
     mutationFn: () => request("/auth/logout", { method: "POST" }, { parse: () => ({ ok: true }) }),
     onSuccess: () => {
-      queryClient.removeQueries({ queryKey: ["auth", "me"] });
+      queryClient.clear();
+      window.location.reload();
     },
     onError: (mutationError) =>
       setError(mutationError instanceof Error ? mutationError.message : "로그아웃할 수 없습니다.")
@@ -544,9 +570,9 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
   const content = useQuery({ queryKey: ["content"], queryFn: fetchContent, enabled: Boolean(session), refetchInterval: 5_000 });
   const automationRuns = useQuery({ queryKey: ["automation-runs"], queryFn: fetchAutomationRuns, enabled: Boolean(session), refetchInterval: 5_000 });
   useEffect(() => { if (!insightChannelId && channels.data?.[0]) setInsightChannelId(channels.data[0].id); }, [channels.data, insightChannelId]);
-  const analytics = useQuery({ queryKey: ["analytics", insightChannelId, insightPlatform, insightDays], queryFn: () => fetchAnalyticsReport(insightChannelId, insightPlatform, insightDays), enabled: Boolean(insightChannelId) });
+  const analytics = useQuery({ queryKey: ["analytics", insightChannelId, insightPlatform, insightDays], queryFn: () => fetchAnalyticsReport(insightChannelId, insightPlatform, insightDays), enabled: Boolean(insightChannelId), refetchInterval: 5000 });
   const suggestions = useQuery({ queryKey: ["optimization-suggestions", insightChannelId], queryFn: () => fetchSuggestions(insightChannelId), enabled: Boolean(insightChannelId) });
-  const costs = useQuery({ queryKey: ["operations-costs"], queryFn: fetchCosts, enabled: Boolean(session), retry: false });
+  const costs = useQuery({ queryKey: ["operations-costs", costChannel, costContent, costProvider, costDays], queryFn: () => fetchCosts(costChannel, costContent, costProvider, costDays), enabled: Boolean(session), retry: false });
   const budgets = useQuery({ queryKey: ["automation-budgets"], queryFn: fetchBudgets, enabled: Boolean(session) });
   const notifications = useQuery({ queryKey: ["operations-notifications"], queryFn: fetchNotifications, enabled: Boolean(session), refetchInterval: 30_000 });
   const publishPlans = useQuery({ queryKey: ["publish-plans"], queryFn: fetchPublishPlans, enabled: Boolean(session), refetchInterval: 30_000 });
@@ -588,10 +614,13 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
         <label id="insights" className="max-w-sm text-sm font-medium">분석할 채널<select className="mt-2 h-10 w-full rounded-md border border-border px-3" value={insightChannelId} onChange={(event) => setInsightChannelId(event.target.value)}>{(channels.data ?? []).map((channel) => <option key={channel.id} value={channel.id}>{channel.name}</option>)}</select></label>
         <AnalyticsPanel report={analytics.data} isLoading={analytics.isLoading} />
         <div className="flex flex-wrap gap-3 text-sm"><label>분석 플랫폼<select className="ml-2 rounded border p-2" value={insightPlatform} onChange={(event) => setInsightPlatform(event.target.value)}><option value="">전체</option>{(["YOUTUBE", "INSTAGRAM", "TIKTOK"] as const).map((platform) => <option key={platform} value={platform}>{platformLabel(platform)}</option>)}</select></label><label>분석 기간<select className="ml-2 rounded border p-2" value={insightDays} onChange={(event) => setInsightDays(Number(event.target.value))}><option value={7}>최근 7일</option><option value={30}>최근 30일</option><option value={90}>최근 90일</option></select></label></div>
+        <InsightControls request={request} channelId={insightChannelId} platform={insightPlatform} days={insightDays} owner={session.workspace.role === "OWNER"} />
         <OptimizationPanel suggestions={suggestions.data ?? []} isLoading={suggestions.isLoading} />
         <ExperimentPanel channelId={insightChannelId || channels.data?.[0]?.id || ""} />
         <StrategyPanel channelId={insightChannelId} />
+        <div className="flex flex-wrap gap-3 rounded border bg-white p-3 text-sm"><label>비용 채널<select className="ml-2 rounded border p-2" value={costChannel} onChange={(event) => { setCostChannel(event.target.value); setCostContent(""); }}><option value="">전체</option>{channels.data?.map((channel) => <option key={channel.id} value={channel.id}>{channel.name}</option>)}</select></label><label>비용 콘텐츠<select className="ml-2 rounded border p-2" value={costContent} onChange={(event) => setCostContent(event.target.value)}><option value="">전체</option>{content.data?.filter((item) => !costChannel || item.channelId === costChannel).map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label><label>비용 제공자<input className="ml-2 rounded border p-2" placeholder="전체 또는 제공자 이름" value={costProvider} onChange={(event) => setCostProvider(event.target.value)} /></label><label>비용 기간<select className="ml-2 rounded border p-2" value={costDays} onChange={(event) => setCostDays(Number(event.target.value))}>{[7, 30, 90].map((days) => <option key={days} value={days}>최근 {days}일</option>)}</select></label></div>
         <div id="settings"><OperationsPanel costs={costs.data} notifications={notifications.data ?? []} isLoading={costs.isLoading || notifications.isLoading} /></div>
+        <ProviderControls request={request} owner={session.workspace.role === "OWNER"} />
         <BudgetPanel budgets={budgets.data ?? []} channels={channels.data ?? []} isLoading={budgets.isLoading} onError={setError} />
 
         <div id="channels" className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
@@ -606,8 +635,8 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
         </div>
         <div id="ideas"><IdeasPanel channels={channels.data ?? []} onError={setError} /></div>
         <ContentPanel channels={channels.data ?? []} content={content.data ?? []} isLoading={content.isLoading} onError={setError} selectedId={selectedContentId} onSelect={(id) => { setSelectedContentId(id); const url = new URL(window.location.href); url.searchParams.set("content", id); window.history.replaceState({}, "", url); }} />
-        <div id="calendar"><CalendarPanel channels={channels.data ?? []} plans={publishPlans.data ?? []} onSelect={(id) => { setSelectedContentId(id); const url = new URL(window.location.href); url.searchParams.set("content", id); window.history.replaceState({}, "", url); }} /></div>
-        <ReviewPanel accounts={platformAccounts.data ?? []} content={content.data ?? []} contentItemId={selectedContentId} onSelectContent={(id) => { setSelectedContentId(id); const url = new URL(window.location.href); url.searchParams.set("content", id); window.history.replaceState({}, "", url); }} onError={setError} />
+        <div id="calendar"><CalendarPanel channels={channels.data ?? []} plans={publishPlans.data ?? []} onSelect={(id, platform) => { selectReviewPlatform(platform); setSelectedContentId(id); const url = new URL(window.location.href); url.searchParams.set("content", id); window.history.replaceState({}, "", url); }} /></div>
+        <ReviewPanel owner={session.workspace.role === "OWNER"} channels={channels.data ?? []} platform={selectedReviewPlatform} setPlatform={selectReviewPlatform} accounts={platformAccounts.data ?? []} content={content.data ?? []} contentItemId={selectedContentId} onSelectContent={(id) => { setSelectedContentId(id); const url = new URL(window.location.href); url.searchParams.set("content", id); window.history.replaceState({}, "", url); }} onError={setError} />
       </section>
       {wizardOpen ? <ChannelWizard onClose={() => setWizardOpen(false)} onError={setError} /> : null}
     </main>
@@ -620,24 +649,24 @@ const AutomationPanel = ({ runs, isLoading }: { runs: AutomationRunResponse[]; i
     mutationFn: ({ runId, action, stage, platform }: { runId: string; action: "pause" | "resume" | "retry" | "kill"; stage?: string; platform?: Platform | null }) => request(`/automation/runs/${runId}/control`, { method: "POST", body: JSON.stringify({ action, stage, platform: platform ?? undefined }) }, AutomationRunResponseSchema),
     onSuccess: () => { void cache.invalidateQueries({ queryKey: ["automation-runs"] }); void cache.invalidateQueries({ queryKey: ["content"] }); }
   });
-  return <section className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="automation-panel">
+  return <section id="automation" className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="automation-panel">
     <div><h2 className="text-lg font-semibold">자동화 운영</h2><p className="mt-1 text-sm text-muted-foreground">실행 상태, 최근 신호, 실패 단계와 운영자 보류 상태를 확인합니다.</p></div>
     {control.error ? <p role="alert" className="mt-3 text-sm text-red-700">{control.error.message}</p> : null}
     {runs.filter((run) => run.createdAt).map((run) => <p className="mt-3 text-sm" key={`elapsed-${run.id}`}>{statusLabel(run.status)} · {run.steps.filter((step) => step.status === "SUCCEEDED").length}/{run.steps.length}단계 완료 · {run.finishedAt ? "총 소요" : "경과"} {Math.max(0, Math.floor((new Date(run.finishedAt ?? Date.now()).getTime() - new Date(run.createdAt ?? Date.now()).getTime()) / 60_000))}분</p>)}
     {runs.map((run) => <div className="mt-3 flex flex-wrap items-center gap-2 text-sm" key={`actions-${run.id}`}><span>{stageLabel(run.steps.find((step) => ["RUNNING", "QUEUED", "HELD", "FAILED"].includes(step.status))?.stage ?? "COLLECT")} · 다음 실행 {run.nextRunAt ? new Date(run.nextRunAt).toLocaleString() : "미정"}</span>{run.steps.filter((step) => ["FAILED", "HELD"].includes(step.status)).map((step) => <div className="rounded border border-border p-2" key={`${step.stage}-${step.platform}`}><p>{platformLabel(step.platform)} {stageLabel(step.stage)}: {step.errorMessage ?? step.errorCode ?? run.pausedReason ?? "확인 필요"}</p><p className="text-xs text-muted-foreground">원인을 해결한 뒤 이 단계만 다시 실행할 수 있습니다. 예산 부족은 사용량·설정, 승인 대기는 콘텐츠 검수에서 해결하세요.</p><Button disabled={control.isPending} onClick={() => control.mutate({ runId: run.id, action: "retry", stage: step.stage, platform: step.platform })}>이 단계 재시도</Button></div>)}{!["SUCCEEDED", "CANCELLED"].includes(run.status) ? <Button className="bg-foreground" disabled={control.isPending} onClick={() => { if (window.confirm("이 제작을 취소할까요? 이미 진행 중인 작업은 중단 요청을 받으며 완료된 결과는 유지됩니다.")) control.mutate({ runId: run.id, action: "kill" }); }}>제작 취소</Button> : null}</div>)}
-    {isLoading ? <p className="mt-4 text-sm text-muted-foreground">자동화 실행을 불러오는 중입니다.</p> : runs.length === 0 ? <p className="mt-4 rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">아직 자동화 실행 기록이 없습니다.</p> : <div className="mt-4 grid gap-2">{runs.slice(0, 10).map((run) => <article className="rounded-md border border-border p-3 text-sm" key={run.id}><div className="flex items-center justify-between gap-3"><span className="font-medium">{statusLabel(run.status)}</span><span className="text-xs text-muted-foreground">{run.heartbeatAt ?? "최근 신호 없음"}</span></div><p className="mt-2 text-xs text-muted-foreground">{run.lastErrorCode ?? "오류 없음"}</p><div className="mt-2 flex flex-wrap gap-1">{run.steps.map((step) => <span className="rounded bg-muted px-2 py-1 text-xs" key={`${step.stage}-${step.platform ?? "COMMON"}`}>{stageLabel(step.stage)}: {statusLabel(step.status)}</span>)}</div>{["RUNNING", "QUEUED"].includes(run.status) ? <Button className="mt-3 h-8" disabled={control.isPending} onClick={() => control.mutate({ runId: run.id, action: "pause" })}>일시 중지</Button> : run.status === "PAUSED" ? <Button className="mt-3 h-8" disabled={control.isPending} onClick={() => control.mutate({ runId: run.id, action: "resume" })}>다시 시작</Button> : null}</article>)}</div>}
+    {isLoading ? <p className="mt-4 text-sm text-muted-foreground">자동화 실행을 불러오는 중입니다.</p> : runs.length === 0 ? <p className="mt-4 rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">아직 자동화 실행 기록이 없습니다.</p> : <div className="mt-4 grid gap-2">{runs.slice(0, 10).map((run) => <article className="rounded-md border border-border p-3 text-sm" key={run.id}><div className="flex items-center justify-between gap-3"><span className="font-medium">{statusLabel(run.status)}</span><span className="text-xs text-muted-foreground">{run.heartbeatAt ?? "최근 신호 없음"}</span></div><p className="mt-2 text-xs text-muted-foreground">{run.status === "SUCCEEDED" ? "완료됨 (과거 오류는 작업 이력에서 확인)" : run.lastErrorCode ?? run.pausedReason ?? "오류 없음"}</p><div className="mt-2 flex flex-wrap gap-1">{run.steps.map((step) => <span className="rounded bg-muted px-2 py-1 text-xs" key={`${step.stage}-${step.platform ?? "COMMON"}`}>{platformLabel(step.platform)} · {stageLabel(step.stage)}: {statusLabel(step.status)}</span>)}</div>{run.steps.filter((step) => ["FAILED", "HELD"].includes(step.status) && step.stage !== "PUBLISH").map((step) => <div className="mt-2 rounded border p-2" key={`${step.platform}:${step.stage}`}><p>{platformLabel(step.platform)} · {stageLabel(step.stage)}: {step.errorMessage ?? step.errorCode ?? "원인을 확인해 주세요."}</p><p className="text-xs">권리·예산·Provider 차단 원인을 해소한 뒤 재시도하세요. 새로운 비용이 발생할 수 있습니다.</p><Button disabled={control.isPending} onClick={() => { if (window.confirm("원인을 해소했으며 이 단계만 재시도할까요?")) control.mutate({ runId: run.id, action: "retry", stage: step.stage, platform: step.platform }); }}>해당 단계 재시도</Button></div>)}{["RUNNING", "QUEUED"].includes(run.status) ? <Button className="mt-3 h-8" disabled={control.isPending} onClick={() => control.mutate({ runId: run.id, action: "pause" })}>일시 중지</Button> : run.status === "PAUSED" ? <Button className="mt-3 h-8" disabled={control.isPending} onClick={() => control.mutate({ runId: run.id, action: "resume" })}>다시 시작</Button> : null}</article>)}</div>}
   </section>;
 };
 
 const AnalyticsPanel = ({ report, isLoading }: { report: AnalyticsReportResponse | undefined; isLoading: boolean }): ReactElement => <section className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="analytics-panel">
-  <div><h2 className="text-lg font-semibold">성과 분석</h2><p className="mt-1 text-sm text-muted-foreground">최근 7일간 플랫폼별로 정규화한 성과 지표입니다.</p></div>
+  <div><h2 className="text-lg font-semibold">성과 분석</h2><p className="mt-1 text-sm text-muted-foreground">선택한 기간·플랫폼으로 정규화한 성과 지표입니다.</p></div>
   {isLoading ? <p className="mt-4 text-sm text-muted-foreground">성과 지표를 불러오는 중입니다.</p> : !report || report.metrics.length === 0 ? <p className="mt-4 rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">이 기간에 동기화된 지표가 없습니다.</p> : <><div className="mt-4 grid gap-2 md:grid-cols-2">{report.metrics.map((metric) => <article className="rounded-md border border-border p-3 text-sm" key={`${metric.metric}-${metric.observedAt}`}><p className="font-medium">{metric.metric}</p><p className="mt-1 text-lg">{metric.status === "AVAILABLE" ? `${metric.value ?? 0} ${metric.unit ?? ""}` : "사용할 수 없음"}</p><p className="mt-1 text-xs text-muted-foreground">{metric.unavailableReason ?? `${metric.aggregation ?? "원본"} · ${metric.observedAt}`}</p></article>)}</div><p className="mt-3 text-xs text-muted-foreground">{report.partial ? "일부 데이터 또는 사용할 수 없는 지표가 포함되어 있습니다." : "반환된 모든 지표를 사용할 수 있습니다."} 마지막 동기화: {report.lastSyncedAt ?? "기록 없음"}</p></>}
 </section>;
 
 const OptimizationPanel = ({ suggestions, isLoading }: { suggestions: OptimizationSuggestionResponse[]; isLoading: boolean }): ReactElement => {
   const cache = useQueryClient();
   const action = useMutation({ mutationFn: ({ id, next }: { id: string; next: "approve" | "reject" | "apply" }) => request(`/optimization/suggestions/${id}/action`, { method: "POST", body: JSON.stringify({ action: next }) }, OptimizationSuggestionResponseSchema), onSuccess: () => { void cache.invalidateQueries({ queryKey: ["optimization-suggestions"] }); void cache.invalidateQueries({ queryKey: ["strategy-versions"] }); } });
-  return <section className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="optimization-panel"><div><h2 className="text-lg font-semibold">최적화 제안</h2><p className="mt-1 text-sm text-muted-foreground">상관관계 기반 가설과 근거, 승인 이력, 안전하게 되돌릴 수 있는 전략 변경을 보여줍니다.</p></div>{isLoading ? <p className="mt-4 text-sm text-muted-foreground">최적화 제안을 불러오는 중입니다.</p> : suggestions.length === 0 ? <p className="mt-4 rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">아직 제안이 없습니다. 먼저 분석 데이터를 동기화하고 비교 집단을 생성해 주세요.</p> : <div className="mt-4 grid gap-2">{suggestions.map((suggestion) => <article className="rounded-md border border-border p-3 text-sm" key={suggestion.id}><div className="flex items-center justify-between gap-2"><p className="font-medium">{suggestion.title}</p><span className="rounded bg-muted px-2 py-1 text-xs">{statusLabel(suggestion.status)}</span></div><p className="mt-2 text-muted-foreground">{suggestion.rationale}</p><p className="mt-2 text-xs text-muted-foreground">표본: {suggestion.sampleSize} · 신뢰도: {suggestion.confidenceScore ?? "미확정"} · 만료: {suggestion.expiresAt ?? "없음"}</p>{suggestion.status === "PENDING" ? <div className="mt-3 flex gap-2"><Button className="h-8" disabled={action.isPending} onClick={() => action.mutate({ id: suggestion.id, next: "approve" })}>승인</Button><Button className="h-8" disabled={action.isPending} onClick={() => action.mutate({ id: suggestion.id, next: "reject" })}>거절</Button></div> : suggestion.status === "APPROVED" ? <Button className="mt-3 h-8" disabled={action.isPending} onClick={() => action.mutate({ id: suggestion.id, next: "apply" })}>변경 불가 전략으로 적용</Button> : null}</article>)}</div>}</section>;
+  return <section className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="optimization-panel">{action.error ? <p role="alert" className="text-sm text-red-700">{action.error.message}</p> : null}<div><h2 className="text-lg font-semibold">최적화 제안</h2><p className="mt-1 text-sm text-muted-foreground">상관관계 기반 가설과 근거, 승인 이력, 안전하게 되돌릴 수 있는 전략 변경을 보여줍니다.</p></div>{isLoading ? <p className="mt-4 text-sm text-muted-foreground">최적화 제안을 불러오는 중입니다.</p> : suggestions.length === 0 ? <p className="mt-4 rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">아직 제안이 없습니다. 먼저 분석 데이터를 동기화하고 비교 집단을 생성해 주세요.</p> : <div className="mt-4 grid gap-2">{suggestions.map((suggestion) => <article className="rounded-md border border-border p-3 text-sm" key={suggestion.id}><div className="flex items-center justify-between gap-2"><p className="font-medium">{suggestion.title}</p><span className="rounded bg-muted px-2 py-1 text-xs">{statusLabel(suggestion.status)}</span></div><p className="mt-2 text-muted-foreground">{suggestion.rationale}</p><details className="mt-2"><summary>비교 근거·변경안·위험 확인</summary><p>표본 부족 또는 허용되지 않은 변경은 적용할 수 없습니다. 효과는 가설이며 비교 실험으로 검증해야 합니다.</p><pre className="whitespace-pre-wrap break-all text-xs">{JSON.stringify({ evidence: suggestion.evidence, targetStrategy: suggestion.targetStrategy, expectedImpact: suggestion.expectedImpact, risk: suggestion.risk }, null, 2)}</pre></details><p className="mt-2 text-xs text-muted-foreground">표본: {suggestion.sampleSize} · 신뢰도: {suggestion.confidenceScore ?? "미확정"} · 만료: {suggestion.expiresAt ?? "없음"}</p>{suggestion.status === "PENDING" ? <div className="mt-3 flex gap-2"><Button className="h-8" disabled={action.isPending} onClick={() => action.mutate({ id: suggestion.id, next: "approve" })}>승인</Button><Button className="h-8" disabled={action.isPending} onClick={() => action.mutate({ id: suggestion.id, next: "reject" })}>거절</Button></div> : suggestion.status === "APPROVED" ? <Button className="mt-3 h-8" disabled={action.isPending || !suggestion.targetStrategy} onClick={() => { if (window.confirm("승인한 길이 전략을 이후 제작에 적용할까요? 기존 콘텐츠와 예약은 바뀌지 않습니다.")) action.mutate({ id: suggestion.id, next: "apply" }); }}>승인 전략 적용</Button> : null}</article>)}</div>}</section>;
 };
 
 const ExperimentResult = ({ result }: { result: unknown }): ReactElement => {
@@ -670,7 +699,7 @@ const StrategyPanel = ({ channelId }: { channelId: string }): ReactElement => {
 const OperationsPanel = ({ costs, notifications, isLoading }: { costs: CostReportResponse | undefined; notifications: NotificationResponse[]; isLoading: boolean }): ReactElement => {
   const cache = useQueryClient();
   const acknowledge = useMutation({ mutationFn: (id: string) => request(`/operations/notifications/${id}/acknowledge`, { method: "POST" }, NotificationResponseSchema), onSuccess: () => void cache.invalidateQueries({ queryKey: ["operations-notifications"] }) });
-return <section className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="operations-panel"><div><h2 className="text-lg font-semibold">운영 비용 및 알림</h2><p className="mt-1 text-sm text-muted-foreground">원장과 대조한 비용 합계와 앱 내 운영 알림입니다.</p></div>{isLoading ? <p className="mt-4 text-sm text-muted-foreground">운영 데이터를 불러오는 중입니다.</p> : <><div className="mt-4 grid gap-2 md:grid-cols-4"><article className="rounded border border-border p-3 text-sm"><p>예상 비용</p><p className="mt-1 text-lg">{costs?.estimated ?? "조회 실패"} {costs?.currency ?? "USD"}</p></article><article className="rounded border border-border p-3 text-sm"><p>실제 비용</p><p className="mt-1 text-lg">{costs?.actual ?? "조회 실패"} {costs?.currency ?? "USD"}</p></article><article className="rounded border border-border p-3 text-sm"><p>환급</p><p className="mt-1 text-lg">{costs?.credit ?? "조회 실패"}</p></article><article className="rounded border border-border p-3 text-sm"><p>원장 대조</p><p className="mt-1 text-lg">{!costs ? "조회 실패" : costs.reconciled ? "일치" : `차이 ${costs.discrepancy}`}</p></article></div><div className="mt-4 grid gap-2">{notifications.length === 0 ? <p className="text-sm text-muted-foreground">운영 알림이 없습니다.</p> : notifications.slice(0, 10).map((notification) => <article className="flex items-center justify-between gap-3 rounded border border-border p-3 text-sm" key={notification.id}><span>{statusLabel(notification.severity)} · {notification.eventKey}</span>{notification.acknowledgedAt ? <span className="text-xs text-muted-foreground">확인함</span> : <Button className="h-8" disabled={acknowledge.isPending} onClick={() => acknowledge.mutate(notification.id)}>확인</Button>}</article>)}</div></>}</section>;
+return <section className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="operations-panel"><div><h2 className="text-lg font-semibold">운영 비용 및 알림</h2><p className="mt-1 text-sm text-muted-foreground">원장과 대조한 비용 합계와 앱 내 운영 알림입니다.</p></div>{isLoading ? <p className="mt-4 text-sm text-muted-foreground">운영 데이터를 불러오는 중입니다.</p> : <><div className="mt-4 grid gap-2 md:grid-cols-4"><article className="rounded border border-border p-3 text-sm"><p>예상 비용</p><p className="mt-1 text-lg">{costs?.estimated ?? "조회 실패"} {costs?.currency ?? "USD"}</p></article><article className="rounded border border-border p-3 text-sm"><p>실제 비용</p><p className="mt-1 text-lg">{costs?.actual ?? "조회 실패"} {costs?.currency ?? "USD"}</p></article><article className="rounded border border-border p-3 text-sm"><p>환급</p><p className="mt-1 text-lg">{costs?.credit ?? "조회 실패"}</p></article><article className="rounded border border-border p-3 text-sm"><p>원장 대조</p><p className="mt-1 text-lg">{!costs ? "조회 실패" : costs.reconciled ? "일치" : `차이 ${costs.discrepancy}`}</p></article></div><p className="mt-3 text-xs">예상 단가와 실제 Provider 청구는 다를 수 있습니다. 단가 미확정 Provider는 제작을 보류합니다. Fake 사용량의 비용은 실 청구가 아닙니다.</p>{costs?.byProvider.map((provider) => <p className="mt-2 text-sm" key={provider.provider}>{provider.provider}: 예상 {provider.estimated} · 실제 {provider.actual} · 환급 {provider.credit} USD</p>)}<div className="mt-4 grid gap-2">{notifications.length === 0 ? <p className="text-sm text-muted-foreground">운영 알림이 없습니다.</p> : notifications.slice(0, 10).map((notification) => <article className="flex items-center justify-between gap-3 rounded border border-border p-3 text-sm" key={notification.id}><div><span>{statusLabel(notification.severity)} · {notification.eventKey}</span><p className="mt-1 text-xs">{new Date(notification.createdAt).toLocaleString()}</p><a className="mt-1 block underline" href={/budget|cost/i.test(notification.eventKey) ? "#settings" : /account|oauth|token/i.test(notification.eventKey) ? "#channels" : /policy|review|license/i.test(notification.eventKey) ? "#content" : "#automation"}>관련 운영 화면에서 원인 확인·복구</a></div>{notification.acknowledgedAt ? <span className="text-xs text-muted-foreground">확인함</span> : <Button className="h-8" disabled={acknowledge.isPending} onClick={() => acknowledge.mutate(notification.id)}>확인</Button>}</article>)}</div></>}</section>;
 };
 
 const BudgetPanel = ({ budgets, channels, isLoading, onError }: { budgets: AutomationBudgetResponse[]; channels: ChannelResponse[]; isLoading: boolean; onError: (message: string) => void }): ReactElement => {
@@ -724,30 +753,30 @@ const ContentPanel = ({ channels, content, isLoading, onError, selectedId, onSel
 };
 
 const weekdayLabels = ["일", "월", "화", "수", "목", "금", "토"] as const;
-const CalendarPanel = ({ channels, plans, onSelect }: { channels: ChannelResponse[]; plans: PublishCalendarItem[]; onSelect: (id: string) => void }): ReactElement => {
+const CalendarPanel = ({ channels, plans, onSelect }: { channels: ChannelResponse[]; plans: PublishCalendarItem[]; onSelect: (id: string, platform: Platform) => void }): ReactElement => {
   const cache = useQueryClient();
-  const change = useMutation({ mutationFn: (plan: PublishCalendarItem) => request(`/publishing/plans/${plan.id}/cancel`, { method: "POST", body: "{}" }, { parse: () => ({ ok: true }) }), onSuccess: (_, plan) => { void cache.invalidateQueries({ queryKey: ["publish-plans"] }); void cache.invalidateQueries({ queryKey: ["content"] }); onSelect(plan.contentItemId); document.getElementById("content")?.scrollIntoView({ block: "start" }); } });
+  const change = useMutation({ mutationFn: (plan: PublishCalendarItem) => request(`/publishing/plans/${plan.id}/cancel`, { method: "POST", body: "{}" }, { parse: () => ({ ok: true }) }), onSuccess: (_, plan) => { void cache.invalidateQueries({ queryKey: ["publish-plans"] }); void cache.invalidateQueries({ queryKey: ["content"] }); onSelect(plan.contentItemId, plan.platform); document.getElementById("content")?.scrollIntoView({ block: "start" }); } });
   return <section className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="calendar-panel">
     <h2 className="text-lg font-semibold">게시 캘린더</h2><p className="mt-1 text-sm text-muted-foreground">반복 슬롯과 실제 예약·게시 결과를 구분합니다. 예약 변경은 기존 예약을 취소한 뒤 검수 화면에서 새 시간으로 예약합니다.</p>
     {change.error ? <p role="alert" className="mt-2 text-sm text-red-700">{change.error.message}</p> : null}
-    {plans.length > 0 ? <div className="mt-4 grid gap-2">{plans.map((plan) => <article className="rounded border border-primary/30 bg-primary/5 p-3 text-sm" key={plan.id}><div className="flex items-center justify-between gap-3"><button type="button" className="font-medium underline" onClick={() => onSelect(plan.contentItemId)}>{plan.title} · {platformLabel(plan.platform)}</button><span>{statusLabel(plan.status)}</span></div><p className="mt-1 text-xs text-muted-foreground">예약: {new Date(plan.scheduledAt).toLocaleString()} · 게시: {plan.publishedAt ? new Date(plan.publishedAt).toLocaleString() : "아직 게시되지 않음"}</p>{plan.failureReason ? <p role="alert">{plan.failureReason}</p> : null}{plan.postUrl ? <a className="mt-1 block text-primary" href={plan.postUrl} rel="noreferrer" target="_blank">게시물 열기</a> : null}{plan.status === "SCHEDULED" ? <Button className="mt-2" disabled={change.isPending} onClick={() => { if (window.confirm("기존 예약을 취소하고 검수 화면에서 새 시간을 선택할까요? 새 예약을 저장하기 전까지 게시되지 않습니다.")) change.mutate(plan); }}>예약 변경</Button> : null}</article>)}</div> : <p className="mt-4 text-sm text-muted-foreground">아직 실제 예약 게시물이 없습니다.</p>}
+    {plans.length > 0 ? <div className="mt-4 grid gap-2">{plans.map((plan) => <article className="rounded border border-primary/30 bg-primary/5 p-3 text-sm" key={plan.id}><div className="flex items-center justify-between gap-3"><button type="button" className="font-medium underline" onClick={() => { onSelect(plan.contentItemId, plan.platform); document.getElementById("content")?.scrollIntoView({ block: "start" }); }}>{plan.title} · {platformLabel(plan.platform)}</button><span>{statusLabel(plan.status)}</span></div><p className="mt-1 text-xs text-muted-foreground">예약: {new Date(plan.scheduledAt).toLocaleString()} · 게시: {plan.publishedAt ? new Date(plan.publishedAt).toLocaleString() : "아직 게시되지 않음"}</p>{plan.failureReason ? <p role="alert">{plan.failureReason}</p> : null}{plan.postUrl ? <a className="mt-1 block text-primary" href={plan.postUrl} rel="noreferrer" target="_blank">게시물 열기</a> : null}{plan.status === "SCHEDULED" ? <Button className="mt-2" disabled={change.isPending} onClick={() => { if (window.confirm("기존 예약을 취소하고 검수 화면에서 새 시간을 선택할까요? 새 예약을 저장하기 전까지 게시되지 않습니다.")) change.mutate(plan); }}>예약 변경</Button> : null}</article>)}</div> : <p className="mt-4 text-sm text-muted-foreground">아직 실제 예약 게시물이 없습니다.</p>}
     <h3 className="mt-5 text-sm font-semibold">반복 게시 슬롯</h3>
     <div className="mt-4 grid gap-3 md:grid-cols-7">{weekdayLabels.map((day, index) => <article className="min-h-32 rounded-md border border-border p-3" key={day}><h3 className="text-sm font-semibold">{day}</h3><div className="mt-3 space-y-2">{channels.flatMap((channel) => channel.scheduleRules.filter((rule) => rule.dayOfWeek === index).map((rule) => ({ channel, rule }))).map(({ channel, rule }) => <div className="rounded bg-muted p-2 text-xs" key={`${channel.id}-${rule.platform}-${rule.timeOfDayLocal}`}><p className="font-medium">{rule.timeOfDayLocal} · {rule.timezone}</p><p className="mt-1">{channel.name}</p><p>{platformLabel(rule.platform)} · 최대 {rule.maxPosts}개</p></div>)}</div></article>)}</div>
   </section>;
 };
 
-const ReviewPanel = ({ accounts, content, contentItemId, onSelectContent, onError }: { accounts: PlatformAccountResponse[]; content: ContentItemSummary[]; contentItemId: string | null; onSelectContent: (id: string) => void; onError: (error: string) => void }): ReactElement => {
+const ReviewPanel = ({ owner, channels, platform, setPlatform, accounts, content, contentItemId, onSelectContent, onError }: { owner: boolean; channels: ChannelResponse[]; platform: Platform; setPlatform: (platform: Platform) => void; accounts: PlatformAccountResponse[]; content: ContentItemSummary[]; contentItemId: string | null; onSelectContent: (id: string) => void; onError: (error: string) => void }): ReactElement => {
   const queryClient = useQueryClient();
-  const [platform, setPlatform] = useState<Platform>("YOUTUBE");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [hashtags, setHashtags] = useState("");
   const [generationNotice, setGenerationNotice] = useState<string | null>(null);
-  const [regenerationPart, setRegenerationPart] = useState<"full" | "hook" | "body" | "metadata" | "scene">("full");
+  const [regenerationPart, setRegenerationPart] = useState<"full" | "hook" | "body" | "metadata" | "scene" | "voice" | "subtitle">("full");
   const [licenseAssetId, setLicenseAssetId] = useState(""); const [licenseProof, setLicenseProof] = useState(""); const [licenseName, setLicenseName] = useState(""); const [commercialAllowed, setCommercialAllowed] = useState(false); const [derivativeAllowed, setDerivativeAllowed] = useState(false);
   const [scheduledAt, setScheduledAt] = useState(() => localDateTimeValue(new Date(Date.now() + 10 * 60_000)));
   const review = useQuery({ queryKey: ["content-review", contentItemId], queryFn: () => fetchReview(contentItemId ?? ""), enabled: Boolean(contentItemId), retry: false, refetchInterval: 5_000 });
-  const preview = useQuery({ queryKey: ["content-preview", contentItemId, platform], queryFn: () => request(`/content/${contentItemId}/review/preview?platform=${platform}`, { method: "GET" }, ReviewPreviewResponseSchema), enabled: Boolean(contentItemId && review.data?.outputs.some((output) => output.platform === platform && output.videoReady)), retry: false });
+  const previewOutput = review.data?.outputs.find((output) => output.platform === platform);
+  const preview = useQuery({ queryKey: ["content-preview", contentItemId, platform, previewOutput?.sceneVersionId], queryFn: () => request(`/content/${contentItemId}/review/preview?platform=${platform}`, { method: "GET" }, ReviewPreviewResponseSchema), enabled: Boolean(contentItemId && previewOutput?.videoReady), retry: false, refetchInterval: 600_000 });
   const policyCheck = useMutation({
     mutationFn: (platform: Platform) => request(`/content/${contentItemId ?? ""}/review/policy-check`, { method: "POST", body: JSON.stringify({ platform }) }, ContentReviewResponseSchema),
     onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["content-review", contentItemId] }); },
@@ -761,6 +790,7 @@ const ReviewPanel = ({ accounts, content, contentItemId, onSelectContent, onErro
   const data = review.data;
   const output = data?.outputs.find((candidate) => candidate.platform === platform);
   const activePolicy = output ? output.policy : null;
+  const canRegenerate = channels.find((channel) => channel.id === data?.channelId)?.status === "ACTIVE";
   const selectedAssets = data?.assets.filter((asset) => asset.sceneVersionId == null || asset.sceneVersionId === output?.sceneVersionId) ?? [];
   useEffect(() => {
     if (!data) return;
@@ -774,7 +804,7 @@ const ReviewPanel = ({ accounts, content, contentItemId, onSelectContent, onErro
     onError: (error) => onError(error instanceof Error ? error.message : "메타데이터를 저장하지 못했습니다.")
   });
   const regenerate = useMutation({
-    mutationFn: (partial: "full" | "hook" | "body" | "metadata" | "scene") => {
+    mutationFn: (partial: "full" | "hook" | "body" | "metadata" | "scene" | "voice" | "subtitle") => {
       if (!data?.ideaId) throw new Error("다시 생성할 원본 아이디어를 찾을 수 없습니다.");
       return request("/automation/runs", { method: "POST", body: JSON.stringify({ channelId: data.channelId, ideaId: data.ideaId, platforms: [platform], partial, idempotencyKey: `review:${contentItemId}:${platform}:${partial}:${Date.now()}` }) }, AutomationRunResponseSchema);
     },
@@ -785,7 +815,7 @@ const ReviewPanel = ({ accounts, content, contentItemId, onSelectContent, onErro
     mutationFn: () => {
       const account = accounts.find((candidate) => candidate.channelId === data?.channelId && candidate.platform === platform && candidate.status === "CONNECTED");
       if (!account) throw new Error(`예약 전에 ${platformLabel(platform)} 계정을 연결해 주세요.`);
-      return request("/publishing/plans", { method: "POST", body: JSON.stringify({ contentItemId, platformAccountId: account.id, scheduledAt: new Date(scheduledAt).toISOString(), idempotencyKey: `review:${contentItemId}:${platform}:${new Date(scheduledAt).toISOString()}` }) }, PublishPlanResponseSchema);
+      return request("/publishing/plans", { method: "POST", body: JSON.stringify({ contentItemId, platformAccountId: account.id, scheduledAt: new Date(scheduledAt).toISOString(), idempotencyKey: `review:${contentItemId}:${platform}:${crypto.randomUUID()}` }) }, PublishPlanResponseSchema);
     },
     onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["content-review", contentItemId] }); void queryClient.invalidateQueries({ queryKey: ["content"] }); void queryClient.invalidateQueries({ queryKey: ["publish-plans"] }); },
     onError: (error) => onError(error instanceof Error ? error.message : "게시 예약에 실패했습니다.")
@@ -793,13 +823,15 @@ const ReviewPanel = ({ accounts, content, contentItemId, onSelectContent, onErro
   const license = useMutation({ mutationFn: (status: "VERIFIED" | "REJECTED") => request(`/content/${contentItemId}/review/asset-license`, { method: "POST", body: JSON.stringify({ assetId: licenseAssetId, proofUrl: licenseProof, licenseName, status, commercialUseAllowed: commercialAllowed, derivativeAllowed }) }, ContentReviewResponseSchema), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["content-review", contentItemId] }); void queryClient.invalidateQueries({ queryKey: ["content"] }); void queryClient.invalidateQueries({ queryKey: ["publish-plans"] }); } });
   return <section id="content" className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="review-panel">
     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-lg font-semibold">콘텐츠 검토</h2><p className="mt-1 text-sm text-muted-foreground">목록에서 콘텐츠를 선택해 플랫폼별 결과물과 게시 준비 상태를 검토합니다.</p></div><div className="flex gap-2"><label className="sr-only" htmlFor="review-content">검토할 콘텐츠</label><select id="review-content" aria-label="검토할 콘텐츠" className="h-10 min-w-56 rounded-md border border-border px-3 text-sm" onChange={(event) => onSelectContent(event.target.value)} value={contentItemId ?? ""}><option value="">콘텐츠 선택</option>{content.map((item) => <option key={item.id} value={item.id}>{item.title} · {statusLabel(item.status)}</option>)}</select><Button disabled={!contentItemId || policyCheck.isPending || !output?.videoReady} onClick={() => policyCheck.mutate(platform)}>정책 검사</Button></div></div>
-    <div className="mt-4 flex gap-2" role="tablist" aria-label="검수 플랫폼">{(["YOUTUBE", "INSTAGRAM", "TIKTOK"] as const).map((candidate) => <Button role="tab" aria-selected={platform === candidate} className={platform === candidate ? "" : "bg-foreground"} key={candidate} onClick={() => setPlatform(candidate)} type="button">{platformLabel(candidate)}</Button>)}</div>
+    <div className="mt-4 flex gap-2" role="tablist" aria-label="검수 플랫폼">{(["YOUTUBE", "INSTAGRAM", "TIKTOK"] as const).map((candidate) => <Button role="tab" tabIndex={platform === candidate ? 0 : -1} onKeyDown={(event) => { const tabs = ["YOUTUBE", "INSTAGRAM", "TIKTOK"] as const; const index = tabs.indexOf(candidate); const next = event.key === "ArrowRight" ? tabs[(index + 1) % 3] : event.key === "ArrowLeft" ? tabs[(index + 2) % 3] : event.key === "Home" ? tabs[0] : event.key === "End" ? tabs[2] : undefined; if (next) { event.preventDefault(); setPlatform(next); const buttons = event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[role=tab]"); buttons?.[tabs.indexOf(next)]?.focus(); } }} aria-selected={platform === candidate} className={platform === candidate ? "" : "bg-foreground"} key={candidate} onClick={() => setPlatform(candidate)} type="button">{platformLabel(candidate)}</Button>)}</div>
+    {data && !canRegenerate ? <p role="status" className="mt-3 text-sm">채널이 중지되어 재생성할 수 없습니다. 채널 운영을 재개하면 재생성할 수 있으며 검수·예약은 계속 가능합니다.</p> : null}
     {generationNotice ? <p role="status" className="mt-3 text-sm text-primary">{generationNotice}</p> : null}
   {data?.assets.length ? <details className="mt-3 rounded border border-border p-3 text-sm"><summary>에셋 권리 증빙 검토 (소유자)</summary><p className="mt-2">제공자 요금제·음성 동의·상업 사용·변형 권리를 직접 확인한 뒤 증빙을 등록합니다. URL만 입력했다고 권리가 자동 확인되는 것은 아닙니다. 변경 후 해당 자산을 사용하는 플랫폼만 재검사·재승인이 필요하며 해당 예약만 보류됩니다. 이미지 준비 중 권리 승인으로 멈췄다면 기존 이미지를 재사용해 자동으로 이어갑니다.</p><label className="mt-2 block">검토할 에셋<select className="ml-2 rounded border p-2" value={licenseAssetId} onChange={(event) => setLicenseAssetId(event.target.value)}><option value="">선택</option>{[...new Map(selectedAssets.map((asset) => [asset.id, asset])).values()].map((asset) => <option key={asset.id} value={asset.id}>{asset.purpose} · {statusLabel(asset.licenseStatus)}</option>)}</select></label><label className="mt-2 block">라이선스 이름<input className="ml-2 rounded border p-2" value={licenseName} onChange={(event) => setLicenseName(event.target.value)} /></label><label className="mt-2 block">권리 증빙 URL<input className="ml-2 rounded border p-2" type="url" value={licenseProof} onChange={(event) => setLicenseProof(event.target.value)} placeholder="https://" /></label><label className="mt-2 block"><input type="checkbox" checked={commercialAllowed} onChange={(event) => setCommercialAllowed(event.target.checked)} /> 상업 사용 허용을 확인했습니다</label><label className="mt-2 block"><input type="checkbox" checked={derivativeAllowed} onChange={(event) => setDerivativeAllowed(event.target.checked)} /> 변형·편집 허용을 확인했습니다</label><div className="mt-2 flex gap-2"><Button disabled={license.isPending || !licenseAssetId || !commercialAllowed || !derivativeAllowed || !licenseProof.startsWith("https://") || licenseName.length < 3} onClick={() => { if (window.confirm("실제 권리 증빙을 확인했으며 상업 사용을 승인할까요?")) license.mutate("VERIFIED"); }}>증빙 확인 후 승인</Button><Button disabled={license.isPending || !licenseAssetId || !licenseProof.startsWith("https://") || licenseName.length < 3} onClick={() => license.mutate("REJECTED")}>권리 사용 거절</Button></div>{license.error ? <p role="alert">{license.error.message}</p> : null}{license.isSuccess ? <p role="status">권리 검토를 기록했습니다. 정책 검사를 다시 실행해 주세요.</p> : null}</details> : null}
     {output?.script ? <details className="mt-3 rounded border border-border p-3 text-sm"><summary>대본·적용 언어 확인 ({output.script.language}, {output.durationSeconds ?? "미확정"}초)</summary><p className="mt-2">{output.script.hook}</p><p>{output.script.body}</p><p>{output.script.callToAction}</p></details> : null}
-    <div className="mt-3 flex flex-wrap items-center gap-2 text-sm"><label>재생성 범위<select aria-label="재생성 범위" className="ml-2 rounded border p-2" value={regenerationPart} onChange={(event) => setRegenerationPart(event.target.value as typeof regenerationPart)}>{[["full", "전체"], ["hook", "훅"], ["body", "본문"], ["metadata", "메타데이터"], ["scene", "장면 이미지"]].map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><Button disabled={regenerate.isPending || !output} onClick={() => regenerate.mutate(regenerationPart)}>선택 범위 재생성</Button><p>선택 플랫폼의 새 버전을 만들고 이미지·음성·영상·정책 검사를 다시 실행합니다. 서버가 단계별 예상 비용을 산정하며 예산·단가 미확정 시 보류합니다.</p></div>
+    {data && output ? <ScriptEditor request={request} owner={owner} review={data} output={output} /> : null}
+    <div className="mt-3 flex flex-wrap items-center gap-2 text-sm"><label>재생성 범위<select aria-label="재생성 범위" className="ml-2 rounded border p-2" value={regenerationPart} onChange={(event) => setRegenerationPart(event.target.value as typeof regenerationPart)}>{[["full", "전체"], ["hook", "훅"], ["body", "본문"], ["metadata", "메타데이터"], ["scene", "장면 이미지"], ["voice", "음성만"], ["subtitle", "자막 스타일만"]].map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><Button disabled={regenerate.isPending || !output || !canRegenerate} onClick={() => regenerate.mutate(regenerationPart)}>선택 범위 재생성</Button><p>선택 플랫폼의 새 버전을 만듭니다. 음성만은 대본·이미지를 재사용하고, 자막 스타일만은 대본·이미지·음성을 재사용합니다. 자막 스타일은 채널 설정을 먼저 수정해 주세요. 영상·정책 검사는 다시 실행합니다. 서버가 단계별 예상 비용을 산정하며 예산·단가 미확정 시 보류합니다.</p></div>
     {review.isLoading ? <p className="mt-4 text-sm text-muted-foreground">검토 정보를 불러오는 중입니다.</p> : null}
-      {data ? <div className="mt-4 grid gap-4 lg:grid-cols-2"><article className="rounded-md border border-border p-4"><div className="flex items-center justify-between"><h3 className="font-medium">{platformLabel(platform)} 결과물</h3><span className="rounded bg-muted px-2 py-1 text-xs">{statusLabel(output?.publishStatus ?? output?.reviewStatus ?? "REVIEW_REQUIRED")}</span></div><p className="mt-2 text-xs text-muted-foreground">대본: {statusLabel(output?.scriptStatus ?? "없음")} · 장면: {output?.sceneVersionId ? "준비됨" : "없음"} · 렌더링: {statusLabel(output?.renderStatus ?? "PENDING")}</p>{preview.data ? <video className="mt-3 aspect-[9/16] max-h-[480px] w-full rounded bg-black" controls src={preview.data.url} /> : <p className="mt-3 rounded bg-muted p-4 text-sm">이 플랫폼 결과물의 렌더링 영상 미리보기가 없습니다.</p>}<label className="mt-4 block text-sm font-medium">제목<input className="mt-1 h-10 w-full rounded border border-border px-3" onChange={(event) => setTitle(event.target.value)} value={title} /></label><label className="mt-3 block text-sm font-medium">설명<textarea className="mt-1 min-h-24 w-full rounded border border-border p-3" onChange={(event) => setDescription(event.target.value)} value={description} /></label><label className="mt-3 block text-sm font-medium">해시태그<input className="mt-1 h-10 w-full rounded border border-border px-3" onChange={(event) => setHashtags(event.target.value)} value={hashtags} /></label><div className="mt-3 flex flex-wrap gap-2"><Button disabled={metadata.isPending || !output} onClick={() => metadata.mutate()}>메타데이터 저장</Button><Button className="bg-foreground" disabled={regenerate.isPending || !output} onClick={() => regenerate.mutate("scene")}>장면만 재생성</Button><Button className="bg-foreground" disabled={regenerate.isPending || !output} onClick={() => regenerate.mutate("full")}>전체 재생성</Button></div><h4 className="mt-4 text-sm font-semibold">출처</h4><ul className="mt-2 space-y-1 text-sm">{data.sources.map((source) => <li key={source.url}><a className="text-primary" href={source.url} rel="noreferrer" target="_blank">{source.sourceName}: {source.title}</a></li>)}</ul><h4 className="mt-4 text-sm font-semibold">에셋 권리</h4><ul className="mt-2 space-y-1 text-sm">{selectedAssets.map((asset) => <li key={`${asset.id}-${asset.purpose}`}>{asset.purpose}: {statusLabel(asset.licenseStatus)}</li>)}</ul></article><article className="rounded-md border border-border p-4"><h3 className="font-medium">{platformLabel(platform)} 정책 검사 결과</h3><p className="mt-2 text-sm">{activePolicy ? statusLabel(activePolicy.status) : "검사 전"}</p><ul className="mt-3 space-y-2 text-sm">{activePolicy?.findings.map((finding) => <li key={`${finding.code}-${finding.message}`} className="rounded bg-muted p-2">{statusLabel(finding.severity)}: {finding.message}</li>)}</ul><div className="mt-5 flex flex-wrap gap-2"><Button disabled={action.isPending || activePolicy?.status !== "pass" || !output?.videoReady} onClick={() => action.mutate("approve")}>승인</Button><Button className="bg-foreground" disabled={action.isPending || output?.publishStatus === "PUBLISHED"} onClick={() => action.mutate("hold")}>보류</Button><Button className="bg-foreground" disabled={action.isPending || output?.publishStatus === "PUBLISHED"} onClick={() => { if (window.confirm("선택 플랫폼 결과물을 폐기할까요?")) action.mutate("discard"); }}>폐기</Button></div><div className="mt-5 border-t border-border pt-4"><label className="block text-sm font-medium">예약 시각<input className="mt-1 h-10 w-full rounded border border-border px-3" min={localDateTimeValue(new Date(Date.now() + 60_000))} onChange={(event) => setScheduledAt(event.target.value)} type="datetime-local" value={scheduledAt} /></label><p className="mt-1 text-xs text-muted-foreground">현재 기기 시간대로 표시되며 저장할 때 UTC로 변환합니다.</p><Button className="mt-3" disabled={schedule.isPending || output?.reviewStatus !== "APPROVED" || !output?.videoReady || activePolicy?.status !== "pass"} onClick={() => schedule.mutate()}>게시 계획 만들기</Button></div></article></div> : <p className="mt-4 rounded border border-dashed border-border p-4 text-sm text-muted-foreground">위 목록에서 검토할 콘텐츠를 선택해 주세요.</p>}
+      {data ? <div className="mt-4 grid gap-4 lg:grid-cols-2"><article className="rounded-md border border-border p-4"><div className="flex items-center justify-between"><h3 className="font-medium">{platformLabel(platform)} 결과물</h3><span className="rounded bg-muted px-2 py-1 text-xs">{statusLabel(output?.publishStatus ?? output?.reviewStatus ?? "REVIEW_REQUIRED")}</span></div><p className="mt-2 text-xs text-muted-foreground">대본: {statusLabel(output?.scriptStatus ?? "없음")} · 장면: {output?.sceneVersionId ? "준비됨" : "없음"} · 렌더링: {statusLabel(output?.renderStatus ?? "PENDING")}</p>{preview.data ? <video className="mt-3 aspect-[9/16] max-h-[480px] w-full rounded bg-black" controls src={preview.data.url} /> : <p className="mt-3 rounded bg-muted p-4 text-sm">이 플랫폼 결과물의 렌더링 영상 미리보기가 없습니다.</p>}<label className="mt-4 block text-sm font-medium">제목<input className="mt-1 h-10 w-full rounded border border-border px-3" onChange={(event) => setTitle(event.target.value)} value={title} /></label><label className="mt-3 block text-sm font-medium">설명<textarea aria-label="설명" className="mt-1 min-h-24 w-full rounded border border-border p-3" onChange={(event) => setDescription(event.target.value)} value={description} /></label><Button className="mt-2" disabled={!output || metadata.isPending} onClick={() => setDescription((previous) => /(?:ai|인공지능)\s*(?:생성|generated|사용)/i.test(previous) ? previous : `${previous}\nAI 생성 콘텐츠 (AI generated).`)}>AI 생성 고지 추가</Button><p className="mt-1 text-xs">고지를 추가한 뒤 메타데이터 저장 → 정책 검사 → 승인을 진행하세요. 권리·사실·민감 주제 검사를 우회하지 않습니다.</p><label className="mt-3 block text-sm font-medium">해시태그<input className="mt-1 h-10 w-full rounded border border-border px-3" onChange={(event) => setHashtags(event.target.value)} value={hashtags} /></label><div className="mt-3 flex flex-wrap gap-2"><Button disabled={metadata.isPending || !output} onClick={() => metadata.mutate()}>메타데이터 저장</Button><Button className="bg-foreground" disabled={regenerate.isPending || !output || !canRegenerate} onClick={() => regenerate.mutate("scene")}>장면만 재생성</Button><Button className="bg-foreground" disabled={regenerate.isPending || !output || !canRegenerate} onClick={() => regenerate.mutate("full")}>전체 재생성</Button></div><h4 className="mt-4 text-sm font-semibold">출처</h4><ul className="mt-2 space-y-1 text-sm">{data.sources.map((source) => <li key={source.url}><a className="text-primary" href={source.url} rel="noreferrer" target="_blank">{source.sourceName}: {source.title}</a></li>)}</ul><h4 className="mt-4 text-sm font-semibold">에셋 권리</h4><ul className="mt-2 space-y-1 text-sm">{selectedAssets.map((asset) => <li key={`${asset.id}-${asset.purpose}`}>{asset.purpose}: {statusLabel(asset.licenseStatus)}</li>)}</ul></article><article className="rounded-md border border-border p-4"><h3 className="font-medium">{platformLabel(platform)} 정책 검사 결과</h3><p className="mt-2 text-sm">{activePolicy ? statusLabel(activePolicy.status) : "검사 전"}</p><ul className="mt-3 space-y-2 text-sm">{activePolicy?.findings.map((finding) => <li key={`${finding.code}-${policyHelp(finding.code, finding.message)}`} className="rounded bg-muted p-2">{statusLabel(finding.severity)}: {policyHelp(finding.code, finding.message)}</li>)}</ul><div className="mt-5 flex flex-wrap gap-2"><Button disabled={action.isPending || activePolicy?.status !== "pass" || !output?.videoReady} onClick={() => action.mutate("approve")}>승인</Button><Button className="bg-foreground" disabled={action.isPending || output?.publishStatus === "PUBLISHED"} onClick={() => action.mutate("hold")}>보류</Button><Button className="bg-foreground" disabled={action.isPending || output?.publishStatus === "PUBLISHED"} onClick={() => { if (window.confirm("선택 플랫폼 결과물을 폐기할까요?")) action.mutate("discard"); }}>폐기</Button></div><div className="mt-5 border-t border-border pt-4"><label className="block text-sm font-medium">예약 시각<input className="mt-1 h-10 w-full rounded border border-border px-3" min={localDateTimeValue(new Date(Date.now() + 60_000))} onChange={(event) => setScheduledAt(event.target.value)} type="datetime-local" value={scheduledAt} /></label><p className="mt-1 text-xs text-muted-foreground">현재 기기 시간대로 표시되며 저장할 때 UTC로 변환합니다.</p><Button className="mt-3" disabled={schedule.isPending || output?.reviewStatus !== "APPROVED" || !output?.videoReady || activePolicy?.status !== "pass"} onClick={() => schedule.mutate()}>게시 계획 만들기</Button></div></article></div> : <p className="mt-4 rounded border border-dashed border-border p-4 text-sm text-muted-foreground">위 목록에서 검토할 콘텐츠를 선택해 주세요.</p>}
   </section>;
 };
 
@@ -944,7 +976,7 @@ const IdeasPanel = ({
                       </option>
                     ))}
                 </select>
-                <Button disabled={generateMutation.isPending || !["CANDIDATE", "SHORTLISTED"].includes(idea.status)} onClick={() => generateMutation.mutate(idea.id)}>이 소재로 영상 만들기</Button>
+                <Button disabled={generateMutation.isPending || channels.find((channel) => channel.id === channelId)?.status !== "ACTIVE" || !["CANDIDATE", "SHORTLISTED"].includes(idea.status)} onClick={() => generateMutation.mutate(idea.id)}>이 소재로 영상 만들기</Button>
               </div>
             </div>
           </article>
@@ -1147,24 +1179,21 @@ const EditPanel = ({
 }): ReactElement => {
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
+  const [operations, setOperations] = useState<UpdateChannelRequest | null>(null);
   const [maxDailyPosts, setMaxDailyPosts] = useState(1);
   const [language, setLanguage] = useState("ko-KR");
   const [audience, setAudience] = useState("");
   const [tone, setTone] = useState("");
-  const [hook, setHook] = useState("");
   const [cta, setCta] = useState("");
-  const [durationMin, setDurationMin] = useState(15);
-  const [durationMax, setDurationMax] = useState(60);
   const [template, setTemplate] = useState<ChannelResponse["template"] | null>(null);
 
   useEffect(() => {
     if (channel) {
+      setOperations(channelOperations(channel));
       setName(channel.name);
       setMaxDailyPosts(channel.dailyPublishLimit);
       setLanguage(channel.language); setAudience(channel.targetAudience); setTone(channel.template.tone);
-      setHook(channel.outputProfiles[0]?.hookStyle ?? "질문형");
       setCta(typeof channel.template.subtitleStyle.cta === "string" ? channel.template.subtitleStyle.cta : "");
-      setDurationMin(channel.outputProfiles[0]?.minDurationSeconds ?? 15); setDurationMax(channel.outputProfiles[0]?.maxDurationSeconds ?? 60);
       setTemplate(channel.template);
     }
   }, [channel]);
@@ -1182,12 +1211,12 @@ const EditPanel = ({
             name,
             language, targetAudience: audience,
             template: { ...(template ?? channel.template), tone, subtitleStyle: { ...(template ?? channel.template).subtitleStyle, cta } },
-            outputProfiles: channel.outputProfiles.map((profile) => ({ ...profile, hookStyle: hook, minDurationSeconds: durationMin, maxDurationSeconds: durationMax })),
+            ...UpdateChannelRequestSchema.parse(operations ?? channelOperations(channel)),
             automation: {
-              mode: channel.automationMode,
-              minInventoryCount: channel.minInventoryCount,
+              mode: operations?.automation?.mode ?? channel.automationMode,
+              minInventoryCount: operations?.automation?.minInventoryCount ?? channel.minInventoryCount,
               dailyPublishLimit: Number(maxDailyPosts),
-              errorAction: channel.errorAction
+              errorAction: operations?.automation?.errorAction ?? channel.errorAction
             }
           })
         },
@@ -1214,10 +1243,11 @@ const EditPanel = ({
       <h2 className="text-lg font-semibold">설정 수정</h2>
       <div className="mt-4 space-y-4">
         <p className="text-xs text-muted-foreground">변경은 이후 제작에 적용됩니다. 이미 예약된 영상과 게시 메타데이터는 바뀌지 않습니다.</p>
-        {[{ label: "생성 언어", value: language, set: setLanguage }, { label: "목표 시청자", value: audience, set: setAudience }, { label: "말투", value: tone, set: setTone }, { label: "훅 방식", value: hook, set: setHook }, { label: "CTA 방식", value: cta, set: setCta }].map((field) => <label className="block text-sm font-medium" key={field.label}>{field.label}<input className="mt-1 h-10 w-full rounded border border-border px-3" value={field.value} onChange={(event) => field.set(event.target.value)} /></label>)}
-        <label className="block text-sm font-medium">최소 길이 초<input className="mt-1 h-10 w-full rounded border border-border px-3" type="number" min={15} max={180} value={durationMin} onChange={(event) => setDurationMin(Number(event.target.value))} /></label>
-        <label className="block text-sm font-medium">최대 길이 초<input className="mt-1 h-10 w-full rounded border border-border px-3" type="number" min={15} max={180} value={durationMax} onChange={(event) => setDurationMax(Number(event.target.value))} /></label>
+        {[{ label: "생성 언어", value: language, set: setLanguage }, { label: "목표 시청자", value: audience, set: setAudience }, { label: "말투", value: tone, set: setTone }, { label: "CTA 방식", value: cta, set: setCta }].map((field) => <label className="block text-sm font-medium" key={field.label}>{field.label}<input className="mt-1 h-10 w-full rounded border border-border px-3" value={field.value} onChange={(event) => field.set(event.target.value)} /></label>)}
+        <ChannelOperationsEditor value={operations ?? channelOperations(channel)} onChange={setOperations} />
+        <PolicyProfileNotice request={request} profiles={operations?.outputProfiles ?? channel.outputProfiles} />
         <TemplateEditor template={template ?? channel.template} onChange={setTemplate} />
+        <ChannelAudioEditor request={request} channelId={channel.id} template={template ?? channel.template} onChange={setTemplate} />
         <WizardAssetUpload channelId={channel.id} onLogo={(id) => setTemplate((previous) => ({ ...(previous ?? channel.template), visualStyle: { ...(previous ?? channel.template).visualStyle, logoAssetId: id } }))} />
         <label className="block text-sm font-medium">
           채널 이름
@@ -1282,7 +1312,7 @@ const WizardSampleOutput = ({ review, output }: { review: ContentReviewResponse;
     if (checked.outputs.find((item) => item.platform === output.platform)?.policy?.status !== "pass") throw new Error("정책 검사가 통과하지 않았습니다. 출처·권리 증빙을 확인해 주세요.");
     return request(`/content/${review.id}/review/action`, { method: "POST", body: JSON.stringify({ action: "approve", platform: output.platform }) }, ContentReviewResponseSchema);
   }, onSuccess: () => { void cache.invalidateQueries({ queryKey: ["content-review", review.id] }); } });
-  return <article className="grid gap-3 rounded border p-4"><h3>{platformLabel(output.platform)} 실제 샘플</h3>{preview.data ? <video controls className="max-h-96 w-full" src={preview.data.url} /> : <p>렌더 완료 후 실제 영상을 표시합니다.</p>}<p className="text-sm">{output.script?.hook} {output.script?.body} {output.script?.callToAction}</p><p>정책: {output.policy?.status ?? "검사 대기"} · 승인: {statusLabel(output.reviewStatus)}</p>{output.policy?.findings.map((finding) => <p key={`${finding.code}:${finding.message}`} className="text-sm">{finding.message}</p>)}<Button type="button" disabled={!output.videoReady || approve.isPending} onClick={() => approve.mutate()}>정책 검사 후 샘플 승인</Button>{approve.error ? <p role="alert">{approve.error.message}</p> : null}{preview.error ? <p role="alert">{preview.error.message}</p> : null}</article>;
+  return <article className="grid gap-3 rounded border p-4"><h3>{platformLabel(output.platform)} 실제 샘플</h3>{preview.data ? <video controls className="max-h-96 w-full" src={preview.data.url} /> : <p>렌더 완료 후 실제 영상을 표시합니다.</p>}<p className="text-sm">{output.script?.hook} {output.script?.body} {output.script?.callToAction}</p><p>정책: {output.policy?.status ?? "검사 대기"} · 승인: {statusLabel(output.reviewStatus)}</p>{output.policy?.findings.map((finding) => <p key={`${finding.code}:${policyHelp(finding.code, finding.message)}`} className="text-sm">{policyHelp(finding.code, finding.message)}</p>)}<Button type="button" disabled={!output.videoReady || approve.isPending} onClick={() => approve.mutate()}>정책 검사 후 샘플 승인</Button>{approve.error ? <p role="alert">{approve.error.message}</p> : null}{preview.error ? <p role="alert">{preview.error.message}</p> : null}</article>;
 };
 
 const WizardSampleReview = ({ review }: { review: ContentReviewResponse }): ReactElement => {
@@ -1294,7 +1324,7 @@ const WizardSampleReview = ({ review }: { review: ContentReviewResponse }): Reac
   return <section className="grid gap-4"><h3 className="font-semibold">샘플 출처·권리·플랫폼 검토</h3>{review.sources.map((source) => <a key={source.url} href={source.url} target="_blank" rel="noreferrer" className="underline">{source.title} · {source.sourceName}</a>)}{pending.length ? <div className="grid gap-2 rounded border p-3"><p>확인되지 않은 권리는 자동 승인하지 않습니다.</p><select aria-label="샘플 권리 검토 에셋" value={assetId} onChange={(event) => setAssetId(event.target.value)}><option value="">에셋 선택</option>{[...new Map(pending.map((asset) => [asset.id, asset])).values()].map((asset) => <option key={asset.id} value={asset.id}>{asset.purpose} · {asset.licenseStatus}</option>)}</select><input aria-label="샘플 권리 증빙 URL" placeholder="HTTPS 권리 증빙 URL" type="url" value={proof} onChange={(event) => setProof(event.target.value)} /><input aria-label="샘플 라이선스 이름" placeholder="라이선스 이름" value={license} onChange={(event) => setLicense(event.target.value)} /><label><input type="checkbox" checked={rights} onChange={(event) => setRights(event.target.checked)} />상업 사용·변형 허용 증빙을 확인했습니다.</label><Button type="button" disabled={!rights || !assetId || !proof || license.length < 3 || evidence.isPending} onClick={() => evidence.mutate()}>샘플 권리 증빙 저장</Button>{evidence.error ? <p role="alert">{evidence.error.message}</p> : null}</div> : null}{review.outputs.filter((output) => output.platform).map((output) => <WizardSampleOutput key={output.platform} review={review} output={output} />)}</section>;
 };
 
-type WizardDraft = { channelId: string; values: WizardForm; step: number; runId: string | null; sampleSnapshot: string | null };
+type WizardDraft = { channelId: string; values: WizardForm; step: number; runId: string | null; sampleSnapshot: string | null; advanced: UpdateChannelRequest | null };
 const readWizardDraft = (): WizardDraft | null => {
   try {
     const value: unknown = JSON.parse(sessionStorage.getItem("postbot-wizard-draft") ?? "null");
@@ -1308,7 +1338,7 @@ const readWizardDraft = (): WizardDraft | null => {
     }
     const values = fields as WizardForm;
     if (!CreateChannelRequestSchema.safeParse(buildChannelInput(values)).success) return null;
-    return { channelId: record.channelId, values, step: typeof record.step === "number" ? Math.max(0, Math.min(7, record.step)) : 1, runId: typeof record.runId === "string" ? record.runId : null, sampleSnapshot: typeof record.sampleSnapshot === "string" ? record.sampleSnapshot : null };
+    return { advanced: UpdateChannelRequestSchema.safeParse(record.advanced).success ? UpdateChannelRequestSchema.parse(record.advanced) : null, channelId: record.channelId, values, step: typeof record.step === "number" ? Math.max(0, Math.min(7, record.step)) : 1, runId: typeof record.runId === "string" ? record.runId : null, sampleSnapshot: typeof record.sampleSnapshot === "string" ? record.sampleSnapshot : null };
   } catch { return null; }
 };
 
@@ -1324,6 +1354,7 @@ const ChannelWizard = ({
   const [step, setStep] = useState(restored?.step ?? 0);
   const [draftId, setDraftId] = useState<string | null>(restored?.channelId ?? null);
   const [runId, setRunId] = useState<string | null>(restored?.runId ?? null);
+  const [advanced, setAdvanced] = useState<UpdateChannelRequest | null>(restored?.advanced ?? null);
   const [sampleSnapshot, setSampleSnapshot] = useState<string | null>(restored?.sampleSnapshot ?? null);
   const [dailyBudget, setDailyBudget] = useState("5");
   const [monthlyBudget, setMonthlyBudget] = useState("20");
@@ -1332,30 +1363,35 @@ const ChannelWizard = ({
   useEffect(() => { dialog.current?.showModal(); }, []);
   const form = useForm<WizardForm>({ defaultValues: restored?.values ?? defaultWizardValues });
   const values = form.watch();
-  const preview = useMemo(() => buildChannelInput(values), [values]);
-  useEffect(() => { if (draftId) sessionStorage.setItem("postbot-wizard-draft", JSON.stringify({ channelId: draftId, values, step, runId, sampleSnapshot })); }, [draftId, values, step, runId, sampleSnapshot]);
+  const config = (input: WizardForm): CreateChannelRequest => {
+    const base = buildChannelInput(input);
+    return { ...base, ...(advanced ?? {}), template: { ...base.template, visualStyle: { ...base.template.visualStyle, ...(advanced?.template?.visualStyle.audio ? { audio: advanced.template.visualStyle.audio } : {}) } }, platforms: input.platforms, outputProfiles: input.platforms.map((platform) => advanced?.outputProfiles?.find((profile) => profile.platform === platform) ?? base.outputProfiles.find((profile) => profile.platform === platform)!), scheduleRules: (advanced?.scheduleRules ?? base.scheduleRules).filter((rule) => rule.platform === null || input.platforms.includes(rule.platform)) };
+  };
+  const preview = config(values);
+  useEffect(() => { if (draftId) sessionStorage.setItem("postbot-wizard-draft", JSON.stringify({ channelId: draftId, values, step, runId, sampleSnapshot, advanced })); }, [draftId, values, step, runId, sampleSnapshot, advanced]);
   const accounts = useQuery({ queryKey: ["platform-accounts"], queryFn: fetchPlatformAccounts, refetchInterval: 5000 });
   const connected = accounts.data?.filter((account) => account.channelId === draftId && account.status === "CONNECTED") ?? [];
   const ensureDraft = async (): Promise<string> => {
     if (draftId) return draftId;
-    const channel = await request("/channels", { method: "POST", body: JSON.stringify(CreateChannelRequestSchema.parse({ ...buildChannelInput(form.getValues()), startPaused: true })) }, ChannelResponseSchema);
+    const channel = await request("/channels", { method: "POST", body: JSON.stringify(CreateChannelRequestSchema.parse({ ...config(form.getValues()), startPaused: true })) }, ChannelResponseSchema);
     setDraftId(channel.id);
+    void queryClient.invalidateQueries({ queryKey: ["channels"] });
     return channel.id;
   };
   const connect = useMutation({ mutationFn: async (platform: Platform) => {
     const channelId = await ensureDraft();
-    sessionStorage.setItem("postbot-wizard-draft", JSON.stringify({ channelId, values: form.getValues(), step: 1, runId, sampleSnapshot }));
+    sessionStorage.setItem("postbot-wizard-draft", JSON.stringify({ channelId, values: form.getValues(), step: 1, runId, sampleSnapshot, advanced }));
     const started = await request(`/platform-accounts/${platform.toLowerCase()}/connect`, { method: "POST", body: JSON.stringify({ channelId }) }, StartOAuthConnectionResponseSchema);
     if (started.provider === "fake") await requestAbsolute(started.authorizationUrl, { method: "GET" }, OAuthCallbackResultSchema);
     else { sessionStorage.setItem("postbot-oauth-channel", channelId); window.location.assign(started.authorizationUrl); }
   }, onSuccess: () => { void accounts.refetch(); void queryClient.invalidateQueries({ queryKey: ["channels"] }); } });
   const sample = useMutation({ mutationFn: async () => {
     const channelId = await ensureDraft();
-    const config = CreateChannelRequestSchema.parse(buildChannelInput(form.getValues()));
-    await request(`/channels/${channelId}`, { method: "PATCH", body: JSON.stringify(config) }, ChannelResponseSchema);
+    const input = CreateChannelRequestSchema.parse(config(form.getValues()));
+    await request(`/channels/${channelId}`, { method: "PATCH", body: JSON.stringify(input) }, ChannelResponseSchema);
     await request("/automation/budgets", { method: "POST", body: JSON.stringify({ channelId, dailyHardLimit: Number(dailyBudget), monthlyHardLimit: Number(monthlyBudget) }) }, AutomationBudgetResponseSchema);
-    return request("/automation/runs", { method: "POST", body: JSON.stringify({ channelId, platforms: config.platforms, sample: true, idempotencyKey: `wizard-sample:${crypto.randomUUID()}` }) }, AutomationRunResponseSchema);
-  }, onSuccess: (run) => { setRunId(run.id); setSampleConfirmed(false); setSampleSnapshot(JSON.stringify(buildChannelInput(form.getValues()))); } });
+    return request("/automation/runs", { method: "POST", body: JSON.stringify({ channelId, platforms: input.platforms, sample: true, idempotencyKey: `wizard-sample:${crypto.randomUUID()}` }) }, AutomationRunResponseSchema);
+  }, onSuccess: (run) => { setRunId(run.id); setSampleConfirmed(false); setSampleSnapshot(JSON.stringify(config(form.getValues()))); } });
   const sampleRun = useQuery({ queryKey: ["wizard-sample-run", runId], queryFn: () => request(`/automation/runs/${runId}`, { method: "GET" }, AutomationRunResponseSchema), enabled: Boolean(runId), refetchInterval: 3000 });
   const sampleContent = sampleRun.data?.steps.find((item) => item.stage === "SCRIPT" && typeof item.output?.contentItemId === "string")?.output?.contentItemId;
   const sampleReview = useQuery({ queryKey: ["content-review", sampleContent], queryFn: () => fetchReview(typeof sampleContent === "string" ? sampleContent : ""), enabled: typeof sampleContent === "string", refetchInterval: 3000 });
@@ -1380,7 +1416,7 @@ const ChannelWizard = ({
   const lastStep = wizardSteps.length - 1;
   const nextStep = () => {
     if (step === 1 && !connected.some((account) => values.platforms.includes(account.platform))) { form.setError("platforms", { message: "선택한 SNS 계정을 최소 1개 연결해 주세요." }); return; }
-    const result = CreateChannelRequestSchema.safeParse(buildChannelInput(form.getValues()));
+    const result = CreateChannelRequestSchema.safeParse(config(form.getValues()));
     const fields: Record<string, keyof WizardForm> = { name: "name", topic: "topic", targetAudience: "audience", language: "language", platforms: "platforms", "collectionRule.keywords": "keywords", "collectionRule.recencyHours": "recencyHours", "collectionRule.collectionFrequencyMinutes": "collectionFrequencyMinutes", "template.name": "templateName", "template.tone": "hookStyle", "outputProfiles.minDurationSeconds": "durationMinSeconds", "outputProfiles.maxDurationSeconds": "durationMaxSeconds", "scheduleRules.timezone": "timezone", "scheduleRules.timeOfDayLocal": "times", scheduleRules: "times", "automation.dailyPublishLimit": "maxDailyPosts", "automation.minInventoryCount": "minContentInventory" };
     const stepFields: Array<Array<keyof WizardForm>> = [["name", "topic", "audience", "language"], ["platforms"], ["keywords", "recencyHours", "collectionFrequencyMinutes"], ["templateName", "hookStyle", "ctaStyle"], ["durationMinSeconds", "durationMaxSeconds"], ["timezone", "times", "days", "minContentInventory"], ["maxDailyPosts"], []];
     form.clearErrors();
@@ -1425,7 +1461,9 @@ const ChannelWizard = ({
         <section className="flex-1 px-5 py-6">
           <WizardStep step={step} form={form} preview={preview} />
           {step === 1 ? <div className="mt-4 grid gap-2">{values.platforms.map((platform) => <div key={platform} className="flex items-center justify-between rounded border p-3"><span>{platformLabel(platform)} · {connected.some((account) => account.platform === platform) ? "연결됨" : "미연결"}</span><Button type="button" disabled={connect.isPending} onClick={() => connect.mutate(platform)}>계정 연결</Button></div>)}<p className="text-sm text-muted-foreground">초안 채널은 샘플 승인 전까지 일시 중지됩니다. 닫았다가 다시 열어도 설정을 이어갈 수 있습니다.</p>{connect.error ? <p role="alert">{connect.error.message}</p> : null}</div> : null}
-          {step === 3 && draftId ? <WizardAssetUpload channelId={draftId} onLogo={(id) => form.setValue("logoAssetId", id)} /> : null}
+          {step === 3 && draftId ? <><WizardAssetUpload channelId={draftId} onLogo={(id) => form.setValue("logoAssetId", id)} /><ChannelAudioEditor request={request} channelId={draftId} template={preview.template} onChange={(template) => setAdvanced({ ...(advanced ?? {}), template })} /></> : null}
+          {step === 7 ? <details className="mt-4 rounded border p-3"><summary>플랫폼별 출력·수집 출처·세부 운영 설정</summary><ChannelOperationsEditor value={{ description: preview.description, topic: preview.topic, excludedTopics: preview.excludedTopics, collectionRule: preview.collectionRule, outputProfiles: preview.outputProfiles, scheduleRules: preview.scheduleRules, automation: preview.automation, ...(advanced?.template ? { template: advanced.template } : {}) }} onChange={setAdvanced} /></details> : null}
+          {step === 4 || step === 7 ? <PolicyProfileNotice request={request} profiles={preview.outputProfiles} /> : null}
           {step === 7 ? <div className="mt-5 grid gap-4"><label>일간 중단 예산 (USD)<input aria-label="샘플 일간 예산" type="number" min="0" step="0.01" className="ml-2 rounded border p-2" value={dailyBudget} onChange={(event) => setDailyBudget(event.target.value)} /></label><label>월간 중단 예산 (USD)<input aria-label="샘플 월간 예산" type="number" min="0" step="0.01" className="ml-2 rounded border p-2" value={monthlyBudget} onChange={(event) => setMonthlyBudget(event.target.value)} /></label><Button type="button" disabled={sample.isPending || connected.length === 0 || (Boolean(runId) && ["QUEUED", "RUNNING"].includes(sampleRun.data?.status ?? ""))} onClick={() => sample.mutate()}>실제 샘플 제작</Button><p className="text-sm">샘플은 렌더·정책 검사까지 실행하며 SNS에 게시하거나 예약하지 않습니다. 실제 Provider는 예산 내 비용이 발생할 수 있습니다.</p>{sample.error ? <p role="alert">{sample.error.message}</p> : null}{sampleRun.data ? <p role="status">샘플: {statusLabel(sampleRun.data.status)} · {sampleRun.data.steps.filter((item) => item.stage !== "PUBLISH").map((item) => `${platformLabel(item.platform)} ${stageLabel(item.stage)} ${statusLabel(item.status)}`).join(" / ")}</p> : null}{sampleRun.data?.steps.filter((item) => item.errorCode && item.errorCode !== "SAMPLE_REVIEW_REQUIRED").map((item) => <p role="alert" key={`${item.platform}:${item.stage}`}>{platformLabel(item.platform)}: {item.errorCode === "STOCK_ASSET_REQUIRED" ? "템플릿 단계에서 권리 확인된 스톡 이미지를 등록해 주세요." : item.errorMessage ?? item.errorCode}</p>)}{sampleReview.data ? <WizardSampleReview review={sampleReview.data} /> : null}{runId && sampleSnapshot !== JSON.stringify(preview) ? <p role="alert">제작 후 설정이 변경되었습니다. 새 설정으로 샘플을 다시 제작해 주세요.</p> : null}</div> : null}
           {step === 7 ? <label className="mt-4 flex gap-2"><input type="checkbox" checked={sampleConfirmed} onChange={(event) => setSampleConfirmed(event.target.checked)} />모든 플랫폼의 실제 샘플 영상과 출처를 확인했습니다.</label> : null}
           {Object.entries(form.formState.errors).map(([field, issue]) => <p role="alert" className="mt-2 text-sm text-red-700" key={field}>{field}: {issue.message}</p>)}
@@ -1611,6 +1649,8 @@ const Toggle = ({ label, registration }: { label: string; registration: UseFormR
 );
 
 const App = (): ReactElement => {
+  const [, setSessionRevision] = useState(0);
+  useEffect(() => { const expired = () => setSessionRevision((revision) => revision + 1); window.addEventListener("postbot-session-expired", expired); return () => window.removeEventListener("postbot-session-expired", expired); }, []);
   const me = useQuery({
     queryKey: ["auth", "me"],
     queryFn: fetchMe,

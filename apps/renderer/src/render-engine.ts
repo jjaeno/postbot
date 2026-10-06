@@ -57,20 +57,20 @@ const run = async (command: string, args: readonly string[]): Promise<void> => {
 export type FfprobeResult = { readonly durationSeconds: number; readonly width: number; readonly height: number; readonly hasAudio?: boolean; readonly meanVolumeDb?: number | null; readonly blackFrameRatio?: number };
 
 export class FfmpegPostProcessor {
-  async postprocess(input: { readonly videoInput: string; readonly output: string; readonly narrationInput?: string; readonly backgroundInput?: string }): Promise<void> {
+  async postprocess(input: { readonly videoInput: string; readonly output: string; readonly narrationInput?: string; readonly backgroundInput?: string; readonly effectsInput?: string; readonly backgroundVolume?: number; readonly effectsVolume?: number }): Promise<void> {
     await mkdir(dirname(input.output), { recursive: true });
     const args = ["-y", "-i", input.videoInput];
-    if (input.narrationInput) args.push("-i", input.narrationInput);
-    if (input.backgroundInput) args.push("-i", input.backgroundInput);
-    if (input.narrationInput && input.backgroundInput) {
-      args.push("-filter_complex", "[2:a]volume=0.20[bg];[1:a][bg]amix=inputs=2:duration=longest:normalize=0,apad[a]", "-map", "0:v:0", "-map", "[a]");
-    } else if (input.narrationInput) {
-      args.push("-filter_complex", "[1:a]apad[a]", "-map", "0:v:0", "-map", "[a]");
-    } else if (input.backgroundInput) {
-      args.push("-filter_complex", "[1:a]volume=0.20,apad[a]", "-map", "0:v:0", "-map", "[a]");
-    } else {
-      args.push("-map", "0:v:0");
-    }
+    const tracks: Array<{ path: string; volume: number; loop: boolean }> = [];
+    if (input.narrationInput) tracks.push({ path: input.narrationInput, volume: 1, loop: false });
+    if (input.backgroundInput) tracks.push({ path: input.backgroundInput, volume: input.backgroundVolume ?? 0.2, loop: true });
+    if (input.effectsInput) tracks.push({ path: input.effectsInput, volume: input.effectsVolume ?? 0.2, loop: false });
+    if (tracks.some((track) => !Number.isFinite(track.volume) || track.volume < 0 || track.volume > 1)) throw new Error("AUDIO_VOLUME_INVALID");
+    for (const track of tracks) { if (track.loop) args.push("-stream_loop", "-1"); args.push("-i", track.path); }
+    if (tracks.length) {
+      const filters = tracks.map((track, index) => `[${index + 1}:a]volume=${track.volume}[track${index}]`);
+      filters.push(`${tracks.map((_, index) => `[track${index}]`).join("")}amix=inputs=${tracks.length}:duration=longest:normalize=0,apad[a]`);
+      args.push("-filter_complex", filters.join(";"), "-map", "0:v:0", "-map", "[a]");
+    } else args.push("-map", "0:v:0");
     args.push("-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest", input.output);
     await run("ffmpeg", args);
   }

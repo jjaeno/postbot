@@ -35,6 +35,33 @@ const seed = async () => {
 
 suite("rights proof recovery and platform isolation", () => {
   afterAll(() => prisma.$disconnect());
+  it("versions source-confirmed script edits without changing sibling evidence or exposing foreign sources", async () => {
+    const fixture = await seed();
+    const repository = new PrismaReviewRepository(prisma);
+    const sourceUrl = "https://example.com/verified-science";
+    await prisma.sourceReference.create({ data: { contentItemId: fixture.content.id, kind: "OFFICIAL", url: sourceUrl, urlHash: fixture.key, title: "Verified", sourceName: "Fixture", normalizedSnapshot: { facts: [] } } });
+    await prisma.sceneVersion.update({ where: { id: fixture.scenes[0]!.id }, data: { sceneDocument: { schemaVersion: "1.0.0", title: "Fixture", width: 1080, height: 1920, fps: 30, durationInFrames: 900, scenes: [{ id: "one", startFrame: 0, durationInFrames: 900, visualPrompt: "Fixture", narration: { text: "hook body CTA", sourceUrl }, overlays: [{ kind: "title", text: "Fixture" }] }] } } });
+    const input = { platform: "YOUTUBE" as const, hook: "Verified hook", body: "Owner checked the source", callToAction: "Read source", sourceUrl, confirmFacts: true as const };
+    expect(await repository.updateScript("foreign-workspace", fixture.user.id, fixture.content.id, input)).toBeNull();
+    expect(await repository.updateScript(fixture.workspace.id, fixture.user.id, fixture.content.id, { ...input, sourceUrl: "https://example.com/foreign" })).toBeNull();
+    const result = await repository.updateScript(fixture.workspace.id, fixture.user.id, fixture.content.id, input);
+    expect(result?.outputs.find((output) => output.platform === "YOUTUBE")).toMatchObject({ reviewStatus: "REVIEW_REQUIRED", videoReady: false });
+    expect(result?.outputs.find((output) => output.platform === "INSTAGRAM")).toMatchObject({ reviewStatus: "APPROVED", publishStatus: "SCHEDULED" });
+    expect((await repository.getEvidence(fixture.workspace.id, fixture.content.id, "YOUTUBE", [], 0))?.factsHaveSources).toBe(true);
+    expect((await repository.getEvidence(fixture.workspace.id, fixture.content.id, "YOUTUBE", ["Verified hook"], 0))?.sensitiveTopic).toBe(true);
+    expect(await prisma.assetUsage.count({ where: { sceneVersionId: fixture.scenes[0]!.id } })).toBe(1);
+    expect(await prisma.publishPlan.findUniqueOrThrow({ where: { id: fixture.plans[0]!.id } })).toMatchObject({ status: "HELD" });
+  });
+  it("keeps a metadata edit isolated from sibling titles, approvals and reservations", async () => {
+    const fixture = await seed();
+    const repository = new PrismaReviewRepository(prisma);
+    await repository.updateMetadata(fixture.workspace.id, fixture.content.id, { platform: "YOUTUBE", title: "Only YouTube", description: "AI generated", hashtags: ["edited"] });
+    const review = await repository.get(fixture.workspace.id, fixture.content.id);
+    expect(review?.title).toBe("Fixture");
+    expect(review?.outputs.find((output) => output.platform === "YOUTUBE")?.title).toBe("Only YouTube");
+    expect(review?.outputs.find((output) => output.platform === "INSTAGRAM")).toMatchObject({ title: "Fixture", reviewStatus: "APPROVED", publishStatus: "SCHEDULED" });
+    expect(await prisma.publishPlan.findUniqueOrThrow({ where: { id: fixture.plans[0]!.id } })).toMatchObject({ status: "HELD", title: "Fixture" });
+  });
   it("resumes the held asset step and reuses the approved image without another provider call", async () => {
     const fixture = await seed();
     const repository = new PrismaReviewRepository(prisma);

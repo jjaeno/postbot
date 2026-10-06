@@ -1,6 +1,8 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { Prisma, type PrismaClient } from "@postbot/database";
-import type { ContentReviewResponse, PolicyVerdict, UpdateReviewMetadataRequest, ReviewAssetLicenseRequest } from "@postbot/contracts";
+import type { ContentReviewResponse, PolicyVerdict, UpdateReviewMetadataRequest, UpdateReviewScriptRequest, ReviewAssetLicenseRequest } from "@postbot/contracts";
+import { SceneDocumentSchema } from "@postbot/scene-schema";
+import { readAssetUsagePurpose, sceneAssetUsageKey } from "@postbot/asset-library";
 import type { PolicyEvidence, PolicyRuleRecord, ReviewRepository } from "./review.repository.js";
 
 const json = (value: Prisma.JsonValue | null): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -111,14 +113,43 @@ export class PrismaReviewRepository implements ReviewRepository {
 
   async updateMetadata(workspaceId: string, contentItemId: string, input: UpdateReviewMetadataRequest): Promise<ContentReviewResponse | null> {
     const item = await this.prisma.contentItem.findFirst({ where: { id: contentItemId, channel: { workspaceId } }, include: { scriptVersions: { where: { platform: input.platform }, orderBy: { version: "desc" }, take: 1 }, sceneVersions: { where: { platform: input.platform }, orderBy: { version: "desc" }, take: 1 } } });
-    const script = item?.scriptVersions[0]; if (!item || !script) return null;
-    const priorQuality = { ...json(script.qualitySnapshot), reviewStatus: "REVIEW_REQUIRED" };
+    if (!item || !item.scriptVersions[0]) return null;
     await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM channels WHERE id = ${item.channelId} FOR UPDATE`;
+      const script = await tx.scriptVersion.findFirstOrThrow({ where: { contentItemId, platform: input.platform }, orderBy: { version: "desc" } });
+      const priorQuality = { ...json(script.qualitySnapshot), reviewStatus: "REVIEW_REQUIRED" };
       const nextVersion = script.version + 1;
       await tx.scriptVersion.create({ data: { contentItemId, version: nextVersion, platform: input.platform, hook: script.hook, body: script.body, callToAction: script.callToAction, language: script.language, durationSeconds: script.durationSeconds, promptVersion: script.promptVersion, qualitySnapshot: { ...priorQuality, reviewTitle: input.title, metadata: { description: input.description, hashtags: input.hashtags }, editedBy: "review" } } });
       // Metadata edits reuse the rendered scene and its asset/license evidence.
       if (input.platform) await tx.publishPlan.updateMany({ where: { contentItemId, platform: input.platform, status: "SCHEDULED" }, data: { status: "HELD" } });
-      await tx.contentItem.update({ where: { id: contentItemId }, data: { title: input.title, status: "REVIEW_REQUIRED", approvedAt: null } });
+      // Platform titles live in the version snapshot, not the shared planning title.
+      await tx.contentItem.update({ where: { id: contentItemId }, data: { status: "REVIEW_REQUIRED", approvedAt: null } });
+    });
+    return this.get(workspaceId, contentItemId);
+  }
+
+  async updateScript(workspaceId: string, userId: string, contentItemId: string, input: UpdateReviewScriptRequest): Promise<ContentReviewResponse | null> {
+    const owned = await this.prisma.contentItem.findFirst({ where: { id: contentItemId, channel: { workspaceId }, sourceReferences: { some: { url: input.sourceUrl } } } });
+    if (!owned) return null;
+    await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM channels WHERE id = ${owned.channelId} FOR UPDATE`;
+      const script = await tx.scriptVersion.findFirstOrThrow({ where: { contentItemId, platform: input.platform }, orderBy: { version: "desc" } });
+      const scene = await tx.sceneVersion.findFirstOrThrow({ where: { contentItemId, platform: input.platform }, orderBy: { version: "desc" } });
+      const document = SceneDocumentSchema.parse(scene.sceneDocument);
+      const text = [input.hook, input.body, input.callToAction].join(" ");
+      const words = text.split(/\s+/); const chunk = Math.ceil(words.length / document.scenes.length);
+      document.scenes = document.scenes.map((entry, index) => ({ ...entry, narration: { text: words.slice(index * chunk, (index + 1) * chunk).join(" ") || input.callToAction, sourceUrl: input.sourceUrl }, overlays: entry.overlays.map((overlay) => ({ ...overlay, text: (overlay.kind === "title" ? input.hook : overlay.kind === "cta" ? input.callToAction : input.body).slice(0, 120) })) }));
+      SceneDocumentSchema.parse(document);
+      const nextScript = await tx.scriptVersion.create({ data: { contentItemId, platform: input.platform, version: script.version + 1, hook: input.hook, body: input.body, callToAction: input.callToAction, language: script.language, durationSeconds: script.durationSeconds, promptVersion: script.promptVersion, qualitySnapshot: { ...json(script.qualitySnapshot), reviewStatus: "REVIEW_REQUIRED", facts: [{ claim: text, sourceUrl: input.sourceUrl }], factsConfirmedBy: userId, editedBy: "owner-script-review" } } });
+      const nextScene = await tx.sceneVersion.create({ data: { contentItemId, scriptVersionId: nextScript.id, platform: input.platform, version: nextScript.version, schemaVersion: scene.schemaVersion, sceneDocument: document, durationSeconds: scene.durationSeconds } });
+      const usages = await tx.assetUsage.findMany({ where: { sceneVersionId: scene.id } });
+      for (const usage of usages) {
+        const purpose = readAssetUsagePurpose(usage); if (!purpose.startsWith("scene-image:")) continue;
+        await tx.assetUsage.create({ data: { assetId: usage.assetId, contentItemId, sceneVersionId: nextScene.id, purpose: sceneAssetUsageKey(purpose, nextScene.id), usageSnapshot: { ...json(usage.usageSnapshot), originalPurpose: purpose } } });
+      }
+      await tx.publishPlan.updateMany({ where: { contentItemId, platform: input.platform, status: "SCHEDULED" }, data: { status: "HELD" } });
+      await tx.contentItem.update({ where: { id: contentItemId }, data: { status: "REVIEW_REQUIRED", approvedAt: null } });
+      await tx.auditLog.create({ data: { workspaceId, userId, action: "review.script.edit_and_confirm_sources", targetType: "script_version", targetId: nextScript.id } });
     });
     return this.get(workspaceId, contentItemId);
   }
@@ -144,7 +175,8 @@ export class PrismaReviewRepository implements ReviewRepository {
     } });
     if (!item) return null;
     const sourceUrls = new Set(item.sourceReferences.map((source) => source.url));
-    const facts = item.sourceReferences.flatMap((source) => {
+    const quality = json(item.scriptVersions[0]?.qualitySnapshot ?? null);
+    const facts = typeof quality.factsConfirmedBy === "string" && Array.isArray(quality.facts) ? quality.facts as unknown[] : item.sourceReferences.flatMap((source) => {
       const snapshot = json(source.normalizedSnapshot);
       return Array.isArray(snapshot.facts) ? snapshot.facts as unknown[] : [];
     });
@@ -156,7 +188,8 @@ export class PrismaReviewRepository implements ReviewRepository {
     const currentBody = item.scriptVersions[0]?.body ?? "";
     const similarity = item.channel.contentItems.reduce((maximum, other) => Math.max(maximum, lexicalSimilarity(currentBody, other.scriptVersions[0]?.body ?? "")), 0);
     const duration = item.scriptVersions[0]?.durationSeconds?.toNumber() ?? null;
-    const text = `${item.title} ${item.summary ?? ""} ${currentBody}`.toLowerCase();
+    const script = item.scriptVersions[0];
+    const text = `${typeof quality.reviewTitle === "string" ? quality.reviewTitle : item.title} ${item.summary ?? ""} ${script?.hook ?? ""} ${currentBody} ${script?.callToAction ?? ""}`.toLowerCase();
     const licenses = item.assetUsages.map((usage) => usage.asset.licenses[0]);
     return {
       factsHaveSources: facts.length > 0 && facts.length === linkedFacts.length,

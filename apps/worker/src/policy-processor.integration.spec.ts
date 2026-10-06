@@ -22,5 +22,11 @@ suite("current scene rights evidence", () => {
     await prisma.policyRule.create({ data: { platform: "YOUTUBE", region: key.slice(0, 32), version: 1, effectiveAt: new Date(0), checkedAt: new Date(), durationRule: { minSeconds: 30, maxSeconds: 60 }, originalityRule: {}, aiDisclosureRule: {}, rightsRule: { requireVerifiedAssets: true, commercialUseRequired: true }, restrictedTopics: [] } });
     const result = await new PolicyProcessor(prisma).process({ automation: { runId: key, stage: "POLICY", platform: "YOUTUBE" }, policy: { contentItemId: item.id, platform: "YOUTUBE", region: key.slice(0, 32) } });
     expect(result.status).toBe("pass");
+    await prisma.sourceReference.updateMany({ where: { contentItemId: item.id }, data: { normalizedSnapshot: { facts: [] } } });
+    await prisma.scriptVersion.updateMany({ where: { contentItemId: item.id }, data: { qualitySnapshot: { factsConfirmedBy: user.id, facts: [{ claim: "Owner confirmed", sourceUrl: url }], metadata: { description: "AI generated" } } } });
+    expect((await new PolicyProcessor(prisma).process({ automation: { runId: key, stage: "POLICY", platform: "YOUTUBE" }, policy: { contentItemId: item.id, platform: "YOUTUBE", region: key.slice(0, 32) } })).status).toBe("pass");
+    await prisma.policyRule.updateMany({ where: { platform: "YOUTUBE", region: key.slice(0, 32) }, data: { restrictedTopics: ["restricted hook"] } });
+    await prisma.scriptVersion.updateMany({ where: { contentItemId: item.id }, data: { hook: "restricted hook" } });
+    expect((await new PolicyProcessor(prisma).process({ automation: { runId: key, stage: "POLICY", platform: "YOUTUBE" }, policy: { contentItemId: item.id, platform: "YOUTUBE", region: key.slice(0, 32) } })).status).not.toBe("pass");
   });
 });

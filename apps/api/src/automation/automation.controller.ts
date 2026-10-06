@@ -40,8 +40,14 @@ export class AutomationController {
 
   @Post("switches")
   setSwitch(@Req() req: AuthenticatedRequest, @Body() body: unknown) {
-    return this.automation.setSwitch(req.auth.workspaceId, body);
+    return this.automation.setSwitch(req.auth.workspaceId, body, req.auth.workspace.role, req.auth.userId);
   }
+
+  @Get("switches")
+  switches(@Req() req: AuthenticatedRequest) { return this.automation.listSwitches(req.auth.workspaceId); }
+
+  @Get("policy-profiles")
+  policyProfiles() { return this.automation.policyProfiles(); }
 
   @Post("runs/:runId/control")
   control(@Req() req: AuthenticatedRequest, @Param("runId") runId: string, @Body() body: unknown) {

@@ -36,8 +36,9 @@ export class OperationsService implements OnModuleDestroy {
 
   async costReport(workspaceId: string, raw: unknown): Promise<CostReportResponse> {
     const input = CostReportQuerySchema.parse(raw);
-    const usage = await this.prisma.providerUsage.findMany({ where: { occurredAt: { gte: new Date(input.periodStart), lte: new Date(input.periodEnd) }, ...(input.provider ? { provider: input.provider } : {}), ...(input.channelId ? { contentItem: { channelId: input.channelId, channel: { workspaceId } } } : { contentItem: { channel: { workspaceId } } }) }, select: { provider: true, estimatedCost: true, actualCost: true } });
-    const ledger = await this.prisma.costLedger.findMany({ where: { occurredAt: { gte: new Date(input.periodStart), lte: new Date(input.periodEnd) }, ...(input.channelId ? { contentItem: { channelId: input.channelId, channel: { workspaceId } } } : { contentItem: { channel: { workspaceId } } }) }, select: { direction: true, amount: true, providerUsage: { select: { provider: true } } } });
+    const scope = { ...(input.contentItemId ? { id: input.contentItemId } : {}), ...(input.channelId ? { channelId: input.channelId } : {}), channel: { workspaceId } };
+    const usage = await this.prisma.providerUsage.findMany({ where: { occurredAt: { gte: new Date(input.periodStart), lte: new Date(input.periodEnd) }, ...(input.provider ? { provider: input.provider } : {}), contentItem: scope }, select: { provider: true, estimatedCost: true, actualCost: true } });
+    const ledger = await this.prisma.costLedger.findMany({ where: { occurredAt: { gte: new Date(input.periodStart), lte: new Date(input.periodEnd) }, contentItem: scope, ...(input.provider ? { providerUsage: { provider: input.provider } } : {}) }, select: { direction: true, amount: true, providerUsage: { select: { provider: true } } } });
     const totals = { estimated: new Prisma.Decimal(0), actual: new Prisma.Decimal(0), credit: new Prisma.Decimal(0) };
     const providerTotals = new Map<string, { estimated: Prisma.Decimal; actual: Prisma.Decimal; credit: Prisma.Decimal }>();
     for (const entry of ledger) {

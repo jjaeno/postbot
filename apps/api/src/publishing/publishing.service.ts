@@ -40,9 +40,9 @@ export class PublishingService {
     const title = typeof snapshot.reviewTitle === "string" ? snapshot.reviewTitle : content.title;
     const description = typeof metadata.description === "string" ? metadata.description : content.summary;
     const hashtags = Array.isArray(metadata.hashtags) ? metadata.hashtags.filter((tag): tag is string => typeof tag === "string") : [];
-    const channel = await this.prisma.channel.findUniqueOrThrow({ where: { id: content.channelId }, include: { scheduleRules: { where: { isActive: true } } } });
+    const channel = await this.prisma.channel.findUniqueOrThrow({ where: { id: content.channelId }, include: { scheduleRules: { where: { isActive: true } }, outputProfiles: { where: { platform: account.platform, isActive: true } } } });
     const timezone = channel.scheduleRules.find((rule) => rule.platform === account.platform)?.timezone ?? channel.scheduleRules[0]?.timezone ?? "Asia/Seoul";
-    const plan = await createScheduledPlan(this.prisma, content.channelId, timezone, channel.dailyPublishLimit, { contentItemId: content.id, platform: account.platform, platformAccountId: account.id, sceneVersionId: scene.id, policySnapshotId: check.snapshots[0]?.id, status: "SCHEDULED", scheduledAt, idempotencyKey: input.idempotencyKey, title, description, hashtags });
+    const plan = await createScheduledPlan(this.prisma, content.channelId, timezone, channel.dailyPublishLimit, { contentItemId: content.id, platform: account.platform, platformAccountId: account.id, sceneVersionId: scene.id, policySnapshotId: check.snapshots[0]?.id, status: "SCHEDULED", scheduledAt, idempotencyKey: input.idempotencyKey, title, description, hashtags, metadata: { publicSetting: channel.outputProfiles[0]?.publicSetting ?? "PUBLIC" } });
     await this.jobs.create(workspaceId, { type: "PUBLISH", channelId: content.channelId, contentItemId: content.id, idempotencyKey: `publish:${plan.id}`, runAfter: scheduledAt.toISOString(), payload: { publish: { publishPlanId: plan.id } } });
     await this.prisma.contentItem.update({ where: { id: content.id }, data: { status: "SCHEDULED" } });
     return { id: plan.id, contentItemId: plan.contentItemId, platformAccountId: plan.platformAccountId, platform: plan.platform, status: plan.status, scheduledAt: plan.scheduledAt.toISOString(), idempotencyKey: plan.idempotencyKey, title: plan.title };

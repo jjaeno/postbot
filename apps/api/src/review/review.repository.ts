@@ -1,4 +1,4 @@
-import type { ContentReviewResponse, PolicyVerdict, UpdateReviewMetadataRequest, ReviewAssetLicenseRequest } from "@postbot/contracts";
+import type { ContentReviewResponse, PolicyVerdict, UpdateReviewMetadataRequest, UpdateReviewScriptRequest, ReviewAssetLicenseRequest } from "@postbot/contracts";
 
 export const REVIEW_REPOSITORY = Symbol("REVIEW_REPOSITORY");
 
@@ -14,6 +14,7 @@ export type PolicyEvidence = {
 };
 
 export type ReviewRepository = {
+  updateScript?(workspaceId: string, userId: string, contentItemId: string, input: UpdateReviewScriptRequest): Promise<ContentReviewResponse | null>;
   reviewAssetLicense?(workspaceId: string, userId: string, contentItemId: string, input: ReviewAssetLicenseRequest): Promise<boolean>;
   get(workspaceId: string, contentItemId: string): Promise<ContentReviewResponse | null>;
   getRule(platform: PolicyRuleRecord["platform"], region: string, at: Date): Promise<PolicyRuleRecord | null>;

@@ -1,4 +1,4 @@
-import { AssetPreparationService, AssetRepository } from "@postbot/asset-library";
+import { AssetPreparationService, AssetRepository, sceneAssetUsageKey } from "@postbot/asset-library";
 import { loadConfig } from "@postbot/config";
 import { AssetPreparationJobPayloadSchema, TtsPreparationJobPayloadSchema } from "@postbot/contracts";
 import type { PrismaClient } from "@postbot/database";
@@ -53,6 +53,17 @@ export class AssetPreparationProcessor {
 
   async processTts(payload: Record<string, unknown>, jobId: string): Promise<Record<string, unknown>> {
     const input = TtsPreparationJobPayloadSchema.parse(payload).ttsPreparation;
+    const automation = payload.automation;
+    const runId = automation && typeof automation === "object" && !Array.isArray(automation) && "runId" in automation ? automation.runId : null;
+    if (typeof runId === "string") {
+      const run = await this.prisma.automationRun.findUnique({ where: { id: runId }, select: { checkpoint: true } });
+      const checkpoint = run?.checkpoint;
+      if (checkpoint && typeof checkpoint === "object" && !Array.isArray(checkpoint) && checkpoint.partial === "subtitle") {
+        const usage = await this.prisma.assetUsage.findFirst({ where: { sceneVersionId: input.sceneVersionId, contentItemId: input.contentItemId, purpose: sceneAssetUsageKey(input.platform ? `tts-narration:${input.platform}` : "tts-narration", input.sceneVersionId) } });
+        if (!usage) throw new Error("SUBTITLE_NARRATION_REQUIRED");
+        return { assetId: usage.assetId, reused: true };
+      }
+    }
     const voice = resolveTtsVoice(this.config.TTS_PROVIDER, input.voice, this.config.ELEVENLABS_VOICE_ID);
     const result = await this.preparation.prepareTts({ channelId: input.channelId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, productionJobId: jobId, purpose: input.platform ? `tts-narration:${input.platform}` : undefined, key: `audio/${jobId}`, text: input.text, voice, model: this.config.TTS_MODEL, idempotencyKey: input.idempotencyKey });
     return result;

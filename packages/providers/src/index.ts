@@ -353,7 +353,7 @@ export type LlmGenerationRequest = {
   readonly topic: string;
   readonly platform: "YOUTUBE" | "INSTAGRAM" | "TIKTOK" | null;
   readonly sources: readonly LlmGenerationSource[];
-  readonly partial: "full" | "hook" | "body" | "metadata" | "scene";
+  readonly partial: "full" | "hook" | "body" | "metadata" | "scene" | "voice" | "subtitle";
   readonly channelContext?: {
     readonly language: string;
     readonly targetAudience: string | null;

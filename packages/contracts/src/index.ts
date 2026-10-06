@@ -85,12 +85,13 @@ export const CollectionRuleSchema = z.object({
   collectionFrequencyMinutes: z.number().int().min(30).max(60 * 24 * 7)
 });
 
+export const ChannelAudioSettingsSchema = z.object({ bgmAssetId: z.string().min(1).max(80).optional(), sfxAssetId: z.string().min(1).max(80).optional(), bgmVolume: z.number().min(0).max(1).default(0.2), sfxVolume: z.number().min(0).max(1).default(0.2) });
 export const ChannelTemplateInputSchema = z.object({
   name: z.string().min(1).max(120),
   tone: z.string().min(1).max(120),
   voiceProfile: z.string().min(1).max(120),
   subtitleStyle: z.object({ color: z.string().regex(/^#[0-9a-f]{6}$/i).optional(), backgroundColor: z.string().regex(/^#[0-9a-f]{6}$/i).optional(), fontSize: z.number().int().min(32).max(64).optional() }).catchall(z.unknown()),
-  visualStyle: z.object({ brandColor: z.string().regex(/^#[0-9a-f]{6}$/i).optional(), backgroundColor: z.string().regex(/^#[0-9a-f]{6}$/i).optional(), fontFamily: z.enum(["Arial", "sans-serif", "serif"]).optional(), watermark: z.string().max(60).optional(), logoAssetId: z.string().min(1).max(80).optional() }).catchall(z.unknown()),
+  visualStyle: z.object({ brandColor: z.string().regex(/^#[0-9a-f]{6}$/i).optional(), backgroundColor: z.string().regex(/^#[0-9a-f]{6}$/i).optional(), fontFamily: z.enum(["Arial", "sans-serif", "serif"]).optional(), watermark: z.string().max(60).optional(), logoAssetId: z.string().min(1).max(80).optional(), audio: ChannelAudioSettingsSchema.optional() }).catchall(z.unknown()),
   aiStockRatio: z.number().min(0).max(1)
 });
 
@@ -107,6 +108,10 @@ export const PlatformOutputProfileInputSchema = z
   .refine((value) => value.minDurationSeconds <= value.maxDurationSeconds, {
     message: "최소 길이는 최대 길이보다 길 수 없습니다.",
     path: ["minDurationSeconds"]
+  }).refine((value) => value.platform !== "INSTAGRAM" || value.publicSetting === "PUBLIC", {
+    message: "Instagram v1 게시기는 공개 게시만 지원합니다.", path: ["publicSetting"]
+  }).refine((value) => value.platform !== "TIKTOK" || value.publicSetting !== "UNLISTED", {
+    message: "TikTok 일부 공개는 지원하지 않습니다. 공개 또는 비공개를 선택해 주세요.", path: ["publicSetting"]
   });
 
 export const ScheduleRuleInputSchema = z.object({
@@ -261,6 +266,8 @@ export const ChannelListResponseSchema = z.object({
 });
 
 export type Platform = z.infer<typeof PlatformSchema>;
+export const PolicyProfileSummarySchema = z.object({ platform: PlatformSchema, region: z.string(), version: z.number().int(), checkedAt: z.string().datetime(), minDurationSeconds: z.number(), maxDurationSeconds: z.number() });
+export const AutomationSwitchResponseSchema = z.object({ provider: z.string().nullable(), isEnabled: z.boolean(), reason: z.string().nullable() });
 export type ChannelStatus = z.infer<typeof ChannelStatusSchema>;
 export type AutomationMode = z.infer<typeof AutomationModeSchema>;
 export type CollectionRule = z.infer<typeof CollectionRuleSchema>;
@@ -437,8 +444,8 @@ export const GenerateScriptSceneRequestSchema = z.object({
   ideaId: z.string().min(1),
   platform: PlatformSchema.nullable().default(null),
   idempotencyKey: z.string().min(8).max(191),
-  partial: z.enum(["full", "hook", "body", "metadata", "scene"]).default("full")
-});
+  partial: z.enum(["full", "hook", "body", "metadata", "scene", "voice", "subtitle"]).default("full")
+}).refine((input) => !["voice", "subtitle"].includes(input.partial) || input.platform !== null, { message: "Voice/subtitle reuse requires a selected platform.", path: ["platform"] });
 
 export const GenerationIdeaSnapshotSchema = z.object({
   id: z.string().min(1),
@@ -574,6 +581,8 @@ export const UpdateReviewMetadataRequestSchema = z.object({
   hashtags: z.array(z.string().min(1).max(80)).max(20)
 });
 export const PolicyFindingSchema = z.object({ code: z.string(), severity: PolicyVerdictSchema, message: z.string() });
+export const UpdateReviewScriptRequestSchema = z.object({ platform: PlatformSchema, hook: z.string().min(1).max(150), body: z.string().min(1).max(1500), callToAction: z.string().min(1).max(150), sourceUrl: z.string().url(), confirmFacts: z.literal(true) }).strict();
+export type UpdateReviewScriptRequest = z.infer<typeof UpdateReviewScriptRequestSchema>;
 export const ContentReviewResponseSchema = z.object({
   id: z.string(), channelId: z.string(), status: z.enum(["REVIEW_REQUIRED", "APPROVED", "SCHEDULED", "PUBLISHING", "PUBLISHED", "HELD", "FAILED"]), title: z.string(),
   description: z.string(), durationSeconds: z.number().positive().nullable(), sources: z.array(z.object({ title: z.string(), url: z.string(), sourceName: z.string() })),
@@ -630,7 +639,7 @@ export const AutomationRunRequestSchema = z.object({
   ideaId: z.string().min(1).optional(),
   sample: z.boolean().optional(),
   platforms: z.array(PlatformSchema).min(1).max(3).optional(),
-  partial: z.enum(["full", "hook", "body", "metadata", "scene"]).default("full")
+  partial: z.enum(["full", "hook", "body", "metadata", "scene", "voice", "subtitle"]).default("full")
 });
 export const AutomationControlRequestSchema = z.object({ action: z.enum(["pause", "resume", "drain", "kill", "retry", "hold", "skip"]), reason: z.string().max(500).optional(), stage: AutomationStageSchema.optional(), platform: PlatformSchema.optional() });
 export const AutomationRunResponseSchema = z.object({
@@ -691,7 +700,7 @@ export const StrategyVersionResponseSchema = z.object({ version: z.number().int(
 export type StrategyVersionResponse = z.infer<typeof StrategyVersionResponseSchema>;
 export type ExperimentResponse = z.infer<typeof ExperimentResponseSchema>;
 
-export const CostReportQuerySchema = z.object({ periodStart: z.string().datetime(), periodEnd: z.string().datetime(), channelId: z.string().min(1).optional(), provider: z.string().min(1).max(80).optional() }).refine((value) => value.periodStart < value.periodEnd, { message: "periodStart must precede periodEnd" });
+export const CostReportQuerySchema = z.object({ periodStart: z.string().datetime(), periodEnd: z.string().datetime(), channelId: z.string().min(1).optional(), contentItemId: z.string().min(1).optional(), provider: z.string().min(1).max(80).optional() }).refine((value) => value.periodStart < value.periodEnd, { message: "periodStart must precede periodEnd" });
 export const CostReportResponseSchema = z.object({ currency: z.string(), periodStart: z.string().datetime(), periodEnd: z.string().datetime(), estimated: z.number(), actual: z.number(), credit: z.number(), reconciled: z.boolean(), discrepancy: z.number(), byProvider: z.array(z.object({ provider: z.string(), estimated: z.number(), actual: z.number(), credit: z.number() })) });
 export const NotificationResponseSchema = z.object({ id: z.string(), eventKey: z.string(), severity: z.enum(["INFO", "WARNING", "CRITICAL"]), payload: z.unknown(), acknowledgedAt: z.string().datetime().nullable(), createdAt: z.string().datetime() });
 export const AuditLogResponseSchema = z.object({ id: z.string(), action: z.string(), targetType: z.string(), targetId: z.string().nullable(), metadata: z.unknown().nullable(), createdAt: z.string().datetime() });

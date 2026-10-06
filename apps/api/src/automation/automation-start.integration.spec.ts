@@ -1,6 +1,6 @@
 import { PrismaClient } from "@postbot/database";
 import { randomUUID } from "node:crypto";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { AutomationService } from "./automation.service.js";
 import type { JobsService } from "../jobs/jobs.service.js";
 import type { OperationsService } from "../operations/operations.service.js";
@@ -9,11 +9,28 @@ const prisma = new PrismaClient();
 const suite = process.env.RUN_DB_INTEGRATION === "1" ? describe : describe.skip;
 suite("scheduler and manual start concurrency", () => {
   afterAll(() => prisma.$disconnect());
+  it("rejects invalid policy duration before creating jobs and restores all legacy duplicate circuit breakers", async () => {
+    const key = randomUUID();
+    const user = await prisma.user.create({ data: { email: `${key}@preflight.test`, displayName: "Fixture", passwordHash: "fixture" } });
+    const workspace = await prisma.workspace.create({ data: { ownerId: user.id, name: "Fixture", slug: key } });
+    const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Fixture", slug: key, outputProfiles: { create: { platform: "YOUTUBE", minDurationSeconds: 15, maxDurationSeconds: 55 } } } });
+    const operations = { audit: vi.fn() } as unknown as OperationsService;
+    const service = new AutomationService(prisma, {} as JobsService, operations);
+    await expect(service.start(workspace.id, { channelId: channel.id, idempotencyKey: key })).rejects.toThrow();
+    expect(await prisma.productionJob.count({ where: { channelId: channel.id } })).toBe(0);
+    expect(await prisma.automationRun.count({ where: { channelId: channel.id } })).toBe(0);
+    await prisma.automationSwitch.createMany({ data: [{ workspaceId: workspace.id, provider: null, isEnabled: false }, { workspaceId: workspace.id, provider: null, isEnabled: true }] });
+    expect(await service.listSwitches(workspace.id)).toMatchObject([{ provider: null, isEnabled: false }]);
+    await expect(service.setSwitch(workspace.id, { provider: null, isEnabled: true }, "EDITOR", user.id)).rejects.toThrow("OWNER_ROLE_REQUIRED");
+    await Promise.all([service.setSwitch(workspace.id, { provider: null, isEnabled: true }, "OWNER", user.id), service.setSwitch(workspace.id, { provider: null, isEnabled: true }, "OWNER", user.id)]);
+    expect(await prisma.automationSwitch.count({ where: { workspaceId: workspace.id, provider: null, isEnabled: false } })).toBe(0);
+    expect(await service.listSwitches("foreign-workspace")).toEqual([]);
+  });
   it("reuses one active run even when the callers have different idempotency keys", async () => {
     const key = randomUUID();
     const user = await prisma.user.create({ data: { email: `${key}@automation-start.test`, displayName: "Start fixture", passwordHash: "fixture" } });
     const workspace = await prisma.workspace.create({ data: { ownerId: user.id, name: "Start fixture", slug: key } });
-    const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Start fixture", slug: key, outputProfiles: { create: { platform: "YOUTUBE" } } } });
+    const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Start fixture", slug: key, outputProfiles: { create: { platform: "YOUTUBE", minDurationSeconds: 35, maxDurationSeconds: 55 } } } });
     const service = new AutomationService(prisma, {} as JobsService, {} as OperationsService);
     // Missing collection setup intentionally holds the single run before any queue work.
     const runs = await Promise.all([service.start(workspace.id, { channelId: channel.id, idempotencyKey: `manual:${key}` }), service.start(workspace.id, { channelId: channel.id, idempotencyKey: `scheduler:${key}` })]);

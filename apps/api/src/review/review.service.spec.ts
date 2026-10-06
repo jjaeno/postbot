@@ -27,6 +27,11 @@ class FakeReviewRepository implements ReviewRepository {
 }
 
 describe("ReviewService", () => {
+  it("requires owner role and explicit source confirmation for direct script edits", async () => {
+    const service = new ReviewService(new FakeReviewRepository());
+    await expect(service.updateScript("workspace-1", "EDITOR", "user-1", "content-1", {})).rejects.toThrow("OWNER_ROLE_REQUIRED");
+    await expect(service.updateScript("workspace-1", "OWNER", "user-1", "content-1", {})).rejects.toThrow("SCRIPT_AND_SOURCE_CONFIRMATION_REQUIRED");
+  });
   it("persists a passing check and permits the approval transition", async () => {
     const repository = new FakeReviewRepository();
     const service = new ReviewService(repository);

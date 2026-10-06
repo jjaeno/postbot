@@ -3,6 +3,7 @@ import { loadConfig } from "@postbot/config";
 import { FakeStorageProvider, S3StorageProvider, type StorageProvider } from "@postbot/providers";
 import { AmbiguousPublishError, FakeInstagramPublisherProvider, FakeTikTokPublisherProvider, FakeYouTubePublisherProvider, GoogleYouTubePublisherProvider, MetaInstagramPublisherProvider, TikTokPublisherProvider, type VideoPublisher } from "@postbot/publishers";
 import { resolveOAuthAccessToken } from "./oauth-token.js";
+import { publishPrivacy } from "./publish-privacy.js";
 export class PublishProcessor {
   private readonly storage: StorageProvider;
   constructor(private readonly prisma: PrismaClient, storage?: StorageProvider) {
@@ -41,7 +42,8 @@ export class PublishProcessor {
       const manifest = plan.sceneVersion.renderManifest as { videoKey?: unknown }; if (typeof manifest.videoKey !== "string") throw new Error("RENDER_FILE_NOT_FOUND");
       const tags = Array.isArray(plan.hashtags) ? plan.hashtags.filter((tag): tag is string => typeof tag === "string").map((tag) => `#${tag.replace(/^#+/, "").trim().replace(/\s+/g, "")}`).filter((tag) => tag.length > 1) : [];
       const description = [plan.description ?? "", ...tags.filter((tag) => !(plan.description ?? "").includes(tag))].filter(Boolean).join("\n");
-      const video = await this.storage.download(manifest.videoKey); const upload = { title: plan.title, description, privacyStatus: config.YOUTUBE_UPLOAD_PRIVACY, publishAt: plan.scheduledAt.toISOString(), video, idempotencyKey: plan.idempotencyKey, externalAccountId: plan.platformAccount.externalAccountId, aiGenerated: true };
+      const planMetadata = plan.metadata && typeof plan.metadata === "object" && !Array.isArray(plan.metadata) ? plan.metadata : {};
+      const video = await this.storage.download(manifest.videoKey); const upload = { title: plan.title, description, privacyStatus: publishPrivacy(planMetadata.publicSetting, config.YOUTUBE_UPLOAD_PRIVACY), publishAt: plan.scheduledAt.toISOString(), video, idempotencyKey: plan.idempotencyKey, externalAccountId: plan.platformAccount.externalAccountId, aiGenerated: true };
       const uploaded = await publisher.upload(upload, accessToken);
       await this.prisma.$transaction([this.prisma.platformPost.create({ data: { publishPlanId: plan.id, platformAccountId: plan.platformAccountId, platform: plan.platform, externalPostId: uploaded.externalVideoId, postUrl: uploaded.url, publishedAt: new Date(), policyVersion: 1 } }), this.prisma.publishAttempt.update({ where: { id: attempt.id }, data: { status: "SUCCEEDED", finishedAt: new Date(), responseSnapshot: uploaded } }), this.prisma.publishPlan.update({ where: { id: plan.id }, data: { status: "PUBLISHED" } }), this.prisma.contentItem.update({ where: { id: plan.contentItemId }, data: { status: "PUBLISHED" } })]);
       return { externalVideoId: uploaded.externalVideoId, url: uploaded.url };

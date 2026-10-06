@@ -103,11 +103,15 @@ const account = {
 };
 
 const mockApi = async (page: Page): Promise<void> => {
+  await page.route("**/automation/switches", (route) => route.fulfill({ json: [] }));
+  await page.route("**/automation/policy-profiles", (route) => route.fulfill({ json: [{ platform: "YOUTUBE", region: "GLOBAL", version: 1, checkedAt: "2026-10-01T00:00:00.000Z", minDurationSeconds: 30, maxDurationSeconds: 60 }] }));
+  await page.route("**/optimization/settings?**", (route) => route.fulfill({ json: { protectedTopics: [], protectedBrandPhrases: [], prohibitedPatterns: [], autoApplyFields: [], maxChangeRatio: 0.2 } }));
   await page.route("**/operations/notifications", (route) => route.fulfill({ json: [] }));
   await page.route("**/optimization/channels/*/strategies", (route) => route.fulfill({ json: [] }));
   await page.route("**/optimization/suggestions?**", (route) => route.fulfill({ json: [] }));
   await page.route("**/optimization/experiments?**", (route) => route.fulfill({ json: [] }));
   await page.route("**/channels/channel-1/stock-assets", (route) => route.fulfill({ json: { assets: [] } }));
+  await page.route("**/channels/channel-1/audio-assets", (route) => route.fulfill({ json: { assets: [] } }));
   await page.route("**/analytics/report?**", (route) => route.fulfill({ json: { channelId: "channel-1", periodStart: "2026-10-01T00:00:00.000Z", periodEnd: "2026-10-05T00:00:00.000Z", metrics: [], partial: false, lastSyncedAt: null } }));
   await page.route("**/operations/costs?**", (route) => route.fulfill({ json: { currency: "USD", periodStart: "2026-10-01T00:00:00.000Z", periodEnd: "2026-10-05T00:00:00.000Z", estimated: 0, actual: 0, credit: 0, reconciled: true, discrepancy: 0, byProvider: [] } }));
   let connected = false;
@@ -266,6 +270,85 @@ const mockApi = async (page: Page): Promise<void> => {
     await route.fulfill({ json: channel("Science Today", connected) });
   });
 };
+
+test("saves operational controls without overwriting independent platform settings on mobile", async ({ page }) => {
+  await mockApi(page);
+  let saved = false;
+  await page.route(/^https?:\/\/[^/]+\/channels\/channel-1$/, async (route) => {
+    expect(route.request().postDataJSON()).toMatchObject({ topic: "Verified rocket", collectionRule: { keywords: ["rocket", "space"], allowedSources: ["https://example.com"] }, outputProfiles: [{ platform: "YOUTUBE", hookStyle: "YT only" }], automation: { minInventoryCount: 3 } });
+    saved = true; await route.fulfill({ json: channel("Science Today") });
+  });
+  await page.setViewportSize({ width: 390, height: 844 }); await page.goto("/");
+  await page.getByTestId("edit-channel-channel-1").click();
+  const editor = page.getByTestId("channel-operations-editor");
+  await editor.getByLabel("주제", { exact: true }).fill("Verified rocket");
+  await editor.getByLabel("수집 키워드 (쉼표 구분)").fill("rocket,space");
+  await editor.getByLabel("허용 출처 URL (쉼표 구분)").fill("https://example.com");
+  await editor.getByLabel("최소 콘텐츠 재고", { exact: true }).fill("3");
+  await editor.getByLabel("YOUTUBE 훅", { exact: true }).fill("YT only");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  await page.getByTestId("save-channel-settings").click(); await expect(editor).not.toBeVisible(); expect(saved).toBe(true);
+});
+
+test("uses keyboard review tabs and labels populated descriptions independently of textarea content", async ({ page }) => {
+  await mockApi(page); await page.goto("/?contentItemId=content-1&platform=YOUTUBE");
+  await page.getByLabel("검토할 콘텐츠").selectOption("content-1");
+  const panel = page.getByTestId("review-panel");
+  await expect(panel.getByLabel("설명", { exact: true })).toHaveValue("Verified science content");
+  await panel.getByRole("button", { name: "AI 생성 고지 추가" }).click();
+  await expect(panel.getByLabel("설명", { exact: true })).toHaveValue(/AI generated/);
+  await panel.getByRole("tab", { name: "YouTube Shorts" }).focus(); await page.keyboard.press("ArrowRight");
+  await expect(panel.getByRole("tab", { name: "Instagram Reels" })).toBeFocused();
+  await expect(panel.getByRole("tab", { name: "Instagram Reels" })).toHaveAttribute("aria-selected", "true");
+  await page.reload(); await expect(panel.getByRole("tab", { name: "Instagram Reels" })).toHaveAttribute("aria-selected", "true");
+});
+
+test("loads the regenerated scene preview without requiring a page reload", async ({ page }) => {
+  await mockApi(page);
+  let version = 1;
+  await page.route("**/content/content-1/review", (route) => route.fulfill({ json: { id: "content-1", channelId: "channel-1", status: "REVIEW_REQUIRED", title: "Rocket", description: "AI generated", durationSeconds: 30, sources: [], assets: [], policy: null, outputs: [{ platform: "YOUTUBE", scriptVersionId: `script-${version}`, sceneVersionId: `scene-${version}`, videoReady: true, scriptStatus: "ready", renderStatus: "ready", metadata: { description: "AI generated", hashtags: [] } }] } }));
+  await page.route("**/content/content-1/review/preview?**", (route) => route.fulfill({ json: { url: `https://example.com/scene-${version}.mp4`, expiresInSeconds: 900 } }));
+  await page.goto("/"); await page.getByLabel("검토할 콘텐츠").selectOption("content-1");
+  const video = page.getByTestId("review-panel").locator("video");
+  await expect(video).toHaveAttribute("src", "https://example.com/scene-1.mp4");
+  version = 2;
+  await expect(video).toHaveAttribute("src", "https://example.com/scene-2.mp4", { timeout: 10000 });
+});
+
+test("keeps later wizard settings editable after an audio-only advanced change", async ({ page }) => {
+  await mockApi(page); await page.goto("/"); await page.getByTestId("create-channel").click();
+  await page.getByTestId("wizard-next").click();
+  await page.getByRole("dialog").getByRole("button", { name: "계정 연결", exact: true }).click();
+  await expect(page.getByRole("dialog")).toContainText("YouTube Shorts · 연결됨");
+  await page.getByTestId("wizard-next").click(); await page.getByTestId("wizard-next").click();
+  await page.getByTestId("channel-audio-editor").getByLabel("배경음 볼륨 (0~1)").fill("0.35");
+  await page.locator('input[name="voiceProfile"]').fill("updated-voice");
+  await page.getByTestId("wizard-next").click();
+  await page.locator('input[name="durationMinSeconds"]').fill("40");
+  await page.locator('input[name="durationMaxSeconds"]').fill("50");
+  for (let index = 4; index < 7; index += 1) await page.getByTestId("wizard-next").click();
+  await page.getByRole("dialog").locator("summary").filter({ hasText: "플랫폼별 출력·수집 출처·세부 운영 설정" }).click();
+  const editor = page.getByTestId("channel-operations-editor");
+  await expect(editor.getByLabel("YOUTUBE 최소 길이 초")).toHaveValue("40");
+  await expect(editor.getByLabel("수집 키워드 (쉼표 구분)")).not.toHaveValue("");
+  await expect(editor.getByLabel("주제", { exact: true })).not.toHaveValue("");
+});
+
+test("shows suggestion failures and confirms provider stop and recovery", async ({ page }) => {
+  await mockApi(page);
+  let enabled = true;
+  await page.route("**/automation/switches", async (route) => {
+    if (route.request().method() === "POST") { enabled = (route.request().postDataJSON() as { isEnabled: boolean }).isEnabled; await route.fulfill({ json: { provider: "image", isEnabled: enabled, reason: null } }); }
+    else await route.fulfill({ json: [{ provider: "image", isEnabled: enabled, reason: null }] });
+  });
+  await page.route("**/optimization/suggestions/generate", (route) => route.fulfill({ status: 409, json: { message: "표본을 확인할 수 없습니다" } }));
+  await page.goto("/"); await page.getByLabel("분석 플랫폼").selectOption("YOUTUBE");
+  await page.getByTestId("insight-controls").getByRole("button", { name: "최적화 제안 생성" }).click();
+  await expect(page.getByTestId("insight-controls").getByRole("alert")).toContainText("표본을 확인할 수 없습니다");
+  const provider = page.getByTestId("provider-controls").locator("article").filter({ hasText: /^image:/ });
+  page.once("dialog", (dialog) => dialog.accept()); await provider.getByRole("button", { name: "중지", exact: true }).click(); await expect(provider).toContainText("차단");
+  page.once("dialog", (dialog) => dialog.accept()); await provider.getByRole("button", { name: "복구 후 활성화" }).click(); await expect(provider).toContainText("활성");
+});
 
 test("creates and edits a channel through the eight-step wizard", async ({ page }) => {
   await mockApi(page);

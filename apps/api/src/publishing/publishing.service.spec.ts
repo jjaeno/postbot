@@ -24,8 +24,8 @@ describe("platform-specific manual scheduling", () => {
     const prisma = {
       publishPlan: { findUnique: () => Promise.resolve(null), findFirst: () => Promise.resolve(null), create: ({ data }: { data: Record<string, unknown> }) => { created.push(data); return Promise.resolve({ id: "plan-1", ...data }); } },
       platformAccount: { findFirst: () => Promise.resolve({ id: "account-1", workspaceId: "workspace-1", channelId: "channel-1", platform: "TIKTOK", status: "CONNECTED" }) },
-      channel: { findUniqueOrThrow: () => Promise.resolve({ dailyPublishLimit: 1, scheduleRules: [{ timezone: "Asia/Seoul" }] }) },
-      $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({ $queryRaw: () => Promise.resolve([]), publishPlan: { findUnique: () => Promise.resolve(null), findMany: () => Promise.resolve([]), create: ({ data }: { data: Record<string, unknown> }) => { created.push(data); return Promise.resolve({ id: "plan-1", ...data }); } } }),
+      channel: { findUniqueOrThrow: () => Promise.resolve({ dailyPublishLimit: 1, scheduleRules: [{ timezone: "Asia/Seoul" }], outputProfiles: [{ publicSetting: "PRIVATE" }] }) },
+      $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({ $queryRaw: () => Promise.resolve([]), publishPlan: { findUnique: () => Promise.resolve(null), findFirst: () => Promise.resolve(null), findMany: () => Promise.resolve([]), create: ({ data }: { data: Record<string, unknown> }) => { created.push(data); return Promise.resolve({ id: "plan-1", ...data }); } } }),
       contentItem: {
         findFirst: () => Promise.resolve({ id: "content-1", channelId: "channel-1", title: "Original", summary: "Original summary", sceneVersions: [{ id: "scene-tiktok", renderManifest: { videoKey: "tiktok.mp4" }, createdAt: new Date("2026-10-01T00:00:00.000Z") }], scriptVersions: [{ id: "script-tiktok", createdAt: new Date("2026-10-01T00:00:00.000Z"), qualitySnapshot: { reviewStatus: "APPROVED", reviewTitle: "Edited TikTok title", metadata: { description: "Edited description", hashtags: ["edited"] } } }], policyChecks: [{ status: "PASS", checkedAt: new Date("2026-10-01T00:01:00.000Z"), snapshots: [{ id: "snapshot-tiktok" }] }] }),
         update: () => Promise.resolve({})
@@ -34,6 +34,6 @@ describe("platform-specific manual scheduling", () => {
     const jobs = { create: () => Promise.resolve({ id: "job-1" }) } as unknown as JobsService;
     const service = new PublishingService(prisma, jobs);
     await service.schedule("workspace-1", { contentItemId: "content-1", platformAccountId: "account-1", scheduledAt: "2099-01-01T00:00:00.000Z", idempotencyKey: "platform-specific-plan" });
-    expect(created[0]).toMatchObject({ platform: "TIKTOK", sceneVersionId: "scene-tiktok", policySnapshotId: "snapshot-tiktok", title: "Edited TikTok title", description: "Edited description", hashtags: ["edited"] });
+    expect(created[0]).toMatchObject({ platform: "TIKTOK", sceneVersionId: "scene-tiktok", policySnapshotId: "snapshot-tiktok", title: "Edited TikTok title", description: "Edited description", hashtags: ["edited"], metadata: { publicSetting: "PRIVATE" } });
   });
 });

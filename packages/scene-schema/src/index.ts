@@ -30,6 +30,7 @@ export const VideoStyleSchema = z.object({
   captionFontSize: z.number().int().min(32).max(64).default(52)
 });
 export type VideoStyle = z.infer<typeof VideoStyleSchema>;
+export const AudioStyleSchema = z.object({ bgmAssetId: z.string().min(1).max(80).optional(), sfxAssetId: z.string().min(1).max(80).optional(), bgmVolume: z.number().min(0).max(1).default(0.2), sfxVolume: z.number().min(0).max(1).default(0.2) });
 
 export const aiSceneCount = (sceneCount: number, aiStockRatio: number): number => Math.round(sceneCount * Math.max(0, Math.min(1, aiStockRatio)));
 
@@ -41,6 +42,7 @@ export const SceneDocumentSchema = z.object({
   fps: z.number().int().positive(),
   durationInFrames: z.number().int().positive(),
   style: VideoStyleSchema.optional(),
+  audio: AudioStyleSchema.optional(),
   aiStockRatio: z.number().min(0).max(1).optional(),
   scenes: z.array(SceneSchema).min(1).max(12)
 }).superRefine((value, ctx) => {

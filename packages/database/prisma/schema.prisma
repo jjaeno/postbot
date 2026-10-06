@@ -1008,7 +1008,7 @@ model PublishPlan {
   attempts          PublishAttempt[]
   platformPost      PlatformPost?
 
-  @@unique([contentItemId, platform])
+  @@index([contentItemId, platform, status])
   @@index([platform, status, scheduledAt])
   @@index([platformAccountId, scheduledAt])
   @@map("publish_plans")

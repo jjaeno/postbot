@@ -28,4 +28,10 @@ Licensed BGM/SFX selection uses the same AUDIO fallback query and only exposes a
 
 ## Real-provider verification
 
+### 19.4 사용자 음원 (2026-10-06)
+
+채널 설정에서 소유자가 직접 생성했거나 상업 사용·변형·반복 권리를 확인한 PCM WAV를 최대 1MB로 등록한다. 파일 헤더/PCM 형식/청크 길이를 검증하고 채널 소유권을 먼저 확인한다. 증빙 URL의 존재만으로 실제 권리가 검증되지는 않는다. 중복 파일은 기존 소유권·라이선스를 유지하며 거절·만료된 증빙을 새 업로드로 대체할 수 없다.
+
+배경음/효과음을 따로 선택하며 볼륨은 0..1이다. 새 SceneVersion에 설정과 asset usage를 연결하고 렌더 전·게시 전 최신 권리 확인을 유지한다. BGM은 반복, SFX는 영상 시작에 한 번 합성한다. 음원 검색/구매 Provider 및 자유 오디오 타임라인은 제외한다. 실제 FFmpeg smoke: `node apps/renderer/scripts/audio-mix-smoke.mjs` (FFmpeg/ffprobe 설치 및 renderer build 필요).
+
 Real image verification requires `IMAGE_PROVIDER=google` and `GOOGLE_API_KEY`. Real TTS verification requires `TTS_PROVIDER=elevenlabs`, `ELEVENLABS_API_KEY`, and a valid `ELEVENLABS_VOICE_ID`. These values must never be committed. This environment has no real provider keys, so only Fake Provider, MySQL, Redis, and MinIO integration paths are verified.

@@ -19,6 +19,7 @@ const bootstrap = async (): Promise<void> => {
   const app = await NestFactory.create(AppModule, { bufferLogs: true });
 
   app.use("/channels/:channelId/stock-assets", json({ limit: "1500kb" }));
+  app.use("/channels/:channelId/audio-assets", json({ limit: "1500kb" }));
   // Nest skips its default JSON parser when a route-specific parser is registered.
   // Keep the normal 100kb limit for every other endpoint.
   app.use(json());
