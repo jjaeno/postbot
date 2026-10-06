@@ -271,6 +271,31 @@ const mockApi = async (page: Page): Promise<void> => {
   });
 };
 
+test("keeps long cost filter options inside narrow screens without losing selections", async ({ page }) => {
+  await mockApi(page);
+  const title = "Reusable rocket test reaches new altitude";
+  await page.route("**/content", (route) => route.fulfill({ json: { items: [{ id: "content-1", channelId: "channel-1", title, status: "REVIEW_REQUIRED", updatedAt: "2026-09-21T00:00:00.000Z", sceneVersionId: "scene-1", renderReady: true }] } }));
+  await page.goto("/");
+  await page.getByLabel("비용 채널").selectOption("channel-1");
+  await page.getByLabel("비용 콘텐츠").selectOption("content-1");
+  await page.getByLabel("비용 제공자", { exact: true }).fill("fake-llm");
+  const filtered = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === "/operations/costs" && url.searchParams.get("contentItemId") === "content-1" && url.searchParams.get("provider") === "fake-llm";
+  });
+  await page.getByLabel("비용 기간").selectOption("90");
+  await filtered;
+  for (const width of [320, 360, 390, 768, 1440]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    await expect(page.getByLabel("비용 콘텐츠")).toHaveValue("content-1");
+    await expect(page.getByLabel("비용 콘텐츠").getByRole("option", { name: title, exact: true })).toHaveText(title);
+    await expect(page.getByLabel("비용 채널")).toHaveValue("channel-1");
+    await expect(page.getByLabel("비용 제공자", { exact: true })).toHaveValue("fake-llm");
+    await expect(page.getByLabel("비용 기간")).toHaveValue("90");
+  }
+});
+
 test("saves operational controls without overwriting independent platform settings on mobile", async ({ page }) => {
   await mockApi(page);
   let saved = false;

@@ -20,6 +20,19 @@ input, select, textarea, video {
   min-width: 0;
   max-width: 100%;
 }
+/* Long option text must not determine a flex label's minimum width. */
+.cost-filters > label {
+  display: block;
+  flex: 1 1 12rem;
+  min-width: 0;
+  max-width: 100%;
+}
+.cost-filters input, .cost-filters select {
+  display: block;
+  width: 100%;
+  margin-left: 0;
+  margin-top: 0.25rem;
+}
 @media (max-width: 639px) {
   #content select { width: 100%; min-width: 0; margin-left: 0; }
   #content label input:not([type="checkbox"]), #content label textarea { margin-left: 0; }
