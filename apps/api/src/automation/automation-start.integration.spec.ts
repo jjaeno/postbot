@@ -1,6 +1,6 @@
 import { PrismaClient } from "@postbot/database";
 import { randomUUID } from "node:crypto";
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { AutomationService } from "./automation.service.js";
 import type { JobsService } from "../jobs/jobs.service.js";
 import type { OperationsService } from "../operations/operations.service.js";
@@ -8,6 +8,16 @@ import type { OperationsService } from "../operations/operations.service.js";
 const prisma = new PrismaClient();
 const suite = process.env.RUN_DB_INTEGRATION === "1" ? describe : describe.skip;
 suite("scheduler and manual start concurrency", () => {
+  beforeAll(async () => {
+    await prisma.policyRule.createMany({
+      skipDuplicates: true,
+      data: {
+        platform: "YOUTUBE", region: "GLOBAL", version: 1,
+        effectiveAt: new Date("2020-01-01T00:00:00.000Z"), checkedAt: new Date("2020-01-01T00:00:00.000Z"),
+        durationRule: { minSeconds: 30, maxSeconds: 90 }, originalityRule: {}, aiDisclosureRule: {}, rightsRule: {}, restrictedTopics: []
+      }
+    });
+  });
   afterAll(() => prisma.$disconnect());
   it("rejects invalid policy duration before creating jobs and restores all legacy duplicate circuit breakers", async () => {
     const key = randomUUID();
@@ -16,7 +26,7 @@ suite("scheduler and manual start concurrency", () => {
     const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Fixture", slug: key, outputProfiles: { create: { platform: "YOUTUBE", minDurationSeconds: 15, maxDurationSeconds: 55 } } } });
     const operations = { audit: vi.fn() } as unknown as OperationsService;
     const service = new AutomationService(prisma, {} as JobsService, operations);
-    await expect(service.start(workspace.id, { channelId: channel.id, idempotencyKey: key })).rejects.toThrow();
+    await expect(service.start(workspace.id, { channelId: channel.id, idempotencyKey: key })).rejects.toMatchObject({ response: { code: "OUTPUT_DURATION_POLICY_CONFLICT" } });
     expect(await prisma.productionJob.count({ where: { channelId: channel.id } })).toBe(0);
     expect(await prisma.automationRun.count({ where: { channelId: channel.id } })).toBe(0);
     await prisma.automationSwitch.createMany({ data: [{ workspaceId: workspace.id, provider: null, isEnabled: false }, { workspaceId: workspace.id, provider: null, isEnabled: true }] });

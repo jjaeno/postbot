@@ -1,7 +1,7 @@
 import "reflect-metadata";
 import { PrismaClient } from "@postbot/database";
 import { randomUUID } from "node:crypto";
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { AutomationService } from "./automation.service.js";
 import type { JobsService } from "../jobs/jobs.service.js";
 import type { OperationsService } from "../operations/operations.service.js";
@@ -9,6 +9,16 @@ import type { OperationsService } from "../operations/operations.service.js";
 const suite = process.env.RUN_DB_INTEGRATION === "1" ? describe : describe.skip;
 const prisma = new PrismaClient();
 suite("wizard sample publishing guard", () => {
+  beforeAll(async () => {
+    await prisma.policyRule.createMany({
+      skipDuplicates: true,
+      data: {
+        platform: "YOUTUBE", region: "GLOBAL", version: 1,
+        effectiveAt: new Date("2020-01-01T00:00:00.000Z"), checkedAt: new Date("2020-01-01T00:00:00.000Z"),
+        durationRule: { minSeconds: 30, maxSeconds: 90 }, originalityRule: {}, aiDisclosureRule: {}, rightsRule: {}, restrictedTopics: []
+      }
+    });
+  });
   afterAll(() => prisma.$disconnect());
   it("allows a paused draft sample and cannot publish even in full auto or after an explicit retry", async () => {
     const key = randomUUID();

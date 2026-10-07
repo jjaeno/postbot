@@ -1,0 +1,474 @@
+diff --git a/compiled/tinypool/README.md b/compiled/tinypool/README.md
+index ec104a87028c493b2b58d7ee2536863f03fe9210..88bd6a15712bf872c741807d20f7899bf40b68a4 100644
+--- a/compiled/tinypool/README.md
++++ b/compiled/tinypool/README.md
+@@ -16,5 +16,199 @@ Tinypool is a fork of piscina. What we try to achieve in this library, is to eli
+ 
+ _In case you need more tiny libraries like tinypool or tinyspy, please consider submitting an [RFC](https://github.com/tinylibs/rfcs)_
+ 
+-## Docs
+-Read **[full docs](https://github.com/tinylibs/tinypool#readme)** on GitHub.
++## Example
++
++### Using `node:worker_threads`
++
++#### Basic usage
++
++```js
++// main.mjs
++import Tinypool from 'tinypool'
++
++const pool = new Tinypool({
++  filename: new URL('./worker.mjs', import.meta.url).href,
++})
++const result = await pool.run({ a: 4, b: 6 })
++console.log(result) // Prints 10
++
++// Make sure to destroy pool once it's not needed anymore
++// This terminates all pool's idle workers
++await pool.destroy()
++```
++
++```js
++// worker.mjs
++export default ({ a, b }) => {
++  return a + b
++}
++```
++
++#### Main thread <-> worker thread communication
++
++<details>
++  <summary>See code</summary>
++
++```js
++// main.mjs
++import Tinypool from 'tinypool'
++import { MessageChannel } from 'node:worker_threads'
++
++const pool = new Tinypool({
++  filename: new URL('./worker.mjs', import.meta.url).href,
++})
++const { port1, port2 } = new MessageChannel()
++const promise = pool.run({ port: port1 }, { transferList: [port1] })
++
++port2.on('message', (message) => console.log('Main thread received:', message))
++setTimeout(() => port2.postMessage('Hello from main thread!'), 1000)
++
++await promise
++
++port1.close()
++port2.close()
++```
++
++```js
++// worker.mjs
++export default ({ port }) => {
++  return new Promise((resolve) => {
++    port.on('message', (message) => {
++      console.log('Worker received:', message)
++
++      port.postMessage('Hello from worker thread!')
++      resolve()
++    })
++  })
++}
++```
++
++</details>
++
++### Using `node:child_process`
++
++#### Basic usage
++
++<details>
++  <summary>See code</summary>
++
++```js
++// main.mjs
++import Tinypool from 'tinypool'
++
++const pool = new Tinypool({
++  runtime: 'child_process',
++  filename: new URL('./worker.mjs', import.meta.url).href,
++})
++const result = await pool.run({ a: 4, b: 6 })
++console.log(result) // Prints 10
++```
++
++```js
++// worker.mjs
++export default ({ a, b }) => {
++  return a + b
++}
++```
++
++</details>
++
++#### Main process <-> worker process communication
++
++<details>
++  <summary>See code</summary>
++
++```js
++// main.mjs
++import Tinypool from 'tinypool'
++
++const pool = new Tinypool({
++  runtime: 'child_process',
++  filename: new URL('./worker.mjs', import.meta.url).href,
++})
++
++const messages = []
++const listeners = []
++const channel = {
++  onMessage: (listener) => listeners.push(listener),
++  postMessage: (message) => messages.push(message),
++}
++
++const promise = pool.run({}, { channel })
++
++// Send message to worker
++setTimeout(
++  () => listeners.forEach((listener) => listener('Hello from main process')),
++  1000
++)
++
++// Wait for task to finish
++await promise
++
++console.log(messages)
++// [{ received: 'Hello from main process', response: 'Hello from worker' }]
++```
++
++```js
++// worker.mjs
++export default async function run() {
++  return new Promise((resolve) => {
++    process.on('message', (message) => {
++      // Ignore Tinypool's internal messages
++      if (message?.__tinypool_worker_message__) return
++
++      process.send({ received: message, response: 'Hello from worker' })
++      resolve()
++    })
++  })
++}
++```
++
++</details>
++
++## API
++
++We have a similar API to Piscina, so for more information, you can read Piscina's detailed [documentation](https://github.com/piscinajs/piscina#piscina---the-nodejs-worker-pool) and apply the same techniques here.
++
++### Tinypool specific APIs
++
++#### Pool constructor options
++
++- `isolateWorkers`: Disabled by default. Always starts with a fresh worker when running tasks to isolate the environment.
++- `terminateTimeout`: Disabled by default. If terminating a worker takes `terminateTimeout` amount of milliseconds to execute, an error is raised.
++- `maxMemoryLimitBeforeRecycle`: Disabled by default. When defined, the worker's heap memory usage is compared against this value after task has been finished. If the current memory usage exceeds this limit, worker is terminated and a new one is started to take its place. This option is useful when your tasks leak memory and you don't want to enable `isolateWorkers` option.
++- `runtime`: Used to pick worker runtime. Default value is `worker_threads`.
++  - `worker_threads`: Runs workers in [`node:worker_threads`](https://nodejs.org/api/worker_threads.html). For `main thread <-> worker thread` communication you can use [`MessagePort`](https://nodejs.org/api/worker_threads.html#class-messageport) in the `pool.run()` method's [`transferList` option](https://nodejs.org/api/worker_threads.html#portpostmessagevalue-transferlist). See [example](#main-thread---worker-thread-communication).
++  - `child_process`: Runs workers in [`node:child_process`](https://nodejs.org/api/child_process.html). For `main thread <-> worker process` communication you can use `TinypoolChannel` in the `pool.run()` method's `channel` option. For filtering out the Tinypool's internal messages see `TinypoolWorkerMessage`. See [example](#main-process---worker-process-communication).
++- `teardown`: name of the function in file that should be called before worker is terminated. Must be named exported.
++- `serialization`: Specify the kind of serialization used for the `child_process` runtime. Possible values are `'json'` and `'advanced'`. See Node.js [Advanced serialization](https://nodejs.org/docs/latest/api/child_process.html#advanced-serialization) for more details.
++
++#### Pool methods
++
++- `cancelPendingTasks()`: Gracefully cancels all pending tasks without stopping or interfering with on-going tasks. This method is useful when your tasks may have side effects and should not be terminated forcefully during task execution. If your tasks don't have any side effects you may want to use [`{ signal }`](https://github.com/piscinajs/piscina#cancelable-tasks) option for forcefully terminating all tasks, including the on-going ones, instead.
++- `recycleWorkers(options)`: Waits for all current tasks to finish and re-creates all workers. Can be used to force isolation imperatively even when `isolateWorkers` is disabled. Accepts `{ runtime }` option as argument.
++
++#### Exports
++
++- `workerId`: Each worker now has an id ( <= `maxThreads`) that can be imported from `tinypool` in the worker itself (or `process.__tinypool_state__.workerId`).
++
++## Authors
++
++| <a href="https://github.com/Aslemammad"> <img width='150' src="https://avatars.githubusercontent.com/u/37929992?v=4" /><br> Mohammad Bagher </a> |
++| ------------------------------------------------------------------------------------------------------------------------------------------------ |
++
++## Sponsors
++
++Your sponsorship can make a huge difference in continuing our work in open source!
++
++<p align="center">
++  <a href="https://cdn.jsdelivr.net/gh/aslemammad/static/sponsors.svg">
++    <img src='https://cdn.jsdelivr.net/gh/aslemammad/static/sponsors.svg'/>
++  </a>
++</p>
++
++## Credits
++
++[The Vitest team](https://vitest.dev/) for giving me the chance of creating and maintaing this project for vitest.
++
++[Piscina](https://github.com/piscinajs/piscina), because Tinypool is not more than a friendly fork of piscina.
+diff --git a/compiled/tinypool/dist/common-Qw-RoVFD.js b/compiled/tinypool/dist/common-Bo3KCGim.js
+similarity index 88%
+rename from compiled/tinypool/dist/common-Qw-RoVFD.js
+rename to compiled/tinypool/dist/common-Bo3KCGim.js
+index 2fe0fdc34305ed6967542ca3c4803dbe838ee653..daf11b37d08f95f7a351cb43e9bf504c6569eefd 100644
+--- a/compiled/tinypool/dist/common-Qw-RoVFD.js
++++ b/compiled/tinypool/dist/common-Bo3KCGim.js
+@@ -17,6 +17,9 @@ function markMovable(value) {
+ 		value: true
+ 	});
+ }
++function withNullPrototype(source) {
++	return Object.assign(Object.create(null), source);
++}
+ function isTaskQueue(value) {
+ 	return typeof value === "object" && value !== null && "size" in value && typeof value.shift === "function" && typeof value.remove === "function" && typeof value.push === "function";
+ }
+@@ -25,4 +28,4 @@ const kResponseCountField = 1;
+ const kFieldCount = 2;
+ 
+ //#endregion
+-export { isMovable, isTaskQueue, isTransferable, kFieldCount, kQueueOptions, kRequestCountField, kResponseCountField, kTransferable, kValue, markMovable };
+\ No newline at end of file
++export { isMovable, isTaskQueue, isTransferable, kFieldCount, kQueueOptions, kRequestCountField, kResponseCountField, kTransferable, kValue, markMovable, withNullPrototype };
+\ No newline at end of file
+diff --git a/compiled/tinypool/dist/entry/worker.js b/compiled/tinypool/dist/entry/worker.js
+index eaaf266f7501690e2ba12c36938350fd988b8570..1458aa74394b1b5c3f2fc33b53d276efb06f4a7e 100644
+--- a/compiled/tinypool/dist/entry/worker.js
++++ b/compiled/tinypool/dist/entry/worker.js
+@@ -1,4 +1,4 @@
+-import { isMovable, kRequestCountField, kResponseCountField, kTransferable, kValue } from "../common-Qw-RoVFD.js";
++import { isMovable, kRequestCountField, kResponseCountField, kTransferable, kValue } from "../common-Bo3KCGim.js";
+ import { stderr, stdout } from "../utils-De75vAgL.js";
+ import { getHandler, throwInNextTick } from "../utils-B--2TaWv.js";
+ import { parentPort, receiveMessageOnPort, workerData } from "node:worker_threads";
+diff --git a/compiled/tinypool/dist/index.d.ts b/compiled/tinypool/dist/index.d.ts
+index 1afb72ae958732deace04e4d813b9c3ea3a54aed..2fe0521dc5b39b72f91e3fd8e305314b28005ac3 100644
+--- a/compiled/tinypool/dist/index.d.ts
++++ b/compiled/tinypool/dist/index.d.ts
+@@ -1,6 +1,7 @@
+ /// <reference types="node" />
+ import { MessagePort, TransferListItem } from "node:worker_threads";
+ import { EventEmitterAsyncResource } from "node:events";
++import { SerializationType } from "node:child_process";
+ 
+ //#region src/common.d.ts
+ /** Channel for communicating between main thread and workers */
+@@ -22,6 +23,7 @@ interface TinypoolWorker {
+     resourceLimits?: any;
+     workerData: TinypoolData;
+     trackUnmanagedFds?: boolean;
++    serialization?: SerializationType;
+   }): void;
+   terminate(): Promise<any>;
+   postMessage(message: any, transferListItem?: TransferListItem[]): void;
+@@ -74,6 +76,7 @@ declare const kQueueOptions: unique symbol;
+ declare function isTransferable(value: any): boolean;
+ declare function isMovable(value: any): boolean;
+ declare function markMovable(value: object): void;
++declare function withNullPrototype<T extends object>(source: T): T;
+ interface Transferable {
+   readonly [kTransferable]: object;
+   readonly [kValue]: object;
+@@ -144,6 +147,7 @@ interface Options {
+   trackUnmanagedFds?: boolean;
+   isolateWorkers?: boolean;
+   teardown?: string;
++  serialization?: SerializationType;
+ }
+ interface FilledOptions extends Options {
+   filename: string | null;
+@@ -171,7 +175,7 @@ type TransferList = MessagePort extends {
+ type TransferListItem$1 = TransferList extends (infer T)[] ? T : never;
+ declare class Tinypool extends EventEmitterAsyncResource {
+   #private;
+-  constructor(options?: Options);
++  constructor(_options?: Options);
+   run(task: any, options?: RunOptions): Promise<any>;
+   destroy(): Promise<void>;
+   get options(): FilledOptions;
+@@ -192,4 +196,4 @@ declare class Tinypool extends EventEmitterAsyncResource {
+ declare const _workerId: number;
+ 
+ //#endregion
+-export { Options, ReadyMessage, RequestMessage, ResponseMessage, StartupMessage, Task, TaskQueue, Tinypool, TinypoolChannel, TinypoolData, TinypoolPrivateData, TinypoolWorker, TinypoolWorkerMessage, Transferable, Tinypool as default, isMovable, isTaskQueue, isTransferable, kFieldCount, kQueueOptions, kRequestCountField, kResponseCountField, kTransferable, kValue, markMovable, _workerId as workerId };
+\ No newline at end of file
++export { Options, ReadyMessage, RequestMessage, ResponseMessage, StartupMessage, Task, TaskQueue, Tinypool, TinypoolChannel, TinypoolData, TinypoolPrivateData, TinypoolWorker, TinypoolWorkerMessage, Transferable, Tinypool as default, isMovable, isTaskQueue, isTransferable, kFieldCount, kQueueOptions, kRequestCountField, kResponseCountField, kTransferable, kValue, markMovable, withNullPrototype, _workerId as workerId };
+\ No newline at end of file
+diff --git a/compiled/tinypool/dist/index.js b/compiled/tinypool/dist/index.js
+index ccabbe78b68e1bb57a10cfd89219b3bc4489d963..f27e3b43ceea44612d28dfcc1b864de63c60a9aa 100644
+--- a/compiled/tinypool/dist/index.js
++++ b/compiled/tinypool/dist/index.js
+@@ -1,4 +1,4 @@
+-import { isMovable, isTaskQueue, isTransferable, kFieldCount, kQueueOptions, kRequestCountField, kResponseCountField, kTransferable, kValue, markMovable } from "./common-Qw-RoVFD.js";
++import { isMovable, isTaskQueue, isTransferable, kFieldCount, kQueueOptions, kRequestCountField, kResponseCountField, kTransferable, kValue, markMovable, withNullPrototype } from "./common-Bo3KCGim.js";
+ import { MessageChannel, MessagePort, Worker, receiveMessageOnPort } from "node:worker_threads";
+ import { EventEmitterAsyncResource, once } from "node:events";
+ import { AsyncResource } from "node:async_hooks";
+@@ -8,48 +8,9 @@ import { inspect, types } from "node:util";
+ import assert from "node:assert";
+ import { performance } from "node:perf_hooks";
+ import { readFileSync } from "node:fs";
+-import os from "node:os";
+-import childProcess, { fork } from "node:child_process";
++import { availableParallelism } from "node:os";
++import { fork } from "node:child_process";
+ 
+-//#region src/physicalCpuCount.ts
+-function exec(command) {
+-	const output = childProcess.execSync(command, {
+-		encoding: "utf8",
+-		stdio: [
+-			null,
+-			null,
+-			null
+-		]
+-	});
+-	return output;
+-}
+-let amount;
+-try {
+-	const platform = os.platform();
+-	if (platform === "linux") {
+-		const output1 = exec("cat /proc/cpuinfo | grep \"physical id\" | sort |uniq | wc -l");
+-		const output2 = exec("cat /proc/cpuinfo | grep \"core id\" | sort | uniq | wc -l");
+-		const physicalCpuAmount = parseInt(output1.trim(), 10);
+-		const physicalCoreAmount = parseInt(output2.trim(), 10);
+-		amount = physicalCpuAmount * physicalCoreAmount;
+-	} else if (platform === "darwin") {
+-		const output = exec("sysctl -n hw.physicalcpu_max");
+-		amount = parseInt(output.trim(), 10);
+-	} else if (platform === "win32") throw new Error();
+-	else {
+-		const cores = os.cpus().filter(function(cpu, index) {
+-			const hasHyperthreading = cpu.model.includes("Intel");
+-			const isOdd = index % 2 === 1;
+-			return !hasHyperthreading || isOdd;
+-		});
+-		amount = cores.length;
+-	}
+-} catch {
+-	amount = os.cpus().length;
+-}
+-if (amount === 0) amount = os.cpus().length;
+-
+-//#endregion
+ //#region src/runtime/thread-worker.ts
+ var ThreadWorker = class {
+ 	name = "ThreadWorker";
+@@ -188,7 +149,7 @@ function hasUnref(stream) {
+ 
+ //#endregion
+ //#region src/index.ts
+-const cpuCount = amount;
++const cpuCount = availableParallelism();
+ function onabort(abortSignal, listener) {
+ 	if ("addEventListener" in abortSignal) abortSignal.addEventListener("abort", listener, { once: true });
+ 	else abortSignal.once("abort", listener);
+@@ -506,12 +467,12 @@ var ThreadPool = class {
+ 		this.publicInterface = publicInterface;
+ 		this.taskQueue = options.taskQueue || new ArrayTaskQueue();
+ 		const filename = options.filename ? maybeFileURLToPath(options.filename) : null;
+-		this.options = {
++		this.options = withNullPrototype({
+ 			...kDefaultOptions,
+ 			...options,
+ 			filename,
+ 			maxQueue: 0
+-		};
++		});
+ 		if (options.maxThreads !== void 0 && this.options.minThreads >= options.maxThreads) this.options.minThreads = options.maxThreads;
+ 		if (options.minThreads !== void 0 && this.options.maxThreads <= options.minThreads) this.options.maxThreads = options.minThreads;
+ 		if (options.maxQueue === "auto") this.options.maxQueue = this.options.maxThreads ** 2;
+@@ -549,7 +510,8 @@ var ThreadPool = class {
+ 			execArgv: this.options.execArgv,
+ 			resourceLimits: this.options.resourceLimits,
+ 			workerData: [tinypoolPrivateData, this.options.workerData],
+-			trackUnmanagedFds: this.options.trackUnmanagedFds
++			trackUnmanagedFds: this.options.trackUnmanagedFds,
++			serialization: this.options.serialization
+ 		});
+ 		const onMessage = (message$1) => {
+ 			const { taskId, result } = message$1;
+@@ -718,7 +680,8 @@ var ThreadPool = class {
+ 		}
+ 		await Promise.all(exitEvents);
+ 	}
+-	async recycleWorkers(options = {}) {
++	async recycleWorkers(_options = {}) {
++		const options = withNullPrototype(_options);
+ 		const runtimeChanged = options?.runtime && options.runtime !== this.options.runtime;
+ 		if (options?.runtime) this.options.runtime = options.runtime;
+ 		if (this.options.isolateWorkers && !runtimeChanged) return;
+@@ -735,7 +698,8 @@ var ThreadPool = class {
+ };
+ var Tinypool = class extends EventEmitterAsyncResource {
+ 	#pool;
+-	constructor(options = {}) {
++	constructor(_options = {}) {
++		const options = withNullPrototype(_options);
+ 		if (options.minThreads !== void 0 && options.minThreads > 0 && options.minThreads < 1) options.minThreads = Math.max(1, Math.floor(options.minThreads * cpuCount));
+ 		if (options.maxThreads !== void 0 && options.maxThreads > 0 && options.maxThreads < 1) options.maxThreads = Math.max(1, Math.floor(options.maxThreads * cpuCount));
+ 		super({
+@@ -746,7 +710,7 @@ var Tinypool = class extends EventEmitterAsyncResource {
+ 		this.#pool = new ThreadPool(this, options);
+ 	}
+ 	run(task, options = kDefaultRunOptions) {
+-		const { transferList, filename, name, signal, runtime, channel } = options;
++		const { transferList, filename, name, signal, runtime, channel } = withNullPrototype(options);
+ 		return this.#pool.runTask(task, {
+ 			transferList,
+ 			filename,
+@@ -817,4 +781,4 @@ const _workerId = process.__tinypool_state__?.workerId;
+ var src_default = Tinypool;
+ 
+ //#endregion
+-export { Tinypool, src_default as default, isMovable, isTaskQueue, isTransferable, kFieldCount, kQueueOptions, kRequestCountField, kResponseCountField, kTransferable, kValue, markMovable, _workerId as workerId };
+\ No newline at end of file
++export { Tinypool, src_default as default, isMovable, isTaskQueue, isTransferable, kFieldCount, kQueueOptions, kRequestCountField, kResponseCountField, kTransferable, kValue, markMovable, withNullPrototype, _workerId as workerId };
+\ No newline at end of file
+diff --git a/compiled/tinypool/package.json b/compiled/tinypool/package.json
+index b24b082d1415512542d03a1dadcc94f7c58a1195..5755a09a1d21eb6e3aaeb4c65be1be4935cbed78 100644
+--- a/compiled/tinypool/package.json
++++ b/compiled/tinypool/package.json
+@@ -1,8 +1,7 @@
+ {
+   "name": "tinypool",
+   "type": "module",
+-  "version": "1.1.1",
+-  "packageManager": "pnpm@9.0.6",
++  "version": "2.1.2",
+   "description": "A minimal and tiny Node.js Worker Thread Pool implementation, a fork of piscina, but with fewer features",
+   "license": "MIT",
+   "homepage": "https://github.com/tinylibs/tinypool#readme",
+@@ -31,9 +30,29 @@
+   "files": [
+     "dist"
+   ],
+-  "pnpm": {
+-    "overrides": {
+-      "vitest>tinypool": "link:./"
+-    }
++  "engines": {
++    "node": "^20.0.0 || >=22.0.0"
++  },
++  "devDependencies": {
++    "@types/node": "^20.12.8",
++    "clean-publish": "^3.4.4",
++    "eslint": "^9.4.0",
++    "eslint-config-prettier": "^9.1.0",
++    "eslint-plugin-prettier": "^5.1.3",
++    "eslint-plugin-unicorn": "^53.0.0",
++    "prettier": "^3.3.2",
++    "tsdown": "^0.11.3",
++    "typescript": "^5.4.5",
++    "typescript-eslint": "^7.13.0",
++    "vite": "^5.2.11",
++    "vitest": "^4.0.1"
++  },
++  "scripts": {
++    "test": "vitest",
++    "bench": "vitest bench",
++    "dev": "tsdown --watch ./src",
++    "build": "tsdown",
++    "lint": "eslint --max-warnings=0",
++    "typecheck": "tsc --noEmit"
+   }
+ }

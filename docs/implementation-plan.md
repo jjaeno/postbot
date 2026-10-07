@@ -1074,6 +1074,16 @@ feature 목록, 비교·신뢰도 규칙, 자동 적용 허용 범위, 실험 �
 
 ## 요구사항 추적
 
+### 19.6단계 — 원격 CI 보안 스캔·자동화 DB 회귀 실패 수정
+
+**상태:** 내부 수정·필수 로컬 검증 완료. 원인, 환경 보완 재검증과 이미지 보안/렌더 결과는 `docs/ci-remediation-2026-10-07.md`에 기록한다. 커밋 후 원격 CI 결과를 추적한다.
+
+범위: `5592fde`의 원격 CI에서 발견된 production 의존성 취약점 패치와 자동화 DB 테스트의 명시적 정책 fixture 구성. 정책 검사와 HIGH/CRITICAL 차단 기준을 유지하며 신규 기능·운영 DB 변경은 수행하지 않는다.
+
+커밋 전 필수 검증: frozen install, production dependency audit, api/worker/renderer lint·typecheck·unit, 빈 격리 DB의 자동화 integration 회귀, 네 production image build와 HIGH/CRITICAL scan, filesystem dependency scan과 secret history scan, 실제 Remotion 렌더 smoke 및 Rspack bundle 호환성. 커밋 후 원격 CI의 후속 결과를 확인하고 미실행 항목은 기록한다.
+
+Commit: `fix: CI 보안 취약점과 자동화 테스트 정책 데이터 보완`
+
 ### 19.5단계 — 320px 비용 필터 가로 넘침 수정
 
 **상태:** 내부 구현·필수 검증 완료. 실제 데이터의 긴 콘텐츠 제목으로 비용 선택창과 부모 라벨이 320px viewport를 넘어가는 결함을 보완했다. 원인과 재검증은 `docs/ux-narrow-screen-fix-2026-10-06.md`에 기록한다.

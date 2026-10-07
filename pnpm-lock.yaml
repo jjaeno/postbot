@@ -10,7 +10,14 @@ overrides:
   minimatch@10.2.6>brace-expansion: 5.0.12
   '@nestjs/swagger>js-yaml': 5.4.1
   multer: 2.4.0
+  proxy-addr: 2.0.8
+  source-map-js: 1.2.2
   qs: 6.16.0
+
+patchedDependencies:
+  '@rspack/core@1.7.11':
+    hash: 7201abe0f4d80bfb6b2f6f60504c2d91944c6de11cdd0a6aec6b286399445519
+    path: patches/@rspack__core@1.7.11.patch
 
 importers:
 
@@ -3491,8 +3498,8 @@ packages:
     resolution: {integrity: sha512-NxNv/kLguCA7p3jE8oL2aEBsrJWgAakBpgmgK6lpPWV+WuOmY6r2/zbAVnP+T8bQlA0nzHXSJSJW0Hq7ylaD2Q==}
     engines: {node: '>= 6'}
 
-  proxy-addr@2.0.7:
-    resolution: {integrity: sha512-llQsMLSUDUPT44jdrU/O37qlnifitDP+ZwrmmZcoSKyLKvtZxpyV0n2/bD/N4tBAAZ/gJEdZU7KMraoK1+XYAg==}
+  proxy-addr@2.0.8:
+    resolution: {integrity: sha512-5nnx0yGyVUcY6t9RnWcARWtwT9F1D8O9rt08htPvnd49W1IgZtmLkhu9WfMzQj1cFxjHIO6connUNVW5k7AVyQ==}
     engines: {node: '>= 0.10'}
 
   punycode@2.3.1:
@@ -3716,8 +3723,8 @@ packages:
   sonic-boom@4.2.1:
     resolution: {integrity: sha512-w6AxtubXa2wTXAUsZMMWERrsIRAdrK0Sc+FUytWvYAhBJLyuI4llrMIC1DtlNSdI99EI86KZum2MMq3EAZlF9Q==}
 
-  source-map-js@1.2.1:
-    resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
+  source-map-js@1.2.2:
+    resolution: {integrity: sha512-KGj/8Y43x35aZVDtt+J4mK1hoLGHULMYfSkODJNQjNDC3oW1PqPoxMwo0pLUsWM/UEGzON/NxeHywEfNXNP3Vw==}
     engines: {node: '>=0.10.0'}
 
   source-map-support@0.5.21:
@@ -4984,9 +4991,9 @@ snapshots:
       '@remotion/studio': 4.0.525(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@remotion/studio-shared': 4.0.525(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@remotion/timeline-utils': 4.0.525(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
-      '@rspack/core': 1.7.11
+      '@rspack/core': 1.7.11(patch_hash=7201abe0f4d80bfb6b2f6f60504c2d91944c6de11cdd0a6aec6b286399445519)
       '@rspack/plugin-react-refresh': 1.6.1(react-refresh@0.18.0)
-      css-loader: 7.1.4(@rspack/core@1.7.11)(webpack@5.105.0(esbuild@0.28.1)(postcss@8.5.28))
+      css-loader: 7.1.4(@rspack/core@1.7.11(patch_hash=7201abe0f4d80bfb6b2f6f60504c2d91944c6de11cdd0a6aec6b286399445519))(webpack@5.105.0(esbuild@0.28.1)(postcss@8.5.28))
       esbuild: 0.28.1
       react: 19.2.8
       react-dom: 19.2.8(react@19.2.8)
@@ -5375,7 +5382,7 @@ snapshots:
       '@rspack/binding-win32-ia32-msvc': 1.7.11
       '@rspack/binding-win32-x64-msvc': 1.7.11
 
-  '@rspack/core@1.7.11':
+  '@rspack/core@1.7.11(patch_hash=7201abe0f4d80bfb6b2f6f60504c2d91944c6de11cdd0a6aec6b286399445519)':
     dependencies:
       '@module-federation/runtime-tools': 0.22.0
       '@rspack/binding': 1.7.11
@@ -6251,7 +6258,7 @@ snapshots:
       shebang-command: 2.0.0
       which: 2.0.2
 
-  css-loader@7.1.4(@rspack/core@1.7.11)(webpack@5.105.0(esbuild@0.28.1)(postcss@8.5.28)):
+  css-loader@7.1.4(@rspack/core@1.7.11(patch_hash=7201abe0f4d80bfb6b2f6f60504c2d91944c6de11cdd0a6aec6b286399445519))(webpack@5.105.0(esbuild@0.28.1)(postcss@8.5.28)):
     dependencies:
       icss-utils: 5.1.0(postcss@8.5.28)
       postcss: 8.5.28
@@ -6262,7 +6269,7 @@ snapshots:
       postcss-value-parser: 4.2.0
       semver: 7.8.5
     optionalDependencies:
-      '@rspack/core': 1.7.11
+      '@rspack/core': 1.7.11(patch_hash=7201abe0f4d80bfb6b2f6f60504c2d91944c6de11cdd0a6aec6b286399445519)
       webpack: 5.105.0(esbuild@0.28.1)(postcss@8.5.28)
 
   cssesc@3.0.0: {}
@@ -6551,7 +6558,7 @@ snapshots:
       on-finished: 2.4.1
       once: 1.4.0
       parseurl: 1.3.3
-      proxy-addr: 2.0.7
+      proxy-addr: 2.0.8
       qs: 6.16.0
       range-parser: 1.3.0
       router: 2.2.0
@@ -7236,13 +7243,13 @@ snapshots:
     dependencies:
       nanoid: 3.3.18
       picocolors: 1.1.1
-      source-map-js: 1.2.1
+      source-map-js: 1.2.2
 
   postcss@8.5.28:
     dependencies:
       nanoid: 3.3.19
       picocolors: 1.1.1
-      source-map-js: 1.2.1
+      source-map-js: 1.2.2
 
   prelude-ls@1.2.1: {}
 
@@ -7268,7 +7275,7 @@ snapshots:
       kleur: 3.0.3
       sisteransi: 1.0.5
 
-  proxy-addr@2.0.7:
+  proxy-addr@2.0.8:
     dependencies:
       forwarded: 0.2.0
       ipaddr.js: 1.9.1
@@ -7524,7 +7531,7 @@ snapshots:
     dependencies:
       atomic-sleep: 1.0.0
 
-  source-map-js@1.2.1: {}
+  source-map-js@1.2.2: {}
 
   source-map-support@0.5.21:
     dependencies:

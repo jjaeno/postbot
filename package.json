@@ -31,7 +31,12 @@
       "minimatch@10.2.6>brace-expansion": "5.0.12",
       "@nestjs/swagger>js-yaml": "5.4.1",
       "multer": "2.4.0",
+      "proxy-addr": "2.0.8",
+      "source-map-js": "1.2.2",
       "qs": "6.16.0"
+    },
+    "patchedDependencies": {
+      "@rspack/core@1.7.11": "patches/@rspack__core@1.7.11.patch"
     }
   },
   "devDependencies": {

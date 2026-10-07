@@ -3,6 +3,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends openssl && rm -rf /var/lib/apt/lists/*
 RUN corepack enable && corepack prepare pnpm@10.34.5 --activate
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json tsconfig.base.json ./
+COPY patches ./patches
 RUN pnpm fetch
 COPY apps ./apps
 COPY packages ./packages
