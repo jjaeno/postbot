@@ -311,7 +311,16 @@ test("saves operational controls without overwriting independent platform settin
   await editor.getByLabel("허용 출처 URL (쉼표 구분)").fill("https://example.com");
   await editor.getByLabel("최소 콘텐츠 재고", { exact: true }).fill("3");
   await editor.getByLabel("YOUTUBE 훅", { exact: true }).fill("YT only");
-  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  const layout = await page.evaluate(() => ({
+    width: document.documentElement.scrollWidth,
+    overflowing: [...document.querySelectorAll<HTMLElement>("body *")].flatMap((element) => {
+      const bounds = element.getBoundingClientRect();
+      return bounds.width > 0 && (bounds.right > innerWidth + 1 || bounds.left < -1)
+        ? [{ tag: element.tagName, className: element.className, width: bounds.width, left: bounds.left, right: bounds.right }]
+        : [];
+    })
+  }));
+  expect(layout.width, JSON.stringify(layout.overflowing)).toBe(390);
   await page.getByTestId("save-channel-settings").click(); await expect(editor).not.toBeVisible(); expect(saved).toBe(true);
 });
 

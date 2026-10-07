@@ -1074,6 +1074,16 @@ feature 목록, 비교·신뢰도 규칙, 자동 적용 허용 범위, 실험 �
 
 ## 요구사항 추적
 
+### 19.7단계 — 후속 브라우저 CI 실패 보완
+
+**상태:** 내부 수정·필수 로컬 검증 완료. 상세 결과는 `docs/ci-browser-remediation-2026-10-07.md`에 기록하며 커밋 후 원격 CI를 추적한다.
+
+범위: 19.6 수정 후 처음 실행된 browser-e2e에서 발견한 production artifact 준비 누락과 Linux Chromium의 모바일 자산 업로드 grid 넘침. 서버 기능·API·DB·제작 기능은 변경하지 않는다.
+
+커밋 전 필수 검증: web lint/typecheck/unit/build, 전체 Playwright와 Linux Chromium의 수정 전 실패·수정 후 모바일 재검증, 변경 web production image build와 HIGH/CRITICAL scan. 19.6에서 통과한 동일 backend/renderer/보안 patch의 검증은 반복하지 않는다. 커밋 후 원격 CI를 확인한다.
+
+Commit: `fix: 브라우저 CI 빌드 준비와 모바일 자산 업로드 레이아웃 보완`
+
 ### 19.6단계 — 원격 CI 보안 스캔·자동화 DB 회귀 실패 수정
 
 **상태:** 내부 수정·필수 로컬 검증 완료. 원인, 환경 보완 재검증과 이미지 보안/렌더 결과는 `docs/ci-remediation-2026-10-07.md`에 기록한다. 커밋 후 원격 CI 결과를 추적한다.

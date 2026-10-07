@@ -11,7 +11,7 @@
     "lint": "eslint .",
     "typecheck": "tsc -b --noEmit",
     "test": "node --test scripts/server.spec.mjs && vitest run src --passWithNoTests",
-    "pree2e": "pnpm --filter @postbot/contracts build",
+    "pree2e": "pnpm --filter @postbot/web... build",
     "e2e": "playwright test"
   },
   "dependencies": {
