@@ -45,6 +45,8 @@ export const youtubeUploadScope = "https://www.googleapis.com/auth/youtube.uploa
 export const youtubeAnalyticsScope = "https://www.googleapis.com/auth/yt-analytics.readonly";
 export const instagramBasicScope = "instagram_business_basic";
 export const instagramPublishScope = "instagram_business_content_publish";
+export const instagramInsightsScope = "instagram_business_manage_insights";
+export const tiktokVideoListScope = "video.list";
 export const tiktokBasicScope = "user.info.basic";
 export const tiktokPublishScope = "video.publish";
 
@@ -147,8 +149,13 @@ export class GoogleYouTubePublisherProvider implements PublisherProvider, VideoP
 
   constructor(
     private readonly clientId: string,
-    private readonly clientSecret: string
+    private readonly clientSecret: string,
+    private readonly options: { timeoutMs?: number; fetchImplementation?: typeof fetch } = {}
   ) {}
+
+  private request(url: string | URL, init: RequestInit): Promise<Response> {
+    return withTimeout(this.options.fetchImplementation ?? fetch, url, init, this.options.timeoutMs ?? 180_000);
+  }
 
   createAuthorizationUrl(input: OAuthStartInput): string {
     const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
@@ -169,7 +176,7 @@ export class GoogleYouTubePublisherProvider implements PublisherProvider, VideoP
     codeVerifier: string;
     redirectUri: string;
   }): Promise<OAuthTokenSet> {
-    const response = await fetch("https://oauth2.googleapis.com/token", {
+    const response = await this.request("https://oauth2.googleapis.com/token", {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -205,7 +212,7 @@ export class GoogleYouTubePublisherProvider implements PublisherProvider, VideoP
     const url = new URL("https://www.googleapis.com/youtube/v3/channels");
     url.searchParams.set("part", "snippet");
     url.searchParams.set("mine", "true");
-    const response = await fetch(url, {
+    const response = await this.request(url, {
       headers: { authorization: `Bearer ${accessToken}` }
     });
     if (!response.ok) {
@@ -227,31 +234,34 @@ export class GoogleYouTubePublisherProvider implements PublisherProvider, VideoP
 
   async revoke(refreshToken: string | null, accessToken: string): Promise<void> {
     const token = refreshToken ?? accessToken;
-    await fetch("https://oauth2.googleapis.com/revoke", {
+    await this.request("https://oauth2.googleapis.com/revoke", {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ token })
     });
   }
   async refreshAccessToken(refreshToken: string): Promise<OAuthTokenSet> {
-    const response = await fetch("https://oauth2.googleapis.com/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ client_id: this.clientId, client_secret: this.clientSecret, refresh_token: refreshToken, grant_type: "refresh_token" }) });
+    const response = await this.request("https://oauth2.googleapis.com/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ client_id: this.clientId, client_secret: this.clientSecret, refresh_token: refreshToken, grant_type: "refresh_token" }) });
     if (!response.ok) throw new Error("Google OAuth token refresh failed.");
     const body = await response.json() as { access_token?: string; expires_in?: number; scope?: string };
     if (!body.access_token) throw new Error("Google token refresh did not include an access token.");
-    return { accessToken: body.access_token, refreshToken, expiresAt: body.expires_in ? new Date(Date.now() + body.expires_in * 1000) : null, scopes: body.scope ? body.scope.split(" ") : [youtubeReadonlyScope, youtubeUploadScope, youtubeAnalyticsScope] };
+    return { accessToken: body.access_token, refreshToken, expiresAt: body.expires_in ? new Date(Date.now() + body.expires_in * 1000) : null, scopes: body.scope ? body.scope.split(" ") : [] };
   }
 
   async upload(input: VideoUploadInput, accessToken: string): Promise<PublishedVideo> {
+    if (input.publishAt && (input.privacyStatus !== "private" || new Date(input.publishAt).getTime() <= Date.now())) throw new Error("YOUTUBE_SCHEDULE_REQUIRES_FUTURE_PRIVATE_VIDEO");
     const metadata = { snippet: { title: input.title, description: input.description }, status: { privacyStatus: input.privacyStatus, ...(input.publishAt ? { publishAt: input.publishAt } : {}) } };
-    const start = await fetch("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status", { method: "POST", headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json", "x-upload-content-type": "video/mp4", "x-upload-content-length": String(input.video.byteLength) }, body: JSON.stringify(metadata) });
+    const start = await this.request("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status", { method: "POST", headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json", "x-upload-content-type": "video/mp4", "x-upload-content-length": String(input.video.byteLength) }, body: JSON.stringify(metadata) });
     const location = start.headers.get("location");
     if (!start.ok || !location) throw new Error("YouTube resumable upload could not be initiated.");
+    try {
     const videoBody = new Uint8Array(input.video).buffer;
-    const uploaded = await fetch(location, { method: "PUT", headers: { authorization: `Bearer ${accessToken}`, "content-length": String(input.video.byteLength), "content-type": "video/mp4" }, body: videoBody });
+    const uploaded = await this.request(location, { method: "PUT", headers: { authorization: `Bearer ${accessToken}`, "content-length": String(input.video.byteLength), "content-type": "video/mp4" }, body: videoBody });
     if (!uploaded.ok) throw new Error("YouTube resumable upload failed.");
     const body = await uploaded.json() as { id?: string; status?: { publishAt?: string; privacyStatus?: string } };
     if (!body.id) throw new Error("YouTube upload response did not include a video ID.");
     return { externalVideoId: body.id, url: `https://www.youtube.com/watch?v=${body.id}`, publishedAt: body.status?.publishAt ?? input.publishAt, status: body.status?.privacyStatus === "private" && (body.status.publishAt ?? input.publishAt) ? "scheduled" : "uploaded" };
+    } catch { throw new AmbiguousPublishError("YouTube upload outcome is ambiguous; inspect the resumable session before retrying."); }
   }
 }
 
@@ -265,8 +275,8 @@ class FakeSocialPublisher implements SocialVideoPublisher {
   async upload(input: VideoUploadInput): Promise<PublishedVideo> { await this.validate(input); const id = `fake-${this.capabilities.platform}-${input.idempotencyKey.slice(0, 24)}`; return { externalVideoId: id, url: `${this.baseUrl}/${id}`, publishedAt: input.publishAt, status: input.publishAt ? "scheduled" : "published" }; }
   getPublicationStatus(externalVideoId: string, accessToken?: string): Promise<PublishedVideo> { void accessToken; return Promise.resolve({ externalVideoId, url: `${this.baseUrl}/${externalVideoId}`, publishedAt: null, status: "published" }); }
 }
-export class FakeInstagramPublisherProvider extends FakeSocialPublisher { constructor() { super({ provider: "fake", platform: "instagram", requiredScopes: [instagramBasicScope, instagramPublishScope] }, "https://www.instagram.com/reel"); } }
-export class FakeTikTokPublisherProvider extends FakeSocialPublisher { constructor() { super({ provider: "fake", platform: "tiktok", requiredScopes: [tiktokBasicScope, tiktokPublishScope] }, "https://www.tiktok.com/@postbot/video"); } }
+export class FakeInstagramPublisherProvider extends FakeSocialPublisher { constructor() { super({ provider: "fake", platform: "instagram", requiredScopes: [instagramBasicScope, instagramPublishScope, instagramInsightsScope] }, "https://www.instagram.com/reel"); } }
+export class FakeTikTokPublisherProvider extends FakeSocialPublisher { constructor() { super({ provider: "fake", platform: "tiktok", requiredScopes: [tiktokBasicScope, tiktokPublishScope, tiktokVideoListScope] }, "https://www.tiktok.com/@postbot/video"); } }
 
 export class AmbiguousPublishError extends Error {
   constructor(message: string, readonly externalOperationId: string | null = null) {
@@ -292,14 +302,18 @@ const responseJson = async <Body>(response: Response, label: string): Promise<Bo
 const withTimeout = async (fetchImplementation: typeof fetch, input: string | URL, init: RequestInit, timeoutMs: number): Promise<Response> => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try { return await fetchImplementation(input, { ...init, signal: controller.signal }); }
+  try {
+    const response = await fetchImplementation(input, { ...init, signal: controller.signal });
+    const bytes = await response.arrayBuffer();
+    return new Response(response.status === 204 || response.status === 205 || response.status === 304 ? null : bytes, { status: response.status, headers: response.headers });
+  }
   finally { clearTimeout(timeout); }
 };
 
 const wait = async (milliseconds: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 export class MetaInstagramPublisherProvider implements SocialVideoPublisher {
-  readonly capabilities: OAuthProviderCapabilities = { provider: "meta", platform: "instagram", requiredScopes: [instagramBasicScope, instagramPublishScope] };
+  readonly capabilities: OAuthProviderCapabilities = { provider: "meta", platform: "instagram", requiredScopes: [instagramBasicScope, instagramPublishScope, instagramInsightsScope] };
   private readonly timeoutMs: number;
   private readonly pollIntervalMs: number;
   private readonly fetchImplementation: typeof fetch;
@@ -325,12 +339,13 @@ export class MetaInstagramPublisherProvider implements SocialVideoPublisher {
   async exchangeCode(input: { code: string; codeVerifier: string; redirectUri: string }): Promise<OAuthTokenSet> {
     void input.codeVerifier;
     const response = await withTimeout(this.fetchImplementation, "https://api.instagram.com/oauth/access_token", { method: "POST", body: new URLSearchParams({ client_id: this.options.clientId, client_secret: this.options.clientSecret, grant_type: "authorization_code", redirect_uri: input.redirectUri, code: input.code }) }, this.timeoutMs);
-    const body = await responseJson<{ access_token?: string; user_id?: number; permissions?: string[] }>(response, "Instagram OAuth token exchange");
+    const tokenResponse = await responseJson<{ access_token?: string; user_id?: number; permissions?: string[]; data?: Array<{ access_token?: string; user_id?: number; permissions?: string[] }> }>(response, "Instagram OAuth token exchange");
+    const body = tokenResponse.data?.[0] ?? tokenResponse;
     if (!body.access_token) throw new Error("Instagram OAuth response did not include an access token.");
     const longLived = await withTimeout(this.fetchImplementation, `https://graph.instagram.com/access_token?${new URLSearchParams({ grant_type: "ig_exchange_token", client_secret: this.options.clientSecret, access_token: body.access_token })}`, { method: "GET" }, this.timeoutMs);
     const longBody = await responseJson<{ access_token?: string; expires_in?: number }>(longLived, "Instagram long-lived token exchange");
     if (!longBody.access_token) throw new Error("Instagram long-lived token response did not include an access token.");
-    return { accessToken: longBody.access_token, refreshToken: longBody.access_token, expiresAt: longBody.expires_in ? new Date(Date.now() + longBody.expires_in * 1000) : null, scopes: body.permissions ?? this.capabilities.requiredScopes };
+    return { accessToken: longBody.access_token, refreshToken: longBody.access_token, expiresAt: longBody.expires_in ? new Date(Date.now() + longBody.expires_in * 1000) : null, scopes: body.permissions ?? await this.grantedScopes(longBody.access_token) };
   }
 
   async getAccountProfile(accessToken: string): Promise<PublisherAccountProfile> {
@@ -345,7 +360,13 @@ export class MetaInstagramPublisherProvider implements SocialVideoPublisher {
     const response = await withTimeout(this.fetchImplementation, `https://graph.instagram.com/refresh_access_token?${new URLSearchParams({ grant_type: "ig_refresh_token", access_token: refreshToken })}`, { method: "GET" }, this.timeoutMs);
     const body = await responseJson<{ access_token?: string; expires_in?: number }>(response, "Instagram token refresh");
     if (!body.access_token) throw new Error("Instagram refresh response did not include an access token.");
-    return { accessToken: body.access_token, refreshToken: body.access_token, expiresAt: body.expires_in ? new Date(Date.now() + body.expires_in * 1000) : null, scopes: this.capabilities.requiredScopes };
+    return { accessToken: body.access_token, refreshToken: body.access_token, expiresAt: body.expires_in ? new Date(Date.now() + body.expires_in * 1000) : null, scopes: await this.grantedScopes(body.access_token) };
+  }
+
+  private async grantedScopes(accessToken: string): Promise<string[]> {
+    const response = await withTimeout(this.fetchImplementation, `https://graph.instagram.com/${this.options.graphVersion ?? "v24.0"}/me/permissions`, { headers: { authorization: `Bearer ${accessToken}` } }, this.timeoutMs);
+    const body = await responseJson<{ data?: Array<{ permission?: string; status?: string; permissions?: string[] }> }>(response, "Instagram granted permissions lookup");
+    return (body.data ?? []).flatMap((entry) => entry.permissions ?? (entry.status === "granted" && entry.permission ? [entry.permission] : []));
   }
 
   async revoke(_refreshToken: string | null, accessToken: string): Promise<void> {
@@ -363,6 +384,7 @@ export class MetaInstagramPublisherProvider implements SocialVideoPublisher {
     if (!accessToken || !input.externalAccountId) throw new Error("Instagram access token and account ID are required.");
     const graphVersion = this.options.graphVersion ?? "v24.0";
     let containerId: string | null = null;
+    let publicationStarted = false;
     try {
       const create = await withTimeout(this.fetchImplementation, `https://graph.instagram.com/${graphVersion}/${encodeURIComponent(input.externalAccountId)}/media`, { method: "POST", headers: { authorization: `OAuth ${accessToken}`, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ media_type: "REELS", upload_type: "resumable", caption: input.description || input.title, share_to_feed: "true" }) }, this.timeoutMs);
       const createBody = await responseJson<{ id?: string; uri?: string }>(create, "Instagram media container creation");
@@ -372,11 +394,13 @@ export class MetaInstagramPublisherProvider implements SocialVideoPublisher {
       const upload = await withTimeout(this.fetchImplementation, uploadUrl, { method: "POST", headers: { authorization: `OAuth ${accessToken}`, offset: "0", file_size: String(input.video.byteLength), "content-type": "application/octet-stream" }, body: new Uint8Array(input.video).buffer }, this.timeoutMs);
       if (!upload.ok) throw new Error(`Instagram media upload failed with status ${upload.status}.`);
       await this.waitForContainer(containerId, accessToken, graphVersion);
+      publicationStarted = true;
       const publish = await withTimeout(this.fetchImplementation, `https://graph.instagram.com/${graphVersion}/${encodeURIComponent(input.externalAccountId)}/media_publish`, { method: "POST", headers: { authorization: `OAuth ${accessToken}`, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ creation_id: containerId }) }, this.timeoutMs);
       const publishBody = await responseJson<{ id?: string }>(publish, "Instagram media publish");
       if (!publishBody.id) throw new Error("Instagram publish response did not include a media ID.");
       return this.getPublicationStatus(publishBody.id, accessToken);
     } catch (error) {
+      if (publicationStarted) throw new AmbiguousPublishError("Instagram publish outcome requires reconciliation before retry.", containerId);
       if (containerId && (error instanceof DOMException || (error instanceof Error && /abort|network|fetch/i.test(error.message)))) throw new AmbiguousPublishError("Instagram publish outcome is ambiguous.", containerId);
       throw error;
     }
@@ -386,7 +410,7 @@ export class MetaInstagramPublisherProvider implements SocialVideoPublisher {
     if (!accessToken) throw new Error("Instagram access token is required.");
     const response = await withTimeout(this.fetchImplementation, `https://graph.instagram.com/${this.options.graphVersion ?? "v24.0"}/${encodeURIComponent(externalVideoId)}?${new URLSearchParams({ fields: "id,permalink,timestamp", access_token: accessToken })}`, { method: "GET" }, this.timeoutMs);
     const body = await responseJson<{ id?: string; permalink?: string; timestamp?: string }>(response, "Instagram publication lookup");
-    return { externalVideoId: body.id ?? externalVideoId, url: body.permalink ?? `https://www.instagram.com/`, publishedAt: body.timestamp ?? null, status: "published" };
+    return { externalVideoId: body.id ?? externalVideoId, url: body.permalink ?? "", publishedAt: body.timestamp ?? null, status: "published" };
   }
 
   private async waitForContainer(containerId: string, accessToken: string, graphVersion: string): Promise<void> {
@@ -403,14 +427,12 @@ export class MetaInstagramPublisherProvider implements SocialVideoPublisher {
 }
 
 export class TikTokPublisherProvider implements SocialVideoPublisher {
-  readonly capabilities: OAuthProviderCapabilities = { provider: "tiktok", platform: "tiktok", requiredScopes: [tiktokBasicScope, tiktokPublishScope] };
+  readonly capabilities: OAuthProviderCapabilities = { provider: "tiktok", platform: "tiktok", requiredScopes: [tiktokBasicScope, tiktokPublishScope, tiktokVideoListScope] };
   private readonly timeoutMs: number;
-  private readonly pollIntervalMs: number;
   private readonly fetchImplementation: typeof fetch;
 
   constructor(private readonly options: SocialProviderOptions) {
     this.timeoutMs = options.timeoutMs ?? 180_000;
-    this.pollIntervalMs = options.pollIntervalMs ?? 2_000;
     this.fetchImplementation = options.fetchImplementation ?? fetch;
   }
 
@@ -437,7 +459,7 @@ export class TikTokPublisherProvider implements SocialVideoPublisher {
   }
 
   async getAccountProfile(accessToken: string): Promise<PublisherAccountProfile> {
-    const response = await withTimeout(this.fetchImplementation, "https://open.tiktokapis.com/v2/user/info/?fields=open_id,union_id,display_name,username", { headers: { authorization: `Bearer ${accessToken}` } }, this.timeoutMs);
+    const response = await withTimeout(this.fetchImplementation, "https://open.tiktokapis.com/v2/user/info/?fields=open_id,union_id,display_name", { headers: { authorization: `Bearer ${accessToken}` } }, this.timeoutMs);
     const body = await responseJson<{ data?: { user?: { open_id?: string; display_name?: string; username?: string } }; error?: { code?: string } }>(response, "TikTok profile lookup");
     if (body.error?.code && body.error.code !== "ok") throw new Error(`TikTok profile lookup failed: ${body.error.code}.`);
     const user = body.data?.user;
@@ -455,29 +477,11 @@ export class TikTokPublisherProvider implements SocialVideoPublisher {
     return Promise.resolve();
   }
 
-  async upload(input: VideoUploadInput, accessToken?: string): Promise<PublishedVideo> {
-    await this.validate(input);
-    if (!accessToken) throw new Error("TikTok access token is required.");
-    let publishId: string | null = null;
-    try {
-      const privacyLevel = await this.selectPrivacy(accessToken, input.privacyStatus);
-      const chunkSize = Math.min(10 * 1024 * 1024, input.video.byteLength);
-      const totalChunkCount = Math.ceil(input.video.byteLength / chunkSize);
-      const init = await withTimeout(this.fetchImplementation, "https://open.tiktokapis.com/v2/post/publish/video/init/", { method: "POST", headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json; charset=UTF-8" }, body: JSON.stringify({ post_info: { title: input.description || input.title, privacy_level: privacyLevel, disable_duet: false, disable_comment: false, disable_stitch: false, is_aigc: input.aiGenerated ?? true }, source_info: { source: "FILE_UPLOAD", video_size: input.video.byteLength, chunk_size: chunkSize, total_chunk_count: totalChunkCount } }) }, this.timeoutMs);
-      const body = await responseJson<{ data?: { publish_id?: string; upload_url?: string }; error?: { code?: string; message?: string } }>(init, "TikTok Direct Post initialization");
-      if (body.error?.code && body.error.code !== "ok") throw new Error(`TikTok Direct Post initialization failed: ${body.error.code}.`);
-      if (!body.data?.publish_id || !body.data.upload_url) throw new Error("TikTok Direct Post response did not include upload information.");
-      publishId = body.data.publish_id;
-      for (let start = 0; start < input.video.byteLength; start += chunkSize) {
-        const end = Math.min(start + chunkSize, input.video.byteLength);
-        const upload = await withTimeout(this.fetchImplementation, body.data.upload_url, { method: "PUT", headers: { "content-type": "video/mp4", "content-length": String(end - start), "content-range": `bytes ${start}-${end - 1}/${input.video.byteLength}` }, body: input.video.slice(start, end).buffer }, this.timeoutMs);
-        if (!upload.ok) throw new Error(`TikTok video upload failed with status ${upload.status}.`);
-      }
-      return this.waitForPublication(publishId, accessToken);
-    } catch (error) {
-      if (publishId && (error instanceof DOMException || error instanceof AmbiguousPublishError || (error instanceof Error && /abort|network|fetch|timed out/i.test(error.message)))) throw new AmbiguousPublishError("TikTok publish outcome is ambiguous.", publishId);
-      throw error;
-    }
+  upload(_input: VideoUploadInput, _accessToken?: string): Promise<PublishedVideo> {
+    void _input; void _accessToken;
+    // Direct Post requires per-video creator settings, preview, explicit consent
+    // and an approved public-use client. Postbot's automation UX cannot certify it.
+    return Promise.reject(new Error("TIKTOK_DIRECT_POST_HELD"));
   }
 
   async getPublicationStatus(externalVideoId: string, accessToken?: string): Promise<PublishedVideo> {
@@ -491,35 +495,16 @@ export class TikTokPublisherProvider implements SocialVideoPublisher {
     return { accessToken: value.access_token, refreshToken: value.refresh_token ?? null, expiresAt: value.expires_in ? new Date(Date.now() + value.expires_in * 1000) : null, scopes: value.scope ? value.scope.split(",").map((scope) => scope.trim()) : [] };
   }
 
-  private async selectPrivacy(accessToken: string, requested: VideoUploadInput["privacyStatus"]): Promise<string> {
-    const response = await withTimeout(this.fetchImplementation, "https://open.tiktokapis.com/v2/post/publish/creator_info/query/", { method: "POST", headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json; charset=UTF-8" }, body: "{}" }, this.timeoutMs);
-    const body = await responseJson<{ data?: { privacy_level_options?: string[] }; error?: { code?: string } }>(response, "TikTok creator information lookup");
-    if (body.error?.code && body.error.code !== "ok") throw new Error(`TikTok creator information lookup failed: ${body.error.code}.`);
-    const options = body.data?.privacy_level_options ?? [];
-    const preferred = requested === "public" ? "PUBLIC_TO_EVERYONE" : "SELF_ONLY";
-    if (options.includes(preferred)) return preferred;
-    if (options.includes("SELF_ONLY")) return "SELF_ONLY";
-    if (!options[0]) throw new Error("TikTok creator has no available privacy option.");
-    return options[0];
-  }
-
-  private async waitForPublication(publishId: string, accessToken: string): Promise<PublishedVideo> {
-    const deadline = Date.now() + this.timeoutMs;
-    while (Date.now() < deadline) {
-      const result = await this.fetchStatus(publishId, accessToken);
-      if (result.status === "published") return result;
-      await wait(this.pollIntervalMs);
-    }
-    throw new AmbiguousPublishError("TikTok publication status timed out.", publishId);
-  }
-
   private async fetchStatus(publishId: string, accessToken: string): Promise<PublishedVideo> {
     const response = await withTimeout(this.fetchImplementation, "https://open.tiktokapis.com/v2/post/publish/status/fetch/", { method: "POST", headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json; charset=UTF-8" }, body: JSON.stringify({ publish_id: publishId }) }, this.timeoutMs);
     const body = await responseJson<{ data?: { status?: string; fail_reason?: string; publicly_available_post_id?: string[]; publicaly_available_post_id?: string[] }; error?: { code?: string } }>(response, "TikTok publication status");
     if (body.error?.code && body.error.code !== "ok") throw new Error(`TikTok publication status failed: ${body.error.code}.`);
     if (body.data?.status === "FAILED") throw new Error(`TikTok publication failed: ${body.data.fail_reason ?? "unknown"}.`);
     const postId = body.data?.publicly_available_post_id?.[0] ?? body.data?.publicaly_available_post_id?.[0];
-    if (body.data?.status === "PUBLISH_COMPLETE") return { externalVideoId: postId ?? publishId, url: postId ? `https://www.tiktok.com/@postbot/video/${postId}` : "https://www.tiktok.com/", publishedAt: new Date().toISOString(), status: "published" };
-    return { externalVideoId: publishId, url: "https://www.tiktok.com/", publishedAt: null, status: "uploaded" };
+    if (body.data?.status === "PUBLISH_COMPLETE") {
+      if (!postId) throw new AmbiguousPublishError("TikTok post ID is not available; do not republish.", publishId);
+      return { externalVideoId: postId, url: "", publishedAt: null, status: "published" };
+    }
+    return { externalVideoId: publishId, url: "", publishedAt: null, status: "uploaded" };
   }
 }

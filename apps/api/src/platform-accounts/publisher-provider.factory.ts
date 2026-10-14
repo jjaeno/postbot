@@ -18,7 +18,7 @@ export class PublisherProviderFactory {
       if (!this.config.YOUTUBE_CLIENT_ID || !this.config.YOUTUBE_CLIENT_SECRET) {
         throw new Error("YouTube OAuth credentials are not configured.");
       }
-      return new GoogleYouTubePublisherProvider(this.config.YOUTUBE_CLIENT_ID, this.config.YOUTUBE_CLIENT_SECRET);
+      return new GoogleYouTubePublisherProvider(this.config.YOUTUBE_CLIENT_ID, this.config.YOUTUBE_CLIENT_SECRET, { timeoutMs: this.config.PROVIDER_HTTP_TIMEOUT_MS });
     }
     return new FakeYouTubePublisherProvider();
   }

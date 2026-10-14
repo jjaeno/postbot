@@ -39,7 +39,8 @@ enabled("render processor integration", () => {
     const renderer = { render: async ({ outputLocation, sceneAssets }: { outputLocation: string; sceneAssets?: Record<string, string> }) => { calls += 1; expect(sceneAssets).toEqual({ only: `data:image/png;base64,${Buffer.from(imageBytes).toString("base64")}` }); await writeFile(outputLocation, new Uint8Array([0, 1, 2, 3])); return { outputLocation, rendererVersion: "1.1.0" }; } };
     const processor = new RenderProcessor(prisma, { storage, renderer, postProcessor });
     const payload = { render: { channelId: channel.id, contentItemId: content.id, sceneVersionId: version.id, idempotencyKey: `render-${suffix}` } };
-    const first = await processor.process(payload, `job-${suffix}`);
+    const job = await prisma.productionJob.create({ data: { id: `job-${suffix}`, channelId: channel.id, contentItemId: content.id, type: "RENDER", queueName: "render", idempotencyKey: suffix, payload } });
+    const first = await processor.process(payload, job.id);
     const second = await processor.process(payload, `job-${suffix}`);
     expect(calls).toBe(1);
     expect(second).toEqual(first);

@@ -26,22 +26,26 @@ const providerFor = (platform: AccountWithCredential["platform"]): PublisherProv
     ? new TikTokPublisherProvider({ clientId: config.TIKTOK_CLIENT_KEY, clientSecret: config.TIKTOK_CLIENT_SECRET, timeoutMs: config.PROVIDER_HTTP_TIMEOUT_MS, pollIntervalMs: config.SOCIAL_PUBLISH_POLL_INTERVAL_MS })
     : new FakeTikTokPublisherProvider();
   return config.YOUTUBE_OAUTH_PROVIDER === "google"
-    ? new GoogleYouTubePublisherProvider(config.YOUTUBE_CLIENT_ID, config.YOUTUBE_CLIENT_SECRET)
+    ? new GoogleYouTubePublisherProvider(config.YOUTUBE_CLIENT_ID, config.YOUTUBE_CLIENT_SECRET, { timeoutMs: config.PROVIDER_HTTP_TIMEOUT_MS })
     : new FakeYouTubePublisherProvider();
 };
 
 export const resolveOAuthAccessToken = async (prisma: PrismaClient, account: AccountWithCredential): Promise<string> => {
   const config = loadConfig();
-  if (!account.credential) return "fake-access-token";
+  const provider = providerFor(account.platform);
+  if (!account.credential) {
+    if (provider.capabilities.provider === "fake") return "fake-access-token";
+    throw new Error("OAUTH_CREDENTIAL_REQUIRED");
+  }
+  assertRequiredScopes(stringList(account.credential.scopes), provider.capabilities.requiredScopes);
   const previousKeys = config.OAUTH_ENCRYPTION_PREVIOUS_KEYS.split(",").map((key) => key.trim()).filter(Boolean);
   const accessToken = decryptOAuthToken(account.credential.encryptedAccessToken, account.credential.tokenCipher, config.OAUTH_ENCRYPTION_KEY, previousKeys);
   if (!account.credential.expiresAt || account.credential.expiresAt.getTime() > Date.now() + 5 * 60_000) return accessToken;
   if (!account.credential.encryptedRefreshToken) throw new Error("OAUTH_REFRESH_TOKEN_MISSING");
-  const provider = providerFor(account.platform);
   if (!provider.refreshAccessToken) throw new Error("OAUTH_REFRESH_NOT_SUPPORTED");
   const refreshToken = decryptOAuthToken(account.credential.encryptedRefreshToken, account.credential.tokenCipher, config.OAUTH_ENCRYPTION_KEY, previousKeys);
   const refreshed = await provider.refreshAccessToken(refreshToken);
-  const scopes = refreshed.scopes.length > 0 ? refreshed.scopes : stringList(account.credential.scopes);
+  const scopes = refreshed.scopes.length > 0 || provider.capabilities.provider !== "google" ? refreshed.scopes : stringList(account.credential.scopes);
   assertRequiredScopes(scopes, provider.capabilities.requiredScopes);
   await prisma.oAuthCredential.update({
     where: { id: account.credential.id },

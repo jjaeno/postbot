@@ -4,14 +4,14 @@ import { ElevenLabsTtsProvider, resolveTtsVoice } from "./index.js";
 describe("ElevenLabsTtsProvider", () => {
   it("derives word timing from official character alignment", async () => {
     const fetchImplementation = vi.fn<typeof fetch>().mockResolvedValue(Response.json({
-      audio_base64: Buffer.from("audio").toString("base64"),
+      audio_base64: Buffer.from([0xff, 0xfb, 0x90, 0x64]).toString("base64"),
       normalized_alignment: {
         characters: ["H", "i", " ", "a", "l", "l"],
         character_start_times_seconds: [0, 0.1, 0.2, 0.3, 0.4, 0.5],
         character_end_times_seconds: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
       }
     }));
-    const provider = new ElevenLabsTtsProvider({ apiKey: "key", timeoutMs: 1_000, fetchImplementation });
+    const provider = new ElevenLabsTtsProvider({ apiKey: "key", timeoutMs: 1_000, usdPerThousandCharacters: 1, fetchImplementation });
     const result = await provider.synthesize({ text: "Hi all", voice: resolveTtsVoice("elevenlabs", "neutral-ko", "configured-voice"), model: "model", idempotencyKey: "tts-alignment" });
     expect(result.timings).toEqual([{ text: "Hi", startSeconds: 0, endSeconds: 0.2 }, { text: "all", startSeconds: 0.3, endSeconds: 0.6 }]);
     expect(result.durationSeconds).toBe(0.6);

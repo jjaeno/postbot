@@ -31,7 +31,8 @@ export const estimateAutomationStageCost = (
     const inputRate = config.LLM_PROVIDER === "fake" ? 1 : config.LLM_INPUT_USD_PER_MILLION_TOKENS;
     const outputRate = config.LLM_PROVIDER === "fake" ? 1 : config.LLM_OUTPUT_USD_PER_MILLION_TOKENS;
     if (inputRate <= 0 || outputRate <= 0) return null;
-    return { stage, provider: config.LLM_PROVIDER, model: config.LLM_MODEL, amountUsd: rounded((inputTokens * inputRate + outputTokens * outputRate) / 1_000_000), usage: { inputTokens, outputTokens }, pricing: { inputUsdPerMillionTokens: inputRate, outputUsdPerMillionTokens: outputRate } };
+    const attempts = config.LLM_PROVIDER === "openai" ? config.LLM_MAX_RETRIES + 1 : 1;
+    return { stage, provider: config.LLM_PROVIDER, model: config.LLM_MODEL, amountUsd: rounded((inputTokens * inputRate + outputTokens * outputRate) / 1_000_000 * attempts), usage: { inputTokens, outputTokens }, pricing: { inputUsdPerMillionTokens: inputRate, outputUsdPerMillionTokens: outputRate, maximumAttempts: attempts } };
   }
   if (stage === "ASSET") {
     const imageCount = usage.imageCount ?? 0;
@@ -48,6 +49,8 @@ export const estimateAutomationStageCost = (
   }
   const durationSeconds = usage.durationSeconds ?? 0;
   const rate = config.APP_ENV === "local" || config.APP_ENV === "test" ? 0.01 : config.RENDER_USD_PER_MINUTE;
-  if (durationSeconds <= 0 || rate <= 0) return null;
+  if (durationSeconds <= 0) return null;
+  if (config.RENDER_COST_MODE === "free") return { stage, provider: "renderer", model: "remotion-ffmpeg", amountUsd: 0, usage: { durationSeconds }, pricing: { usdPerMinute: 0 } };
+  if (rate <= 0) return null;
   return { stage, provider: "renderer", model: "remotion-ffmpeg", amountUsd: rounded(durationSeconds / 60 * rate), usage: { durationSeconds }, pricing: { usdPerMinute: rate } };
 };

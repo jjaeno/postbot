@@ -2,6 +2,7 @@ import { ConflictException, Inject, Injectable, NotFoundException } from "@nestj
 import { AnalyticsReportResponseSchema, AnalyticsSyncRequestSchema, type AnalyticsReportResponse } from "@postbot/contracts";
 import type { PrismaClient } from "@postbot/database";
 import { JobsService } from "../jobs/jobs.service.js";
+import { assertPlatformEnabled, loadConfig } from "@postbot/config";
 
 @Injectable()
 export class AnalyticsService {
@@ -9,6 +10,7 @@ export class AnalyticsService {
 
   async sync(workspaceId: string, raw: unknown) {
     const input = AnalyticsSyncRequestSchema.parse(raw);
+    try { assertPlatformEnabled(loadConfig(), input.platform); } catch { throw new ConflictException("PLATFORM_DISABLED_OR_PUBLISHING_HELD"); }
     const channel = await this.prisma.channel.findFirst({ where: { id: input.channelId, workspaceId }, select: { id: true } });
     if (!channel) throw new NotFoundException("CHANNEL_NOT_FOUND");
     const existing = await this.prisma.analyticsSync.findUnique({ where: { idempotencyKey: input.idempotencyKey } });

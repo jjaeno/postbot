@@ -31,6 +31,8 @@ suite("licensed audio ownership and revocation", () => {
     expect((await controller.list(request, channel.id)).assets).toHaveLength(0);
     await expect(controller.upload(request, channel.id, input)).rejects.toThrow("AUDIO_LICENSE_REVIEW_REQUIRED");
     const sibling = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Sibling", slug: `${key}-sibling` } });
-    await expect(controller.upload(request, sibling.id, input)).rejects.toThrow("AUDIO_OWNERSHIP_CONFLICT");
+    const independent = await controller.upload(request, sibling.id, input);
+    expect(independent.id).not.toBe(saved.id);
+    expect((await prisma.asset.findUniqueOrThrow({ where: { id: independent.id } })).channelId).toBe(sibling.id);
   });
 });

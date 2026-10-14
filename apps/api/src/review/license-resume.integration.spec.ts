@@ -79,6 +79,22 @@ suite("rights proof recovery and platform isolation", () => {
     expect(await prisma.policyCheck.count({ where: { contentItemId: fixture.content.id, platform: "INSTAGRAM", status: "UNKNOWN" } })).toBe(0);
     expect(await prisma.contentItem.findUniqueOrThrow({ where: { id: fixture.content.id } })).toMatchObject({ status: "SCHEDULED" });
   });
+  it("resumes held TTS with its existing audio and timings after rights verification", async () => {
+    const fixture = await seed();
+    const repository = new PrismaReviewRepository(prisma);
+    await repository.reviewAssetLicense(fixture.workspace.id, fixture.user.id, fixture.content.id, { assetId: fixture.pending.assetId, status: "VERIFIED", proofUrl: "https://example.com/image-proof", licenseName: "Image", commercialUseAllowed: true, derivativeAllowed: true });
+    const tts = { synthesize: vi.fn(async (input: Parameters<FakeTtsProvider["synthesize"]>[0]) => ({ ...await new FakeTtsProvider().synthesize(input), provider: "mock-real-tts" })) };
+    const service = new AssetPreparationService(fixture.assets, new FakeImageProvider(), tts);
+    const input = { channelId: fixture.channel.id, contentItemId: fixture.content.id, sceneVersionId: fixture.scenes[0]!.id, purpose: "tts-narration:YOUTUBE", key: `${fixture.key}:speech`, text: "한국어 확인", voice: "fixture", model: "fixture", idempotencyKey: `${fixture.key}:speech` };
+    const speech = await service.prepareTts(input);
+    await prisma.productionJob.update({ where: { id: fixture.job.id }, data: { type: "TTS", queueName: "tts", payload: { ttsPreparation: { sceneVersionId: fixture.scenes[0]!.id } }, status: "NEEDS_REVIEW" } });
+    await prisma.automationStep.updateMany({ where: { automationRunId: fixture.run.id }, data: { stage: "TTS", status: "HELD", errorCode: "ASSET_LICENSE_REVIEW_REQUIRED", output: { assetId: speech.assetId } } });
+    await prisma.automationRun.update({ where: { id: fixture.run.id }, data: { status: "RUNNING" } });
+    expect(await repository.reviewAssetLicense(fixture.workspace.id, fixture.user.id, fixture.content.id, { assetId: speech.assetId, status: "VERIFIED", proofUrl: "https://example.com/voice-proof", licenseName: "Voice", commercialUseAllowed: true, derivativeAllowed: true })).toBe(true);
+    expect(await prisma.automationStep.findFirstOrThrow({ where: { automationRunId: fixture.run.id } })).toMatchObject({ stage: "TTS", status: "PENDING" });
+    expect(await service.prepareTts(input)).toMatchObject({ assetId: speech.assetId, timings: speech.timings, needsReview: false });
+    expect(tts.synthesize).toHaveBeenCalledTimes(1);
+  });
   it("does not resume until every current-scene asset is verified and rejects foreign workspace access", async () => {
     const fixture = await seed();
     const another = await fixture.assets.store({ channelId: fixture.channel.id, kind: "IMAGE", origin: "AI_GENERATED", key: `${fixture.key}:second`, body: new TextEncoder().encode(`${fixture.key}:second`), mimeType: "image/png", source: { provider: "mock-real" }, license: { status: "unknown", commercialUseAllowed: false, derivativeAllowed: false, attributionRequired: false, attributionText: null, proofUrl: null } });

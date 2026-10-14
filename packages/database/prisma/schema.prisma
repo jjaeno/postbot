@@ -629,7 +629,8 @@ model Asset {
   kind            AssetKind
   origin          AssetOrigin
   storageKey      String         @db.VarChar(512)
-  checksumSha256  String         @unique @db.VarChar(64)
+  checksumSha256  String         @db.VarChar(64)
+  dedupScope      String         @default("global") @db.VarChar(191)
   mimeType        String         @db.VarChar(120)
   width           Int?
   height          Int?
@@ -642,6 +643,7 @@ model Asset {
   licenses        AssetLicense[]
   usages          AssetUsage[]
 
+  @@unique([dedupScope, checksumSha256])
   @@index([channelId, kind, origin])
   @@map("assets")
 }

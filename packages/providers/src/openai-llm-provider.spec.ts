@@ -4,7 +4,8 @@ import { FakeStorageProvider } from "./index.js";
 
 const responseBody = {
   created_at: 1_788_480_000,
-  output_text: JSON.stringify({ planning: {}, script: {}, facts: [], sceneDocument: {} }),
+  status: "completed",
+  output: [{ type: "reasoning" }, { type: "message", content: [{ type: "output_text", text: JSON.stringify({ planning: {}, script: {}, facts: [], sceneDocument: {} }) }] }],
   usage: { input_tokens: 12, output_tokens: 34, total_tokens: 46 }
 };
 
@@ -18,7 +19,7 @@ describe("OpenAiLlmProvider", () => {
       return Promise.resolve(new Response(JSON.stringify(responseBody), { status: 200 }));
     });
     vi.stubGlobal("fetch", fetchMock);
-    const provider = new OpenAiLlmProvider({ apiKey: "test-key", baseUrl: "https://api.openai.com/v1", timeoutMs: 1_000 });
+    const provider = new OpenAiLlmProvider({ apiKey: "test-key", baseUrl: "https://api.openai.com/v1", timeoutMs: 1_000, inputUsdPerMillionTokens: 1, outputUsdPerMillionTokens: 1 });
 
     const result = await provider.generateScriptAndScene({
       model: "test-model", promptVersion: "v1", idempotencyKey: "job-1", title: "Title", summary: "Summary",
@@ -35,7 +36,7 @@ describe("OpenAiLlmProvider", () => {
   });
 
   it("refuses OpenAI calls without an API key", async () => {
-    const provider = new OpenAiLlmProvider({ apiKey: "", baseUrl: "https://api.openai.com/v1", timeoutMs: 1_000 });
+    const provider = new OpenAiLlmProvider({ apiKey: "", baseUrl: "https://api.openai.com/v1", timeoutMs: 1_000, inputUsdPerMillionTokens: 1, outputUsdPerMillionTokens: 1 });
     await expect(
       provider.generateScriptAndScene({
         model: "test-model", promptVersion: "v1", idempotencyKey: "job-1", title: "Title", summary: "Summary",
@@ -51,7 +52,7 @@ describe("OpenAiLlmProvider", () => {
       })
     );
     vi.stubGlobal("fetch", fetchMock);
-    const provider = new OpenAiLlmProvider({ apiKey: "test-key", baseUrl: "https://api.openai.com/v1", timeoutMs: 1 });
+    const provider = new OpenAiLlmProvider({ apiKey: "test-key", baseUrl: "https://api.openai.com/v1", timeoutMs: 1, inputUsdPerMillionTokens: 1, outputUsdPerMillionTokens: 1 });
 
     await expect(
       provider.generateScriptAndScene({

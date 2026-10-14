@@ -52,13 +52,13 @@ export class PrismaReviewRepository implements ReviewRepository {
             const license = record.asset.licenses[0];
             return license?.status === "VERIFIED" && license.commercialUseAllowed && license.derivativeAllowed && (!license.validFrom || license.validFrom <= now) && (!license.validUntil || license.validUntil > now);
           })) continue;
-          const steps = await tx.automationStep.findMany({ where: { stage: "ASSET", platform: scene.platform, status: "HELD", errorCode: "ASSET_LICENSE_REVIEW_REQUIRED", automationRun: { channel: { workspaceId }, status: { in: ["RUNNING", "PAUSED"] } } } });
+          const steps = await tx.automationStep.findMany({ where: { stage: { in: ["ASSET", "TTS"] }, platform: scene.platform, status: "HELD", errorCode: "ASSET_LICENSE_REVIEW_REQUIRED", automationRun: { channel: { workspaceId }, status: { in: ["RUNNING", "PAUSED"] } } } });
           for (const step of steps) {
             const result = json(step.output);
             const records = Array.isArray(result.assets) ? result.assets : [];
-            if (!records.some((record) => json(record as Prisma.JsonValue).assetId === asset.id) || !step.productionJobId) continue;
+            if (!(records.some((record) => json(record as Prisma.JsonValue).assetId === asset.id) || result.assetId === asset.id) || !step.productionJobId) continue;
             const job = await tx.productionJob.findUnique({ where: { id: step.productionJobId } });
-            const preparation = json(json(job?.payload ?? null).assetPreparation as Prisma.JsonValue);
+            const preparation = json(json(job?.payload ?? null)[step.stage === "TTS" ? "ttsPreparation" : "assetPreparation"] as Prisma.JsonValue);
             if (preparation.sceneVersionId !== scene.id || job?.status !== "NEEDS_REVIEW") continue;
             await tx.automationStep.update({ where: { id: step.id }, data: { status: "PENDING", errorCode: null, errorMessage: null, finishedAt: null } });
             await tx.automationRun.update({ where: { id: step.automationRunId }, data: { status: "QUEUED", pausedReason: null, nextRunAt: now } });
@@ -71,7 +71,7 @@ export class PrismaReviewRepository implements ReviewRepository {
 
   async get(workspaceId: string, contentItemId: string): Promise<ContentReviewResponse | null> {
     const item = await this.prisma.contentItem.findFirst({ where: { id: contentItemId, channel: { workspaceId } }, include: {
-      sourceReferences: true, assetUsages: { include: { asset: { include: { licenses: { orderBy: { checkedAt: "desc" }, take: 1 } } } } }, scriptVersions: { orderBy: { version: "desc" } }, sceneVersions: { orderBy: { version: "desc" } }, contentIdeas: { take: 1 },
+      sourceReferences: true, assetUsages: { include: { asset: { include: { licenses: { orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 1 } } } } }, scriptVersions: { orderBy: { version: "desc" } }, sceneVersions: { orderBy: { version: "desc" } }, contentIdeas: { take: 1 },
       policyChecks: { orderBy: { checkedAt: "desc" }, include: { snapshots: { orderBy: { createdAt: "desc" }, take: 1 } } },
       publishPlans: { orderBy: { createdAt: "desc" } }
     } });
@@ -169,7 +169,7 @@ export class PrismaReviewRepository implements ReviewRepository {
     const currentScene = await this.prisma.sceneVersion.findFirst({ where: { contentItemId, platform, contentItem: { channel: { workspaceId } } }, orderBy: { version: "desc" } });
     const item = await this.prisma.contentItem.findFirst({ where: { id: contentItemId, channel: { workspaceId } }, include: {
       sourceReferences: true,
-      assetUsages: { where: currentScene ? { sceneVersionId: currentScene.id } : { id: { in: [] } }, include: { asset: { include: { licenses: { orderBy: { checkedAt: "desc" }, take: 1 } } } } },
+      assetUsages: { where: currentScene ? { sceneVersionId: currentScene.id } : { id: { in: [] } }, include: { asset: { include: { licenses: { orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 1 } } } } },
       scriptVersions: { where: { platform }, orderBy: { version: "desc" }, take: 1 },
       channel: { select: { contentItems: { where: { id: { not: contentItemId } }, include: { scriptVersions: { orderBy: { version: "desc" }, take: 1 } }, take: 50 } } }
     } });
@@ -196,7 +196,7 @@ export class PrismaReviewRepository implements ReviewRepository {
       sourceCount: item.sourceReferences.length,
       minimumSourceReliability: item.sourceReferences.length > 0 ? Math.min(...item.sourceReferences.map((source) => source.reliabilityScore?.toNumber() ?? 0)) : null,
       conflictingSources,
-      assetsVerified: licenses.length > 0 && licenses.every((license) => license?.status === "VERIFIED"),
+      assetsVerified: licenses.length > 0 && licenses.every((license) => license?.status === "VERIFIED" && license.derivativeAllowed && (!license.validFrom || license.validFrom <= new Date()) && (!license.validUntil || license.validUntil > new Date())),
       commercialUseVerified: licenses.length > 0 && licenses.every((license) => license?.commercialUseAllowed === true),
       duplicateRisk: similarity >= 0.75 || item.duplicateGroupKey !== null,
       originalityScore: currentBody ? 1 - similarity : null,
@@ -219,7 +219,7 @@ export class PrismaReviewRepository implements ReviewRepository {
 
   async act(workspaceId: string, contentItemId: string, action: "approve" | "hold" | "discard" | "schedule", platform?: PolicyRuleRecord["platform"]): Promise<ContentReviewResponse | "POLICY_GATE" | "INVALID_TRANSITION" | null> {
     const item = await this.prisma.contentItem.findFirst({ where: { id: contentItemId, channel: { workspaceId } }, include: {
-      policyChecks: { where: platform ? { platform } : undefined, orderBy: { checkedAt: "desc" }, take: 1 },
+      policyChecks: { where: platform ? { platform } : undefined, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 1 },
       scriptVersions: { where: platform ? { platform } : undefined, orderBy: { version: "desc" }, take: 1 },
       sceneVersions: { where: platform ? { platform } : undefined, orderBy: { version: "desc" }, take: 1 },
       publishPlans: { where: { status: "SCHEDULED", ...(platform ? { platform } : {}) }, take: 1 }

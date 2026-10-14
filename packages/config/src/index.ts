@@ -3,6 +3,9 @@ import { z } from "zod";
 const EnvSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   APP_ENV: z.enum(["local", "test", "staging", "production"]).default("local"),
+  STAGING_FAKE_CANARY: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  ENABLED_PLATFORMS: z.string().default("youtube,instagram,tiktok").refine((value) => value.split(",").every((part) => ["youtube", "instagram", "tiktok"].includes(part.trim())), "Use comma-separated youtube,instagram,tiktok"),
+  RENDER_COST_MODE: z.enum(["priced", "free"]).default("priced"),
   WEB_PORT: z.coerce.number().int().positive().default(5173),
   API_PORT: z.coerce.number().int().positive().default(3000),
   API_BASE_URL: z.string().url().default("http://localhost:3000"),
@@ -90,3 +93,68 @@ export type AppConfig = z.infer<typeof EnvSchema>;
 
 export const loadConfig = (source: NodeJS.ProcessEnv = process.env): AppConfig =>
   EnvSchema.parse(source);
+
+export type PreflightIssue = { key: string; cause: string; remedy: string; owner: "USER" | "CODEX" };
+
+// The deployment CLI and runtime use the same fail-closed contract. No secret
+// values or parser messages containing input values leave this boundary.
+export const operationalIssues = (config: AppConfig): PreflightIssue[] => {
+  const issues: PreflightIssue[] = [];
+  const add = (key: string, cause: string, remedy: string): void => { issues.push({ key, cause, remedy, owner: "USER" }); };
+  const deployment = config.APP_ENV === "production" || config.APP_ENV === "staging";
+  if (!deployment) return issues;
+  if (config.NODE_ENV !== "production") add("NODE_ENV", "Deployment must use production runtime", "Set NODE_ENV=production");
+  if (config.APP_ENV === "production" && config.STAGING_FAKE_CANARY) add("STAGING_FAKE_CANARY", "Fake canary is staging-only", "Disable canary in production");
+  const canary = config.APP_ENV === "staging" && config.STAGING_FAKE_CANARY;
+  const require = (key: keyof AppConfig): void => { if (typeof config[key] === "string" && !String(config[key]).trim()) add(key, "Required setting missing", `Supply ${key} through the deployment secret/config store`); };
+  for (const key of ["WEB_BASE_URL", "API_BASE_URL", "PUBLIC_API_BASE_URL"] as const) {
+    const url = new URL(config[key]);
+    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) add(key, "Public address must be credential-free HTTPS", "Set the public HTTPS reverse-proxy address");
+  }
+  const web = new URL(config.WEB_BASE_URL);
+  const publicApi = new URL(config.PUBLIC_API_BASE_URL);
+  if (web.origin !== publicApi.origin) add("PUBLIC_API_BASE_URL", "This deployment preflight certifies same-origin cookies only", "Use the supplied reverse proxy with API at /api");
+  if (config.API_BASE_URL.replace(/\/$/, "") !== config.PUBLIC_API_BASE_URL.replace(/\/$/, "")) add("API_BASE_URL", "OAuth callback base and browser API base differ", "Use the same public API base; register /platform-accounts/<platform>/callback under that base");
+  if (canary) {
+    for (const key of ["LLM_PROVIDER", "IMAGE_PROVIDER", "TTS_PROVIDER"] as const) if (config[key] !== "fake") add(key, "Fake canary must not call paid providers", "Use fake providers in the isolated canary environment");
+    for (const platform of ["YOUTUBE", "INSTAGRAM", "TIKTOK"] as const) if (config[`${platform}_OAUTH_PROVIDER`] !== "fake" || config[`${platform}_ANALYTICS_PROVIDER`] !== "fake") add(`${platform}_OAUTH_PROVIDER`, "Fake canary must not use real SNS accounts", "Use fake OAuth and analytics providers");
+  }
+  if (config.STORAGE_PROVIDER !== "s3") add("STORAGE_PROVIDER", "Process-local fake storage cannot serve a distributed deployment", "Use persistent S3/MinIO");
+  for (const key of ["DATABASE_URL", "REDIS_URL", "S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"] as const) require(key);
+  if (!canary) {
+    if (new URL(config.S3_ENDPOINT).protocol !== "https:") add("S3_ENDPOINT", "Signed media URLs must use public HTTPS", "Use externally resolvable S3/MinIO HTTPS DNS reachable by browsers and renderer");
+    for (const [selector, real, keys] of [
+      ["LLM_PROVIDER", "openai", ["OPENAI_API_KEY", "LLM_MODEL"]],
+      ["IMAGE_PROVIDER", "google", ["GOOGLE_API_KEY", "IMAGE_MODEL"]],
+      ["TTS_PROVIDER", "elevenlabs", ["ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID", "TTS_MODEL"]]
+    ] as const) {
+      if (config[selector] !== real) add(selector, "Fake results are not production evidence", `Select ${real}; use explicit STAGING_FAKE_CANARY=true only in isolated staging`);
+      for (const key of keys) require(key);
+    }
+    if (config.TOPIC_SOURCE_PROVIDER !== "rss") add("TOPIC_SOURCE_PROVIDER", "Fixture sources are not live input", "Select rss and configure real feeds");
+    const feeds = config.TOPIC_SOURCE_FEED_URLS.split(",").map((feed) => feed.trim()).filter(Boolean);
+    if (!feeds.length || feeds.some((feed) => { try { const u = new URL(feed); return u.protocol !== "https:" || !!u.username || !!u.password; } catch { return true; } })) add("TOPIC_SOURCE_FEED_URLS", "Valid HTTPS RSS feeds required", "Supply comma-separated real feed URLs");
+    for (const key of ["LLM_INPUT_USD_PER_MILLION_TOKENS", "LLM_OUTPUT_USD_PER_MILLION_TOKENS", "IMAGE_USD_PER_OUTPUT", "TTS_USD_PER_THOUSAND_CHARACTERS"] as const) if (config[key] <= 0) add(key, "Provider price is unconfirmed", "Enter your verified contract price before paid work");
+  }
+  if (config.RENDER_COST_MODE === "priced" && config.RENDER_USD_PER_MINUTE <= 0) add("RENDER_USD_PER_MINUTE", "Render cost is unconfirmed", "Set measured cost or explicitly select RENDER_COST_MODE=free");
+  for (const platform of config.ENABLED_PLATFORMS.split(",").map((part) => part.trim())) {
+    if (platform === "tiktok" && !canary) { add("ENABLED_PLATFORMS", "TikTok Direct Post is held pending compliant consent UX and app review", "Disable tiktok; produce/export videos and post manually"); continue; }
+    if (canary) continue;
+    const prefix = platform.toUpperCase() as "YOUTUBE" | "INSTAGRAM";
+    const selector = `${prefix}_OAUTH_PROVIDER` as const;
+    const analytics = `${prefix}_ANALYTICS_PROVIDER` as const;
+    if (config[selector] === "fake" || config[analytics] === "fake") add(selector, "Enabled platform requires real OAuth and analytics", `Configure real ${platform} providers or remove platform from ENABLED_PLATFORMS`);
+    require(`${prefix}_CLIENT_ID`); require(`${prefix}_CLIENT_SECRET`);
+  }
+  return issues;
+};
+
+export const assertOperationalConfig = (config: AppConfig): void => {
+  const issues = operationalIssues(config);
+  if (issues.length) throw new Error(`OPERATIONAL_CONFIG_INVALID: ${issues.map((issue) => issue.key).join(", ")}`);
+};
+
+export const assertPlatformEnabled = (config: AppConfig, platform: string): void => {
+  if (!config.ENABLED_PLATFORMS.split(",").map((part) => part.trim()).includes(platform.toLowerCase())) throw new Error("PLATFORM_DISABLED");
+  if (platform.toLowerCase() === "tiktok" && config.TIKTOK_OAUTH_PROVIDER === "tiktok") throw new Error("TIKTOK_DIRECT_POST_HELD");
+};

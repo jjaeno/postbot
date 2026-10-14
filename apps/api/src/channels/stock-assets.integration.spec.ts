@@ -33,7 +33,10 @@ suite("owned stock registration", () => {
     await expect(controller.upload(req, channel.id, input)).rejects.toThrow("ASSET_LICENSE_REVIEW_REQUIRED");
     expect(await controller.list(req, channel.id)).toEqual({ assets: [] });
     const other = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Other", slug: `${key}-other`, status: "PAUSED" } });
-    await expect(controller.upload(req, other.id, input)).rejects.toThrow("STOCK_IMAGE_ALREADY_OWNED_BY_ANOTHER_CHANNEL");
+    const independent = await controller.upload(req, other.id, input);
+    expect(independent.id).not.toBe(asset.id);
+    expect((await prisma.asset.findUniqueOrThrow({ where: { id: independent.id } })).channelId).toBe(other.id);
+    expect((await prisma.assetLicense.findFirstOrThrow({ where: { assetId: asset.id }, orderBy: { createdAt: "desc" } })).status).toBe("REJECTED");
   });
 });
 

@@ -57,7 +57,10 @@ RUN set -eu; groupadd --system node; useradd --system --gid node --create-home n
   node --version; \
   rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
   && rm -rf /var/lib/apt/lists/*
+# Postbot uses exec node as PID 1 and never starts the base-image Pebble daemon.
+# Remove the unused service manager rather than shipping its vulnerable Go runtime.
+RUN rm -f /usr/bin/pebble
 COPY --from=deploy --chown=node:node /deploy /app
 ENV POSTBOT_APP=${APP}
 USER node
-CMD ["sh", "-c", "if [ \"${POSTBOT_APP}\" = \"web\" ]; then node scripts/serve.mjs; else node dist/main.js; fi"]
+CMD ["sh", "-c", "if [ \"${POSTBOT_APP}\" = \"web\" ]; then exec node scripts/serve.mjs; else exec node dist/main.js; fi"]

@@ -5,6 +5,16 @@ const upload = { title: "Postbot", description: "AI generated explainer", privac
 const requestUrl = (input: URL | RequestInfo): string => typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
 
 describe("MetaInstagramPublisherProvider", () => {
+  it("never invents granted permissions when the token response omits them", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json({ access_token: "short" }))
+      .mockResolvedValueOnce(Response.json({ access_token: "long", expires_in: 3600 }))
+      .mockResolvedValueOnce(Response.json({ data: [{ permission: "instagram_business_basic", status: "granted" }, { permission: instagramPublishScope, status: "declined" }] }));
+    const provider = new MetaInstagramPublisherProvider({ clientId: "client", clientSecret: "secret", fetchImplementation });
+    const token = await provider.exchangeCode({ code: "code", codeVerifier: "verifier", redirectUri: "https://app.example/callback" });
+    expect(token.scopes).toEqual(["instagram_business_basic"]);
+    expect(provider.capabilities.requiredScopes).toContain("instagram_business_manage_insights");
+  });
   it("uses Instagram Login scopes and the resumable Reels publish flow", async () => {
     const fetchImplementation = vi.fn<typeof fetch>((input) => {
       const url = requestUrl(input);
@@ -24,19 +34,12 @@ describe("MetaInstagramPublisherProvider", () => {
 });
 
 describe("TikTokPublisherProvider", () => {
-  it("uses Login Kit and Direct Post with status polling", async () => {
-    const fetchImplementation = vi.fn<typeof fetch>((input, init) => {
-      const url = requestUrl(input);
-      if (url.includes("creator_info")) return Promise.resolve(Response.json({ data: { privacy_level_options: ["SELF_ONLY"] }, error: { code: "ok" } }));
-      if (url.includes("video/init")) return Promise.resolve(Response.json({ data: { publish_id: "publish-1", upload_url: "https://upload.tiktok.example/video" }, error: { code: "ok" } }));
-      if (url.includes("upload.tiktok.example")) { expect(init?.headers).toMatchObject({ "content-range": "bytes 0-3/4" }); return Promise.resolve(new Response(null, { status: 201 })); }
-      if (url.includes("status/fetch")) return Promise.resolve(Response.json({ data: { status: "PUBLISH_COMPLETE", publicly_available_post_id: ["video-1"] }, error: { code: "ok" } }));
-      throw new Error(`Unexpected request: ${url}`);
-    });
-    const provider = new TikTokPublisherProvider({ clientId: "client", clientSecret: "secret", fetchImplementation, pollIntervalMs: 1 });
-    const authorization = new URL(provider.createAuthorizationUrl({ state: "state", codeChallenge: "challenge", redirectUri: "https://app.example/callback", scopes: provider.capabilities.requiredScopes }));
-    expect(authorization.pathname).toBe("/v2/auth/authorize/");
-    expect(authorization.searchParams.get("scope")).toContain(tiktokPublishScope);
-    await expect(provider.upload(upload, "token")).resolves.toMatchObject({ externalVideoId: "video-1", status: "published" });
+  it("holds Direct Post before any network call", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>();
+    const provider = new TikTokPublisherProvider({ clientId: "client", clientSecret: "secret", fetchImplementation });
+    expect(provider.capabilities.requiredScopes).toContain("video.list");
+    expect(provider.capabilities.requiredScopes).toContain(tiktokPublishScope);
+    await expect(provider.upload(upload, "token")).rejects.toThrow("TIKTOK_DIRECT_POST_HELD");
+    expect(fetchImplementation).not.toHaveBeenCalled();
   });
 });

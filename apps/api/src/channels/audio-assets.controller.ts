@@ -43,7 +43,7 @@ export class AudioAssetsController {
     await this.owned(req.auth.workspaceId, channelId);
     const input = Input.safeParse(raw); if (!input.success) throw new BadRequestException("AUDIO_LICENSE_REQUIRED");
     const bytes = Buffer.from(input.data.bodyBase64, "base64"); validateWav(bytes);
-    const existing = await this.prisma.asset.findUnique({ where: { checksumSha256: checksumSha256(bytes) } });
+    const existing = await this.prisma.asset.findUnique({ where: { dedupScope_checksumSha256: { dedupScope: channelId, checksumSha256: checksumSha256(bytes) } } });
     if (existing && (existing.channelId !== channelId || existing.kind !== "AUDIO" || existing.origin !== "STOCK_FREE")) throw new BadRequestException("AUDIO_OWNERSHIP_CONFLICT");
     const config = loadConfig();
     const storage = config.STORAGE_PROVIDER === "s3" ? new S3StorageProvider({ endpoint: config.S3_ENDPOINT, region: config.S3_REGION, bucket: config.S3_BUCKET, accessKeyId: config.S3_ACCESS_KEY_ID, secretAccessKey: config.S3_SECRET_ACCESS_KEY }) : new FakeStorageProvider();

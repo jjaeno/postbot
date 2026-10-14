@@ -1,4 +1,4 @@
-﻿# Postbot 구현 계획
+# Postbot 구현 계획
 
 이 문서는 Postbot v1의 **단계별 구현 범위와 완료 조건에 대한 실행 기준(Source of Truth)** 이다.
 
@@ -35,6 +35,16 @@
 ---
 
 ## 현재 진행 상태
+
+### 19.8단계 — 실제 서비스 운영 준비 보완 (2026-10-13)
+
+상태: 내부 구현·필수 검증 완료 — PASS_WITH_EXTERNAL_VERIFICATION_PENDING. 운영 준비 보완과 검증 증거·외부 조건은 `docs/production-readiness-2026-10-13.md`에 기록한다. 실제 유료 호출·SNS 게시·운영 배포·원격 CI/security 완료를 뜻하지 않는다.
+
+범위: 설정/네트워크 preflight, 활성 플랫폼 격리 및 Fake canary 구분, 실제 AI REST 계약·미디어 검증, 유료 호출 journal·원장 실패/취소 비용 예약 보호, SNS 권한·게시 성공 후 DB 실패/중복 게시 안전장치, TikTok Direct Post 보류, digest 배포/HTTPS/secret 주입, worker readiness·web SIGTERM 종료, 권리 승인 경로·채널별 자산 checksum migration 점검과 사용자 설정 체크리스트.
+
+필수 내부 검증: 변경 app/package lint·typecheck·unit·build, 격리 MySQL/Redis/S3 통합 회귀(예산·멱등성·권리 재개·worker lifecycle), production Compose 설정, 변경 production 이미지 build, Fake acceptance 및 renderer smoke, 브라우저 핵심 Playwright, backup checksum/빈 격리 DB 복원. 실행 불가 검증은 BLOCKED 또는 NOT_RUN으로 기록하고 성공으로 간주하지 않는다. 외부 Provider/SNS·운영 배포·최종 커밋 CI/security는 자격 증명·승인·서버·원격 push 조건을 분리해 보고한다.
+
+Commit: `fix: 실제 서비스 운영 준비와 안전 검증 보완`
 
 | 단계   | 내용              | 상태    |
 | ---- | --------------- | ----- |

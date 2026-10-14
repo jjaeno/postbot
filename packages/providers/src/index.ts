@@ -79,8 +79,8 @@ export class InstagramAnalyticsProvider implements AnalyticsProvider {
     const posts = await Promise.all(input.postIds.map(async (externalPostId): Promise<AnalyticsPostResult> => {
       const url = new URL(`https://graph.instagram.com/${this.options.graphVersion ?? "v24.0"}/${encodeURIComponent(externalPostId)}/insights`);
       url.searchParams.set("metric", "views,reach,total_interactions,ig_reels_avg_watch_time");
-      const raw = await analyticsFetchJson<{ data?: Array<{ name?: string; values?: Array<{ value?: number }> }> }>(url.toString(), this.options);
-      const values = new Map((raw.data ?? []).map((entry) => [entry.name ?? "", entry.values?.[0]?.value ?? null]));
+      const raw = await analyticsFetchJson<{ data?: Array<{ name?: string; values?: Array<{ value?: number }>; total_value?: { value?: number } }> }>(url.toString(), this.options);
+      const values = new Map((raw.data ?? []).map((entry) => [entry.name ?? "", entry.values?.[0]?.value ?? entry.total_value?.value ?? null]));
       const metric = (name: string): number | null => typeof values.get(name) === "number" ? values.get(name) as number : null;
       const views = metric("views"); const reach = metric("reach"); const interactions = metric("total_interactions"); const watchMs = metric("ig_reels_avg_watch_time");
       return { externalPostId, observedAt: input.periodEnd, raw, metrics: [
@@ -507,6 +507,8 @@ type OpenAiResponse = {
   readonly id?: string;
   readonly created_at?: number;
   readonly output_text?: string;
+  readonly status?: string;
+  readonly output?: Array<{ type?: string; content?: Array<{ type?: string; text?: string }> }>;
   readonly usage?: {
     readonly input_tokens?: number;
     readonly output_tokens?: number;
@@ -584,10 +586,14 @@ const scriptSceneJsonSchema = {
 } as const;
 
 const readResponseText = (response: OpenAiResponse): string => {
-  if (!response.output_text) {
+  if (response.status && response.status !== "completed") throw new Error("OPENAI_RESPONSE_INCOMPLETE");
+  const parts = response.output?.filter((item) => item.type === "message").flatMap((item) => item.content ?? []) ?? [];
+  if (parts.some((part) => part.type === "refusal")) throw new Error("OPENAI_RESPONSE_REFUSED");
+  const text = parts.filter((part) => part.type === "output_text").map((part) => part.text ?? "").join("") || response.output_text;
+  if (!text) {
     throw new Error("OpenAI response did not include structured output text.");
   }
-  return response.output_text;
+  return text;
 };
 
 export class OpenAiLlmProvider implements LlmProvider {
@@ -597,6 +603,7 @@ export class OpenAiLlmProvider implements LlmProvider {
     if (!this.options.apiKey) {
       throw new Error("OPENAI_API_KEY is required when LLM_PROVIDER=openai.");
     }
+    if (!(this.options.inputUsdPerMillionTokens && this.options.inputUsdPerMillionTokens > 0 && this.options.outputUsdPerMillionTokens && this.options.outputUsdPerMillionTokens > 0)) throw new Error("LLM_PRICING_REQUIRED");
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
@@ -638,8 +645,9 @@ export class OpenAiLlmProvider implements LlmProvider {
       }
       const payload = (await response.json()) as OpenAiResponse;
       const usage = payload.usage;
-      const promptTokens = usage?.input_tokens ?? 0;
-      const completionTokens = usage?.output_tokens ?? 0;
+      const promptTokens = usage?.input_tokens;
+      const completionTokens = usage?.output_tokens;
+      if (promptTokens === undefined || completionTokens === undefined || !Number.isSafeInteger(promptTokens) || !Number.isSafeInteger(completionTokens) || promptTokens < 0 || completionTokens < 0) throw new Error("OPENAI_USAGE_MISSING_OR_INVALID");
       return {
         provider: "openai",
         idempotencyKey: request.idempotencyKey,
@@ -711,14 +719,24 @@ export class GoogleImageProvider implements ImageProvider {
   constructor(private readonly options: { apiKey: string; timeoutMs: number; usdPerOutput?: number }) {}
   async generate(request: ImageGenerationRequest): Promise<ImageGenerationResult> {
     if (!this.options.apiKey) throw new Error("GOOGLE_API_KEY is required when IMAGE_PROVIDER=google.");
+    if (!(this.options.usdPerOutput && this.options.usdPerOutput > 0)) throw new Error("IMAGE_PRICING_REQUIRED");
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
     try {
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(request.model)}:generateContent`, { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": this.options.apiKey }, body: JSON.stringify({ contents: [{ parts: [{ text: request.prompt }] }] }), signal: controller.signal });
+      const ratios = ["1:1", "3:2", "2:3", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"];
+      const aspectRatio = ratios.find((ratio) => { const [w, h] = ratio.split(":").map(Number); return w && h && Math.abs(request.width / request.height - w / h) < 0.001; });
+      if (!aspectRatio) throw new Error("GOOGLE_IMAGE_ASPECT_RATIO_UNSUPPORTED");
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(request.model)}:generateContent`, { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": this.options.apiKey }, body: JSON.stringify({ contents: [{ parts: [{ text: request.prompt }] }], generationConfig: { responseModalities: ["TEXT", "IMAGE"], imageConfig: { aspectRatio } } }), signal: controller.signal });
       if (!response.ok) throw new Error(`Google image API failed with status ${response.status}.`);
       const payload = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ inlineData?: { mimeType?: string; data?: string } }> } }> };
       const image = payload.candidates?.flatMap((candidate) => candidate.content?.parts ?? []).find((part) => part.inlineData?.data)?.inlineData;
       if (!image?.data || !image.mimeType) throw new Error("Google image API did not return inline image data.");
-      return { provider: "google", idempotencyKey: request.idempotencyKey, createdAt: new Date().toISOString(), model: request.model, mimeType: image.mimeType, bytes: Uint8Array.from(Buffer.from(image.data, "base64")), width: request.width, height: request.height, estimatedCostUsd: (this.options.usdPerOutput ?? 0).toFixed(6) };
+      if (!["image/png", "image/jpeg", "image/webp"].includes(image.mimeType)) throw new Error("GOOGLE_IMAGE_MIME_UNSUPPORTED");
+      const bytes = decodeProviderBase64(image.data);
+      const decoded = await sharp(bytes, { limitInputPixels: 40_000_000, failOn: "warning" }).raw().toBuffer({ resolveWithObject: true });
+      const metadata = await sharp(bytes).metadata();
+      const formatMime = metadata.format === "jpeg" ? "image/jpeg" : `image/${metadata.format}`;
+      if (formatMime !== image.mimeType) throw new Error("GOOGLE_IMAGE_MIME_MISMATCH");
+      return { provider: "google", idempotencyKey: request.idempotencyKey, createdAt: new Date().toISOString(), model: request.model, mimeType: image.mimeType, bytes, width: decoded.info.width, height: decoded.info.height, estimatedCostUsd: (this.options.usdPerOutput ?? 0).toFixed(6) };
     } finally { clearTimeout(timer); }
   }
 }
@@ -769,6 +787,7 @@ export class ElevenLabsTtsProvider implements TtsProvider {
   constructor(private readonly options: { apiKey: string; timeoutMs: number; usdPerThousandCharacters?: number; fetchImplementation?: typeof fetch }) {}
   async synthesize(request: TtsRequest): Promise<TtsResult> {
     if (!this.options.apiKey) throw new Error("ELEVENLABS_API_KEY is required when TTS_PROVIDER=elevenlabs.");
+    if (!(this.options.usdPerThousandCharacters && this.options.usdPerThousandCharacters > 0)) throw new Error("TTS_PRICING_REQUIRED");
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
     try {
       const response = await (this.options.fetchImplementation ?? fetch)(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(request.voice)}/with-timestamps`, { method: "POST", headers: { "xi-api-key": this.options.apiKey, "Content-Type": "application/json" }, body: JSON.stringify({ text: request.text, model_id: request.model }), signal: controller.signal });
@@ -779,7 +798,8 @@ export class ElevenLabsTtsProvider implements TtsProvider {
       if (!alignment) throw new Error("ElevenLabs TTS response did not include timing alignment.");
       const timings = wordTimingsFromAlignment(alignment);
       if (timings.length === 0) throw new Error("ElevenLabs TTS alignment did not contain words.");
-      const bytes = new Uint8Array(Buffer.from(body.audio_base64, "base64"));
+      const bytes = decodeProviderBase64(body.audio_base64);
+      if (!(bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) && !(bytes[0] === 0xff && ((bytes[1] ?? 0) & 0xe0) === 0xe0)) throw new Error("ELEVENLABS_AUDIO_INVALID");
       const durationSeconds = Math.max(...alignment.character_end_times_seconds);
       return { provider: "elevenlabs", idempotencyKey: request.idempotencyKey, createdAt: new Date().toISOString(), model: request.model, mimeType: "audio/mpeg", bytes, durationSeconds, timings, estimatedCostUsd: (request.text.length / 1_000 * (this.options.usdPerThousandCharacters ?? 0)).toFixed(6) };
     } finally { clearTimeout(timer); }
@@ -789,6 +809,10 @@ export class ElevenLabsTtsProvider implements TtsProvider {
 type CharacterAlignment = { characters: string[]; character_start_times_seconds: number[]; character_end_times_seconds: number[] };
 const wordTimingsFromAlignment = (alignment: CharacterAlignment): Array<{ text: string; startSeconds: number; endSeconds: number }> => {
   if (alignment.characters.length !== alignment.character_start_times_seconds.length || alignment.characters.length !== alignment.character_end_times_seconds.length) throw new Error("ElevenLabs TTS alignment arrays have inconsistent lengths.");
+  alignment.character_start_times_seconds.forEach((start, index) => {
+    const end = alignment.character_end_times_seconds[index];
+    if (!Number.isFinite(start) || end === undefined || !Number.isFinite(end) || start < 0 || end < start || (index > 0 && start < (alignment.character_start_times_seconds[index - 1] ?? 0))) throw new Error("ELEVENLABS_ALIGNMENT_INVALID");
+  });
   const timings: Array<{ text: string; startSeconds: number; endSeconds: number }> = [];
   let text = ""; let start = 0; let end = 0;
   const flush = (): void => { if (text) timings.push({ text, startSeconds: start, endSeconds: end }); text = ""; };
@@ -801,5 +825,12 @@ const wordTimingsFromAlignment = (alignment: CharacterAlignment): Array<{ text: 
   return timings;
 };
 import { createHash } from "node:crypto";
+import sharp from "sharp";
+const decodeProviderBase64 = (value: string): Uint8Array => {
+  if (!value || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) throw new Error("PROVIDER_MEDIA_BASE64_INVALID");
+  const bytes = Buffer.from(value, "base64");
+  if (!bytes.length) throw new Error("PROVIDER_MEDIA_EMPTY");
+  return new Uint8Array(bytes);
+};
 import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";

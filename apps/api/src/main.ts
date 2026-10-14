@@ -2,7 +2,7 @@ import "dotenv/config";
 import "reflect-metadata";
 import { NestFactory } from "@nestjs/core";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
-import { loadConfig } from "@postbot/config";
+import { assertOperationalConfig, loadConfig } from "@postbot/config";
 import { createLogger, runWithLogContext } from "@postbot/logger";
 import * as Sentry from "@sentry/node";
 import cookieParser from "cookie-parser";
@@ -12,6 +12,7 @@ import { HttpExceptionResponseFilter } from "./http-exception.filter.js";
 
 const bootstrap = async (): Promise<void> => {
   const config = loadConfig();
+  assertOperationalConfig(config);
   if (config.SENTRY_DSN) {
     Sentry.init({ dsn: config.SENTRY_DSN, environment: config.SENTRY_ENVIRONMENT });
   }

@@ -10,4 +10,14 @@ export const start = () => {
   return createWebServer({ root: resolve("dist"), apiBaseUrl }).listen(port, "0.0.0.0", () => process.stdout.write(`Postbot web listening on ${port}\n`));
 };
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) start();
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const server = start();
+  let closing = false;
+  const shutdown = () => {
+    if (closing) return;
+    closing = true;
+    server.close((error) => { process.exitCode = error ? 1 : 0; });
+  };
+  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", shutdown);
+}

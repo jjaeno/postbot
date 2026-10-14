@@ -1,5 +1,5 @@
 import type { Prisma, PrismaClient } from "@postbot/database";
-import { loadConfig } from "@postbot/config";
+import { assertPlatformEnabled, loadConfig } from "@postbot/config";
 import { FakeAnalyticsProvider, InstagramAnalyticsProvider, TikTokAnalyticsProvider, YouTubeAnalyticsProvider, type AnalyticsProvider } from "@postbot/providers";
 import { resolveOAuthAccessToken } from "./oauth-token.js";
 
@@ -36,6 +36,7 @@ export class AnalyticsProcessor {
 
   private async provider(channelId: string, platform: "YOUTUBE" | "INSTAGRAM" | "TIKTOK"): Promise<AnalyticsProvider> {
     const config = loadConfig();
+    assertPlatformEnabled(config, platform);
     const useFake = platform === "YOUTUBE" ? config.YOUTUBE_ANALYTICS_PROVIDER === "fake" : platform === "INSTAGRAM" ? config.INSTAGRAM_ANALYTICS_PROVIDER === "fake" : config.TIKTOK_ANALYTICS_PROVIDER === "fake";
     if (useFake) return new FakeAnalyticsProvider();
     const account = await this.prisma.platformAccount.findFirst({ where: { channelId, platform, status: "CONNECTED" }, include: { credential: true } });
