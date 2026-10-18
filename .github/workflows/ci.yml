@@ -67,7 +67,9 @@ jobs:
       - name: Backup target safety regression
         run: node --test scripts/mysql-backup-lib.spec.mjs
       - name: DB integration and failure recovery regression
-        run: pnpm exec turbo run test --concurrency=1 -- --maxWorkers=2 --testTimeout=20000
+        # Suites share one database; serialize files to avoid cross-suite locks and fixtures.
+        # Concurrent requests within each suite still exercise production concurrency.
+        run: pnpm exec turbo run test --concurrency=1 -- --maxWorkers=1 --testTimeout=20000
         env:
           RUN_DB_INTEGRATION: '1'
           DATABASE_URL: mysql://root:postbot-root@127.0.0.1:3306/postbot_test
