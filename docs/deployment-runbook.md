@@ -2,6 +2,8 @@
 
 ## 1. Release artifact
 
+2026-10-20 필수 gate: 동일 SHA의 CI `validate`(배포 안전 테스트·실 DB 회귀 포함), `proxy-rate-limit`, `renderer-smoke`, `browser-e2e`, `acceptance`, `docker-smoke`와 security가 모두 성공해야 한다. renderer는 PR/main/manual마다 항상 실행한다. 로컬 단독 확인은 `node --test scripts/deploy-production.test.mjs`, 최종 renderer image에서 `node node_modules/@postbot/renderer/scripts/smoke.mjs`, `PROXY_SMOKE_API_IMAGE=<로컬 최종 API image> node scripts/proxy-rate-limit-smoke.mjs`다. 실패·skip은 통과가 아니다. test fixture 로그와 QA 보고서는 CI artifact로 14일 보관하며 secret/env 원본을 업로드하지 않는다. 최신 상태는 [인수 기록](release-internal-remediation-2026-10-20.md)에 있다.
+
 1. 검증할 commit SHA를 고정한다.
 2. `docker build --build-arg APP=<api|worker|renderer|web> -t <registry>/postbot-<app>:<sha> .`로 네 이미지를 build한다.
 3. filesystem/secret/dependency scan과 네 image scan이 모두 통과해야 push한다.
@@ -12,6 +14,8 @@ Node.js 24 LTS 공식 이미지에서 빌드하고 같은 Node 바이너리를 U
 ## 2. 배포 순서 (2026-10-13 갱신)
 
 운영 기본안은 단일 서버 Docker Compose와 Caddy HTTPS다. 인프라 구매·registry push·운영 rollout은 수행하지 않았다. managed DB/Redis/S3도 같은 앱 Compose를 사용할 수 있다. 동일 origin(`/api`)을 기본안으로 검증한다. 기존 같은-site 서브도메인 배포 계약은 코드에 남아 있으나 새 preflight는 public-suffix 판정을 추측하지 않고 동일 origin만 인증한다.
+
+API는 공개 port 없이 단일 replica로 운영한다. 전용 `api-ingress` network에서 Caddy의 고정 IPv4(`POSTBOT_PROXY_IP`, 기본 `172.30.250.2`) 하나만 `API_TRUSTED_PROXY`로 신뢰한다. API 주소도 `POSTBOT_API_INGRESS_IP=172.30.250.3`으로 고정해 자동 할당과 Caddy 주소가 충돌하지 않게 한다. subnet 기본값은 `POSTBOT_PROXY_SUBNET=172.30.250.0/29`이며 주소 충돌이 있으면 세 값을 함께 바꾸고 실제 proxy smoke를 다시 실행한다. Caddy는 `api-ingress:3000`으로 접속하고 X-Forwarded-For를 실제 TCP peer로 덮어쓴다. 미설정 API는 전달 헤더를 신뢰하지 않으며 CIDR/전체 private range/hop count 허용 설정은 받지 않는다. 인터넷→Caddy→API 구조이고 CDN/LB 앞단을 신뢰하지 않는다. 앞단 추가나 API 수평 확장은 별도 신뢰 경계/공유 rate-limit 저장소 검증이 필요하다. 현행 한도는 IP·endpoint별 프로세스 메모리의 60회/분이며 재시작 시 초기화된다.
 
 secret manager가 저장소 밖 `/run/postbot/<environment>/app.env` 같은 tmpfs 경로에 0600 환경 파일을 렌더링하고 `POSTBOT_ENV_FILE`로 지정한다. 이것은 Compose `env_file`의 실제 입력이다. 값은 image layer·Git·shell history·배포 로그에 남기지 않는다. `docker compose config` 전체 출력은 secret을 포함하므로 **`config --quiet`만 사용한다**. 기존 문서의 “환경 파일에 저장하지 않는다”는 실제 Compose 계약과 충돌했으므로, 영속 파일 대신 secret manager가 만드는 일시적인 제한 접근 파일로 정정한다. 컨테이너 환경을 조회할 수 있는 Docker 관리자 권한도 secret 접근 권한으로 취급한다.
 

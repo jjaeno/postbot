@@ -8,7 +8,7 @@ import request from "supertest";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { AccessTokenGuard } from "./access-token.guard.js";
 import { AuthController } from "./auth.controller.js";
-import { AUTH_REPOSITORY, type AuthRepository, type CreateRefreshSessionInput, type CreateUserInput, type StoredRefreshSession, type StoredUser } from "./auth.repository.js";
+import { AUTH_REPOSITORY, type AuthRepository, type CreateRefreshSessionInput, type CreateUserInput, type RotateRefreshInput, type StoredRefreshSession, type StoredUser } from "./auth.repository.js";
 import { AuthService } from "./auth.service.js";
 import { CsrfGuard } from "./csrf.guard.js";
 import { PasswordService } from "./password.service.js";
@@ -92,10 +92,27 @@ class FakeAuthRepository implements AuthRepository {
   revokeRefreshSession(sessionId: string, replacedById: string | null): Promise<void> {
     const stored = this.refreshSessions.get(sessionId);
     if (stored) {
-      this.refreshSessions.set(sessionId, { ...stored, revokedAt: new Date() });
+      for (const [id, session] of this.refreshSessions) {
+        if (session.familyId === stored.familyId) {
+          this.refreshSessions.set(id, { ...session, revokedAt: new Date() });
+        }
+      }
     }
     void replacedById;
     return Promise.resolve();
+  }
+
+  async rotateRefreshSession({ sessionId, tokenHash, next }: RotateRefreshInput): Promise<"rotated" | "invalid" | "reused"> {
+    const stored = this.refreshSessions.get(sessionId);
+    if (!stored || stored.tokenHash !== tokenHash || stored.expiresAt <= new Date() ||
+      stored.userId !== next.userId || stored.workspaceId !== next.workspaceId || stored.familyId !== next.familyId) return "invalid";
+    if (stored.revokedAt || stored.reuseDetectedAt) {
+      await this.revokeRefreshFamily(stored.familyId, new Date());
+      return "reused";
+    }
+    this.refreshSessions.set(stored.id, { ...stored, revokedAt: new Date() });
+    await this.createRefreshSession(next);
+    return "rotated";
   }
 
   revokeRefreshFamily(familyId: string, reuseDetectedAt: Date): Promise<void> {

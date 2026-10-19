@@ -9,6 +9,8 @@ import cookieParser from "cookie-parser";
 import { json, type NextFunction, type Request, type Response } from "express";
 import { AppModule } from "./app.module.js";
 import { HttpExceptionResponseFilter } from "./http-exception.filter.js";
+import { configureTrustedProxy } from "./trusted-proxy.js";
+import type { Express } from "express";
 
 const bootstrap = async (): Promise<void> => {
   const config = loadConfig();
@@ -18,6 +20,7 @@ const bootstrap = async (): Promise<void> => {
   }
   const logger = createLogger("postbot-api");
   const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  configureTrustedProxy(app.getHttpAdapter().getInstance() as Express);
 
   app.use("/channels/:channelId/stock-assets", json({ limit: "1500kb" }));
   app.use("/channels/:channelId/audio-assets", json({ limit: "1500kb" }));

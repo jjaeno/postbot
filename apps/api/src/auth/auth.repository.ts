@@ -39,12 +39,19 @@ export type CreateRefreshSessionInput = {
   ipHash: string | null;
 };
 
+export type RotateRefreshInput = {
+  sessionId: string;
+  tokenHash: string;
+  next: CreateRefreshSessionInput;
+};
+
 export type AuthRepository = {
   createUserWithWorkspace(input: CreateUserInput): Promise<AuthSession>;
   findUserByEmail(email: string): Promise<StoredUser | null>;
   findSessionByUserId(userId: string): Promise<AuthSession | null>;
   findRefreshSession(id: string): Promise<StoredRefreshSession | null>;
   createRefreshSession(input: CreateRefreshSessionInput): Promise<StoredRefreshSession>;
+  rotateRefreshSession(input: RotateRefreshInput): Promise<"rotated" | "invalid" | "reused">;
   revokeRefreshSession(sessionId: string, replacedById: string | null): Promise<void>;
   revokeRefreshFamily(familyId: string, reuseDetectedAt: Date): Promise<void>;
   hasWorkspaceAccess(userId: string, workspaceId: string): Promise<boolean>;

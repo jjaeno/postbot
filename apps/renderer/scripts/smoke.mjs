@@ -8,12 +8,19 @@ for (const durationSeconds of durations) {
   const draftLocation = `/tmp/postbot-renderer-smoke-${durationSeconds}-draft.mp4`;
   const narrationLocation = `/tmp/postbot-renderer-smoke-${durationSeconds}.wav`;
   const durationInFrames = durationSeconds * 30;
+  const splitFrame = Math.floor(durationInFrames / 2);
   const sceneDocument = {
     schemaVersion: "1.0.0", title: `Postbot ${durationSeconds}s renderer smoke`, width: 1080, height: 1920, fps: 30, durationInFrames,
-    scenes: [{ id: "smoke", startFrame: 0, durationInFrames, visualPrompt: "Postbot renderer smoke", narration: { text: "Postbot renderer smoke", sourceUrl: "https://postbot.local/renderer-smoke" }, overlays: [{ kind: "title", text: "Postbot renderer smoke" }] }]
+    scenes: [
+      { id: "smoke", startFrame: 0, durationInFrames: splitFrame, visualPrompt: "Postbot renderer smoke", narration: { text: "Postbot renderer smoke", sourceUrl: "https://postbot.local/renderer-smoke" }, overlays: [{ kind: "title", text: "Postbot renderer smoke" }] },
+      { id: "second", startFrame: splitFrame, durationInFrames: durationInFrames - splitFrame, visualPrompt: "Second scene", narration: { text: "Second scene", sourceUrl: "https://postbot.local/renderer-smoke" }, overlays: [{ kind: "title", text: "Second scene" }] }
+    ]
   };
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920"><rect width="1080" height="1920" fill="#ff00ff"/></svg>`;
-  const sceneAssets = { smoke: `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}` };
+  const sceneAssets = {
+    smoke: `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`,
+    second: `data:image/svg+xml;base64,${Buffer.from(svg.replace("#ff00ff", "#00ff00")).toString("base64")}`
+  };
   try {
     await new RemotionVideoRenderer().render({ sceneDocument, captions: [], sceneAssets, outputLocation: draftLocation });
     const audio = spawnSync("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", `sine=frequency=880:duration=${durationSeconds}`, "-c:a", "pcm_s16le", narrationLocation]);
@@ -28,7 +35,11 @@ for (const durationSeconds of durations) {
     if (pixel.status !== 0 || pixel.stdout.length < 3 || pixel.stdout[0] < pixel.stdout[1] + 50 || pixel.stdout[2] < pixel.stdout[1] + 50) {
       throw new Error(`Scene asset was not visible in the rendered frame: rgb=${[...pixel.stdout.subarray(0, 3)].join(",")} ffmpeg=${pixel.stderr.toString("utf8")}`);
     }
-    console.log(JSON.stringify({ fixtureSeconds: durationSeconds, sceneAssetPixelRgb: [...pixel.stdout.subarray(0, 3)], ...result }));
+    const secondPixel = spawnSync("ffmpeg", ["-v", "error", "-ss", String(splitFrame / 30 + 1), "-i", outputLocation, "-vf", "crop=2:2:100:100", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"], { encoding: null });
+    if (secondPixel.status !== 0 || secondPixel.stdout.length < 3 || secondPixel.stdout[1] < secondPixel.stdout[0] + 50 || secondPixel.stdout[1] < secondPixel.stdout[2] + 50) {
+      throw new Error(`Second scene asset was not composed: rgb=${[...secondPixel.stdout.subarray(0, 3)].join(",")} ffmpeg=${secondPixel.stderr.toString("utf8")}`);
+    }
+    console.log(JSON.stringify({ fixtureSeconds: durationSeconds, sceneAssetPixelRgb: [...pixel.stdout.subarray(0, 3)], secondScenePixelRgb: [...secondPixel.stdout.subarray(0, 3)], ...result }));
   } finally {
     await Promise.all([rm(outputLocation, { force: true }), rm(draftLocation, { force: true }), rm(narrationLocation, { force: true })]);
   }

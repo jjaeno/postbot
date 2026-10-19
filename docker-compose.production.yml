@@ -20,6 +20,13 @@ services:
     <<: *app
     image: ${POSTBOT_API_IMAGE:?Set immutable API image digest}
     command: node dist/main.js
+    environment:
+      API_TRUSTED_PROXY: ${POSTBOT_PROXY_IP:-172.30.250.2}
+    networks:
+      default:
+      api-ingress:
+        aliases: [api-ingress]
+        ipv4_address: ${POSTBOT_API_INGRESS_IP:-172.30.250.3}
     depends_on:
       migrate: { condition: service_completed_successfully }
     healthcheck:
@@ -76,6 +83,10 @@ services:
     image: ${POSTBOT_PROXY_IMAGE:?Set reviewed Caddy image digest}
     restart: unless-stopped
     ports: ["80:80", "443:443"]
+    networks:
+      default:
+      api-ingress:
+        ipv4_address: ${POSTBOT_PROXY_IP:-172.30.250.2}
     environment:
       POSTBOT_DOMAIN: ${POSTBOT_DOMAIN:?Set public app DNS name}
       POSTBOT_STORAGE_DOMAIN: ${POSTBOT_STORAGE_DOMAIN:?Set public S3/MinIO DNS name}
@@ -87,6 +98,11 @@ services:
     logging:
       driver: json-file
       options: { max-size: 10m, max-file: "5" }
+networks:
+  api-ingress:
+    ipam:
+      config:
+        - subnet: ${POSTBOT_PROXY_SUBNET:-172.30.250.0/29}
 volumes:
   render-temp:
   proxy-data:
