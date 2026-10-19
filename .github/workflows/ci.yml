@@ -5,17 +5,6 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      run_browser_e2e:
-        description: Run the browser regression job
-        required: false
-        default: false
-        type: boolean
-      run_renderer_smoke:
-        description: Run the production renderer smoke job
-        required: false
-        default: false
-        type: boolean
 
 jobs:
   validate:
@@ -66,13 +55,24 @@ jobs:
       - run: pnpm test
       - name: Backup target safety regression
         run: node --test scripts/mysql-backup-lib.spec.mjs
+      - name: Production deployment safety regression
+        run: node --test scripts/deploy-production.test.mjs
       - name: DB integration and failure recovery regression
         # Suites share one database; serialize files to avoid cross-suite locks and fixtures.
         # Concurrent requests within each suite still exercise production concurrency.
-        run: pnpm exec turbo run test --concurrency=1 -- --maxWorkers=1 --testTimeout=20000
+        run: |
+          mkdir -p .artifacts/db-regression
+          set -o pipefail
+          pnpm exec turbo run test --concurrency=1 -- --maxWorkers=1 --testTimeout=20000 2>&1 | tee .artifacts/db-regression/result.log
         env:
           RUN_DB_INTEGRATION: '1'
           DATABASE_URL: mysql://root:postbot-root@127.0.0.1:3306/postbot_test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: db-regression-${{ github.sha }}
+          path: .artifacts/db-regression/
+          retention-days: 14
       - run: pnpm build
       - run: pnpm audit --prod --audit-level=high
 
@@ -149,7 +149,15 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @postbot/web exec playwright install --with-deps chromium
-      - run: pnpm --filter @postbot/web e2e
+      - run: pnpm --filter @postbot/web e2e --reporter=line,html --trace=retain-on-failure
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-report-${{ github.sha }}
+          path: |
+            apps/web/playwright-report/
+            apps/web/test-results/
+          retention-days: 14
 
   acceptance:
     needs: validate
@@ -164,10 +172,37 @@ jobs:
         run: docker compose -f docker-compose.acceptance.yml down
 
   renderer-smoke:
-    if: github.event_name == 'workflow_dispatch' && inputs.run_renderer_smoke
     needs: validate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - run: docker build --build-arg APP=renderer -t postbot-renderer-smoke:${{ github.sha }} .
-      - run: docker run --rm --entrypoint node postbot-renderer-smoke:${{ github.sha }} node_modules/@postbot/renderer/scripts/smoke.mjs
+      - run: |
+          mkdir -p .artifacts/renderer-smoke
+          set -o pipefail
+          docker run --rm --entrypoint node postbot-renderer-smoke:${{ github.sha }} node_modules/@postbot/renderer/scripts/smoke.mjs 2>&1 | tee .artifacts/renderer-smoke/result.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: renderer-smoke-${{ github.sha }}
+          path: .artifacts/renderer-smoke/
+          retention-days: 14
+
+  proxy-rate-limit:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: docker build --build-arg APP=api -t postbot-proxy-api:${{ github.sha }} .
+      - run: node scripts/proxy-rate-limit-smoke.mjs
+        env:
+          PROXY_SMOKE_API_IMAGE: postbot-proxy-api:${{ github.sha }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: proxy-rate-limit-${{ github.sha }}
+          path: .artifacts/proxy-smoke/
+          retention-days: 14

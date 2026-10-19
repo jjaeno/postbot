@@ -30,7 +30,7 @@ export default tseslint.config(
     }
   },
   {
-    files: ["apps/renderer/scripts/**/*.mjs", "apps/web/scripts/**/*.mjs", "apps/web/public/runtime-config.js", "scripts/verify-wizard-sample.mjs", "scripts/restore-mysql.mjs", "scripts/mysql-backup-lib*.mjs"],
+    files: ["apps/renderer/scripts/**/*.mjs", "apps/web/scripts/**/*.mjs", "apps/web/public/runtime-config.js", "scripts/verify-wizard-sample.mjs", "scripts/restore-mysql.mjs", "scripts/mysql-backup-lib*.mjs", "scripts/proxy-rate-limit-smoke.mjs"],
     extends: [tseslint.configs.disableTypeChecked],
     languageOptions: {
       parserOptions: {

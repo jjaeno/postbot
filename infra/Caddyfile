@@ -1,6 +1,9 @@
 {$POSTBOT_DOMAIN} {
   handle_path /api/* {
-    reverse_proxy api:3000 {
+    reverse_proxy api-ingress:3000 {
+      # Overwrite client input with Caddy's direct peer. There is no trusted CDN
+      # in this deployment contract; adding one requires an explicit review.
+      header_up X-Forwarded-For {remote_host}
       flush_interval -1
     }
   }

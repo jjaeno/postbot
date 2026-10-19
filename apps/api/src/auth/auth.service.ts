@@ -96,23 +96,6 @@ export class AuthService {
       throw new UnauthorizedException("세션을 갱신할 수 없습니다. 다시 로그인해 주세요.");
     }
     const payload = this.tokens.verifyRefreshToken(refreshToken);
-    const stored = await this.repository.findRefreshSession(payload.sessionId);
-    const now = new Date();
-
-    if (
-      !stored ||
-      stored.tokenHash !== this.tokens.hashToken(refreshToken) ||
-      stored.expiresAt <= now
-    ) {
-      throw new UnauthorizedException("세션을 갱신할 수 없습니다. 다시 로그인해 주세요.");
-    }
-
-    if (stored.revokedAt || stored.reuseDetectedAt) {
-      await this.repository.revokeRefreshFamily(stored.familyId, now);
-      this.clearCookies(res);
-      throw new UnauthorizedException("세션 보안 문제를 감지했습니다. 다시 로그인해 주세요.");
-    }
-
     const session = await this.repository.findSessionByUserId(payload.sub);
     if (!session) {
       throw new UnauthorizedException("사용자 정보를 찾을 수 없습니다.");
@@ -123,19 +106,28 @@ export class AuthService {
       payload.sub,
       payload.workspaceId,
       nextSessionId,
-      stored.familyId
+      payload.familyId
     );
-    const nextStored = await this.repository.createRefreshSession({
-      id: nextSessionId,
-      userId: payload.sub,
-      workspaceId: payload.workspaceId,
-      tokenHash: this.tokens.hashToken(nextRefreshToken),
-      familyId: stored.familyId,
-      expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 7),
-      userAgentHash: this.tokens.hashContext(req.get("user-agent")),
-      ipHash: this.tokens.hashContext(req.ip)
+    const result = await this.repository.rotateRefreshSession({
+      sessionId: payload.sessionId,
+      tokenHash: this.tokens.hashToken(refreshToken),
+      next: {
+        id: nextSessionId,
+        userId: payload.sub,
+        workspaceId: payload.workspaceId,
+        tokenHash: this.tokens.hashToken(nextRefreshToken),
+        familyId: payload.familyId,
+        expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 7),
+        userAgentHash: this.tokens.hashContext(req.get("user-agent")),
+        ipHash: this.tokens.hashContext(req.ip)
+      }
     });
-    await this.repository.revokeRefreshSession(stored.id, nextStored.id);
+    if (result !== "rotated") {
+      this.clearCookies(res);
+      throw new UnauthorizedException(result === "reused"
+        ? "세션 보안 문제를 감지했습니다. 다시 로그인해 주세요."
+        : "세션을 갱신할 수 없습니다. 다시 로그인해 주세요.");
+    }
     return this.setCookies(session, nextRefreshToken, res);
   }
 

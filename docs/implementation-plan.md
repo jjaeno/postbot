@@ -36,6 +36,10 @@
 
 ## 현재 진행 상태
 
+### 19.8 후속 — 출시 전 내부 동시성·프록시·CI 보완 (2026-10-20)
+
+상태: 요청 범위 로컬 필수 검증 완료 — PASS_WITH_EXTERNAL_VERIFICATION_PENDING. 범위는 refresh 원자성/logout 경합, 신규 workspace slug, Caddy 요청 식별, 배포 테스트 CI 연결/별도 실제 renderer smoke, 최신 인수 문서다. 새 기능·TikTok Direct Post 재활성화·실 유료 호출·실 게시·운영 배포는 제외했다. 검증과 미실행 사유는 `docs/release-internal-remediation-2026-10-20.md`를 기준으로 하고, 아래 19.8 완료 표시는 과거 기록으로 구분한다. 새 커밋의 원격 CI/security 및 실환경 검증은 대기이며 운영 준비 완료나 내부 blocker 0을 선언하지 않는다. 커밋 메시지는 기존 19.8 메시지를 유지한다.
+
 ### 19.8단계 — 실제 서비스 운영 준비 보완 (2026-10-13)
 
 상태: 내부 구현·필수 검증 완료 — PASS_WITH_EXTERNAL_VERIFICATION_PENDING. 운영 준비 보완과 검증 증거·외부 조건은 `docs/production-readiness-2026-10-13.md`에 기록한다. 실제 유료 호출·SNS 게시·운영 배포·원격 CI/security 완료를 뜻하지 않는다.
