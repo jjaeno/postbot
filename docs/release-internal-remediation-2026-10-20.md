@@ -1,5 +1,15 @@
 # 출시 전 내부 보완 인수 기록 — 2026-10-20
 
+## PR #2 proxy-rate-limit CI 후속 보완
+
+초기 head `338faa56d188a171674e31009c6f2e7e447afd25`의 [CI 실패 job](https://github.com/jjaeno/postbot/actions/runs/39299447590/job/118223477245)은 프록시 assertion 실패가 아니다. `actions/setup-node@v5`가 루트 `package.json`의 `packageManager: pnpm@10.34.5`를 감지해 자동 캐시를 준비하다가 호스트의 pnpm 실행 파일을 찾지 못했다. 따라서 API image build와 실제 proxy 검사는 실행되지 않았다. 같은 실행의 validate/acceptance/renderer-smoke/docker-smoke/browser-e2e는 모두 성공했고 [security](https://github.com/jjaeno/postbot/actions/runs/39299447321)도 성공했다.
+
+수정: 해당 job의 setup-node에 `package-manager-cache: false`만 명시한다. 호스트는 의존성 없는 Node smoke harness만 실행하고 pnpm 설치/앱 build는 Dockerfile 안에서 수행한다. 다른 job의 pnpm 캐시, 테스트 assertion, 요청 제한, CI 필수 실행 조건 및 security workflow는 변경하지 않는다. [setup-node 공식 설명](https://github.com/actions/setup-node/blob/v5/README.md#caching-global-packages-data)의 자동 캐시 제어를 확인했다(2026-10-20).
+
+검증: 원격에서 사용한 setup-node SHA `a0853c24544627f65ddf259abe73b1d18a591444`의 실제 배포 bundle을 pnpm 없는 격리 Node 24.21.0 환경에서 실행했다. 저장소 package.json을 읽기 전용으로 제공하고 이미 설치된 Node를 사용해 캐시 분기를 검사했다. 입력 `INPUT_PACKAGE-MANAGER-CACHE=true`는 동일 pnpm 오류/exit 1, `false`는 exit 0으로 확인했다. Docker shell entrypoint가 하이픈 포함 입력 환경 변수를 제거하지 않도록 `--entrypoint node`로 직접 실행했다. 초기 shell-entrypoint 진단 로그도 보존했다. actionlint 1.7.7과 `git diff --check` PASS. 앱/package 코드는 바꾸지 않아 이전의 동일 앱 코드 lint/typecheck/build/DB/renderer/브라우저 검증은 반복하지 않았다.
+
+증거는 Git 제외 `.artifacts/proxy-ci-repair-20261020/`의 `remote-failure.txt`, `setup-before.log`(exit 1), `setup-after.log`(exit 0), `actionlint.log`다. 수정 커밋을 같은 PR에 push한 후 **새 원격 실행에서 setup-node와 실제 proxy 검사 성공을 확인해야 한다**. 아래 미푸시/원격 NOT_RUN 표시는 최초 로컬 인수 시점의 과거 기록이다.
+
 ## 판정과 버전
 
 현재 판정: **PASS_WITH_EXTERNAL_VERIFICATION_PENDING — 요청 범위 로컬 필수 검증 완료**. 새 커밋의 원격 CI/security와 실제 운영 환경 검증은 별도 대기다. 내부 blocker 0 또는 운영 준비 완료를 선언하지 않는다. 과거 원격 CI 성공은 이번 수정의 원격 검증 결과가 아니다.

@@ -196,6 +196,8 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
+          # Host runs only the Node smoke harness; pnpm lives inside Docker.
+          package-manager-cache: false
       - run: docker build --build-arg APP=api -t postbot-proxy-api:${{ github.sha }} .
       - run: node scripts/proxy-rate-limit-smoke.mjs
         env:
