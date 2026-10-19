@@ -199,3 +199,14 @@ Apps must depend on packages through public package exports. Apps must not impor
 `Dockerfile` builds production-only, non-root images for `web`, `api`, `worker`, and `renderer`. The worker/renderer images include FFmpeg/ffprobe and the pinned Remotion browser at build time. `docker-compose.production.yml` runs migrations before application rollout and separates render queues from the general worker.
 
 Use `pnpm backup:mysql`, `pnpm backup:verify -- <dump.sql>`, `pnpm backup:restore -- <dump.sql>`, and `pnpm recover:queues` according to `docs/deployment-runbook.md`. Never run restore against an unverified production target.
+
+## Operational preflight (2026-10-13)
+
+```bash
+pnpm --filter @postbot/worker... build
+pnpm preflight
+pnpm preflight -- --network
+pnpm smoke:provider -- image
+```
+
+The default check never calls paid providers or posts. The network variant probes DB/Redis and a temporary S3 object. Provider smoke defaults to NOT_RUN. See `docs/production-readiness-2026-10-13.md` for approval-gated real smoke, environment inputs, and deployment commands. Production startup rejects Fake providers; isolated staging Fake canaries are explicit. Initial production uses YouTube only. Real TikTok Direct Post is held; creation/export remain available.

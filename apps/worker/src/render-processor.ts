@@ -125,6 +125,9 @@ export class RenderProcessor {
         style: sceneDocument.style ?? null,
         qa
       };
+      const config = loadConfig();
+      const rate = config.RENDER_COST_MODE === "free" ? 0 : config.APP_ENV === "local" || config.APP_ENV === "test" ? 0.01 : config.RENDER_USD_PER_MINUTE;
+      await audioAssets.recordProviderCost({ contentItemId: input.contentItemId, productionJobId: jobId, provider: "renderer", model: "remotion-ffmpeg", operation: "video-render", quantity: qa.durationSeconds / 60, unit: "minute", category: "render", estimatedCostUsd: (qa.durationSeconds / 60 * rate).toFixed(6), idempotencyKey: `render:${input.idempotencyKey}` });
       await this.prisma.sceneVersion.update({ where: { id: sceneVersion.id }, data: { renderManifest: manifest } });
       return manifest;
     } finally {

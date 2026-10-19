@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { loadConfig } from "@postbot/config";
+import { assertPlatformEnabled, loadConfig } from "@postbot/config";
 import {
   OAuthCallbackQuerySchema,
   StartOAuthConnectionRequestSchema,
@@ -60,6 +60,7 @@ export class PlatformAccountsService {
   }
 
   private async start(workspaceId: string, platform: Platform, rawInput: unknown): Promise<StartOAuthConnectionResponse> {
+    try { assertPlatformEnabled(this.config, platform); } catch { throw new BadRequestException("플랫폼이 비활성화되어 있거나 게시 지원이 보류되어 있습니다."); }
     const input: StartOAuthConnectionRequest = parseBody(StartOAuthConnectionRequestSchema, rawInput);
     const provider = this.provider(platform);
     const state = this.crypto.randomToken(32);

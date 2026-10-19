@@ -4,6 +4,7 @@ import type { PrismaClient } from "@postbot/database";
 import { JobsService } from "../jobs/jobs.service.js";
 import type { Prisma } from "@postbot/database";
 import { createScheduledPlan } from "./publish-slots.js";
+import { assertPlatformEnabled, loadConfig } from "@postbot/config";
 const jsonObject = (value: Prisma.JsonValue | null): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value : {};
 export const nextAvailableSlot = (slots: readonly Date[], occupied: readonly Date[], after: Date): Date | null => {
   const occupiedTimes = new Set(occupied.map((value) => value.getTime()));
@@ -23,6 +24,7 @@ export class PublishingService {
       return { id: existing.id, contentItemId: existing.contentItemId, platformAccountId: existing.platformAccountId, platform: existing.platform, status: existing.status, scheduledAt: existing.scheduledAt.toISOString(), idempotencyKey: existing.idempotencyKey, title: existing.title, duplicate: true };
     }
     const account = await this.prisma.platformAccount.findFirst({ where: { id: input.platformAccountId, workspaceId, status: "CONNECTED" } });
+    if (account) { try { assertPlatformEnabled(loadConfig(), account.platform); } catch { throw new ConflictException({ code: "PLATFORM_DISABLED", message: "플랫폼 게시가 비활성화되어 있거나 지원이 보류되어 있습니다." }); } }
     if (!account) throw new NotFoundException({ code: "PUBLISH_ACCOUNT_NOT_FOUND", message: "Connected publishing account was not found." });
     if (!account.channelId) throw new ConflictException({ code: "PUBLISH_ACCOUNT_NOT_ASSIGNED", message: "The publishing account is not assigned to a channel." });
     const occupied = await this.prisma.publishPlan.findFirst({ where: { platformAccountId: account.id, scheduledAt, status: { in: ["SCHEDULED", "PUBLISHING"] } }, select: { id: true } });

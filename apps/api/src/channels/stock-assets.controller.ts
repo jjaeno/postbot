@@ -51,8 +51,8 @@ export class StockAssetsController {
     const bytes = Buffer.from(input.bodyBase64, "base64");
     validateStockBytes(bytes, input.mimeType);
     const repository = await this.repository(req.auth.workspaceId, channelId);
-    // Global checksum dedup must never make another workspace's asset writable.
-    const existing = await this.prisma.asset.findUnique({ where: { checksumSha256: checksumSha256(bytes) } });
+    // Identical bytes have independent ownership and evidence in each channel.
+    const existing = await this.prisma.asset.findUnique({ where: { dedupScope_checksumSha256: { dedupScope: channelId, checksumSha256: checksumSha256(bytes) } } });
     if (existing && existing.channelId !== channelId) throw new BadRequestException("STOCK_IMAGE_ALREADY_OWNED_BY_ANOTHER_CHANNEL");
     if (existing && (input.assetKind === "logo" ? existing.kind !== "GRAPHIC" : existing.kind !== "IMAGE" || existing.origin === "AI_GENERATED")) throw new BadRequestException("ASSET_KIND_CONFLICT");
     const result = await repository.store({ channelId, kind: input.assetKind === "logo" ? "GRAPHIC" : "IMAGE", origin: input.assetKind === "logo" ? "INTERNAL" : "STOCK_FREE", key: `stock/${channelId}/${randomUUID()}`, body: bytes, mimeType: input.mimeType, source: { provider: "owner-upload", sourceUrl: input.proofUrl }, license: { status: "verified", commercialUseAllowed: true, derivativeAllowed: true, attributionRequired: false, attributionText: null, proofUrl: input.proofUrl } });

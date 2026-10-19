@@ -7,24 +7,32 @@
 3. filesystem/secret/dependency scan과 네 image scan이 모두 통과해야 push한다.
 4. staging과 production은 tag를 다시 build하지 않고 같은 digest를 승격한다. 배포 대상/registry가 확정되지 않은 동안에는 이 계약만 유지한다.
 
-Node.js 24 LTS 공식 이미지에서 빌드하고 같은 Node 바이너리를 Ubuntu 26.04 LTS runtime에서 사용한다. API·web은 미디어 실행 의존성을 포함하지 않고, worker·renderer만 FFmpeg/Chromium/CJK 폰트를 포함한다. runtime 취약점은 패치 가능 여부뿐 아니라 미패치 항목의 영향도도 별도로 확인한다. `--ignore-unfixed` 통과를 전체 CVE 0건으로 표현하지 않는다.
+Node.js 24 LTS 공식 이미지에서 빌드하고 같은 Node 바이너리를 Ubuntu 26.04 LTS runtime에서 사용한다. API·web은 미디어 실행 의존성을 포함하지 않고, worker·renderer만 FFmpeg/Chromium/CJK 폰트를 포함한다. Postbot은 `exec node`를 PID 1로 사용한다. worker는 작업을 drain하고 web은 SIGTERM/SIGINT에서 HTTP server를 닫아 정상 종료한다. Ubuntu base에 포함된 사용하지 않는 `/usr/bin/pebble`은 Go stdlib 취약점 때문에 runtime에서 제거한다. runtime 취약점은 패치 가능 여부뿐 아니라 미패치 항목의 영향도도 별도로 확인한다. `--ignore-unfixed` 통과를 전체 CVE 0건으로 표현하지 않는다.
 
-## 2. 배포 순서
+## 2. 배포 순서 (2026-10-13 갱신)
 
-운영 설정 계약: `APP_ENV=staging|production`에서는 JWT access/refresh 및 OAuth 암호화 비밀값이 각각 32자 이상이어야 하며 공개된 local/test/예제 placeholder는 시작 시 거절한다. JWT access/refresh 값은 서로 달라야 한다. 운영자는 secret manager에서 독립적으로 생성·주입한다.
+운영 기본안은 단일 서버 Docker Compose와 Caddy HTTPS다. 인프라 구매·registry push·운영 rollout은 수행하지 않았다. managed DB/Redis/S3도 같은 앱 Compose를 사용할 수 있다. 동일 origin(`/api`)을 기본안으로 검증한다. 기존 같은-site 서브도메인 배포 계약은 코드에 남아 있으나 새 preflight는 public-suffix 판정을 추측하지 않고 동일 origin만 인증한다.
 
-웹 이미지는 시작 시 `PUBLIC_API_BASE_URL`을 `/runtime-config.js`에 주입하므로 같은 digest로 staging/production 주소를 바꿀 수 있다. 이 값은 브라우저에 공개되는 HTTP(S) API 주소만 허용하며 자격 증명/query/hash는 거절한다. production에서는 설정이 필수다. API의 `WEB_BASE_URL`/CORS 허용 origin을 실제 웹 주소와 맞추고 HTTPS 및 같은 site의 웹/API 도메인 또는 동일 origin reverse proxy를 사용한다(SameSite=Lax 인증 쿠키). 서로 다른 site의 배포는 이 계약에 포함되지 않는다. `GET /auth/me`의 CSRF 값은 웹 메모리에만 유지하며 API host의 쿠키를 웹에서 직접 읽을 필요가 없다. runtime 설정에는 비밀값을 넣지 않는다.
+secret manager가 저장소 밖 `/run/postbot/<environment>/app.env` 같은 tmpfs 경로에 0600 환경 파일을 렌더링하고 `POSTBOT_ENV_FILE`로 지정한다. 이것은 Compose `env_file`의 실제 입력이다. 값은 image layer·Git·shell history·배포 로그에 남기지 않는다. `docker compose config` 전체 출력은 secret을 포함하므로 **`config --quiet`만 사용한다**. 기존 문서의 “환경 파일에 저장하지 않는다”는 실제 Compose 계약과 충돌했으므로, 영속 파일 대신 secret manager가 만드는 일시적인 제한 접근 파일로 정정한다. 컨테이너 환경을 조회할 수 있는 Docker 관리자 권한도 secret 접근 권한으로 취급한다.
 
-1. secret manager에서 `.env.example`과 동일한 키를 주입한다. 실제 값은 env 파일이나 image layer에 저장하지 않는다.
-2. DB backup과 checksum metadata를 생성한다: `pnpm backup:mysql` 후 `pnpm backup:verify -- <dump.sql>`.
-3. `docker compose -f docker-compose.production.yml run --rm migrate`를 단 한 번 성공시킨다.
-4. API, worker, renderer, web 순으로 rollout한다.
-5. API `/health`와 `/ready`, worker 시작 로그, renderer `ffmpeg -version`, web HTTP health를 확인한다.
-6. Fake canary 또는 승인된 실제 provider smoke를 실행하고 correlation ID, job ID, artifact digest를 배포 기록에 남긴다.
+배포 manifest에는 비밀이 아닌 `POSTBOT_PROJECT`, `POSTBOT_DOMAIN`, `POSTBOT_STORAGE_DOMAIN`, `POSTBOT_STORAGE_UPSTREAM`, `POSTBOT_{API,WORKER,RENDERER,WEB,MIGRATE,PROXY}_IMAGE`를 둔다. 이미지 값은 모두 `registry/repository@sha256:<digest>`다. staging과 production은 별도 project 이름·secret 파일·DB·Redis·bucket을 사용한다. `migrate` 이미지는 Dockerfile의 `build` target으로 별도 build/scan/push한다. 앱 이미지는 동일 검증 digest를 승격한다.
+
+1. [사용자 설정 목록](production-readiness-2026-10-13.md)의 HTTPS 주소, 단가, 활성 플랫폼, 독립 secret을 입력한다. 최초 운영은 `ENABLED_PLATFORMS=youtube`, `STAGING_FAKE_CANARY=false`, 실제 Provider로 준비한다.
+2. single-server 인프라를 선택하면 `docker-compose.production-infra.yml`을 추가한다. `POSTBOT_{MYSQL,REDIS,MINIO}_IMAGE` digest와 `MYSQL_DATABASE`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_ROOT_PASSWORD`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`를 secret manager에 입력한다. MySQL/Redis/MinIO는 public 포트를 열지 않으며 volume을 유지한다. Redis는 AOF와 noeviction을 사용한다.
+3. DNS/TLS와 S3 bucket을 준비하고, CORS는 실제 `WEB_BASE_URL` origin의 GET/HEAD만 허용한다. MinIO 단일 서버이면 storage upstream은 `minio:9000`, `S3_ENDPOINT`는 public HTTPS storage DNS다. Caddy는 서명 Host/path를 보존한다. renderer에서도 public DNS에 접근할 수 있어야 한다. bucket 생성·CORS·backup/versioning은 관리자 작업이며 preflight가 임의 생성하지 않는다.
+4. `pnpm --filter @postbot/worker... build` 후 `pnpm preflight`를 수행한다. dotenv는 명령을 실행한 루트의 `.env`를 읽는다. 실제 배포에서는 secret manager가 프로세스 환경을 주입하거나 `node --env-file=<외부 환경 파일> apps/worker/dist/preflight.js`를 사용한다. 기본 검사는 네트워크/유료 호출/게시를 하지 않는다.
+5. `pnpm preflight -- --network`는 DB SELECT, Redis PING, 임의 `_preflight/<UUID>` object의 upload/download/delete를 검사한다. 유료 AI/SNS를 호출하지 않지만 object storage 요청 요금은 사업자 계약에 따른다. 실패 뒤 해당 prefix의 잔여 object를 확인한다. migration DDL 권한과 browser CORS는 별도 검증한다.
+6. DB backup과 checksum을 확인한다. 빈 격리 DB restore를 먼저 검증한다.
+7. `node scripts/deploy-production.mjs`는 digest/env/project/Compose만 검사한다. single-server 선택 시 `--local-infra`를 붙인다. 실제 승인 후 `--apply`를 붙이면 pull→선택한 인프라→storage TLS proxy→이미지 안의 network preflight→기존 API/worker/renderer/web stop 및 drain→migration→새 API/worker/renderer/web readiness→proxy 순서로 진행한다. 실패하면 즉시 중단한다. migration 전에는 유지보수 중단 시간이 발생한다. migration 실패 뒤에는 기존 앱을 자동 재시작하지 않고 중단 상태에서 원인과 DB 상태를 확인한다. 기존 bucket·DNS/TLS는 준비되어 있어야 한다. 운영 startup에서도 preflight 설정 계약을 강제한다.
+8. API `/api/health`, `/api/ready`, worker/renderer 내부 `:3002/ready`, web 및 브라우저 인증/미디어를 확인한다. worker readiness는 BullMQ 실행/일시정지 여부와 Redis PING을 검사한다. 렌더 작업이 오래 걸린다는 이유만으로 실패하지 않는다. 큐 정체·DB/storage 장애는 별도 운영 상태·알림/외부 모니터로 확인한다.
+9. Fake canary는 **별도 staging**, `STAGING_FAKE_CANARY=true`, Fake AI/OAuth/analytics와 fixture로만 실행한다. 결과는 `STAGING_FAKE_CANARY`이며 production 검증 증거가 아니다. 실제 Provider smoke·비공개 YouTube 업로드는 별도 승인을 받아 체크리스트 순서로 수행한다.
+
+렌더는 프로세스당 concurrency 1이며 일반 worker와 큐를 분리한다. 기본 renderer 메모리 상한 4GiB는 검토용 초기값이고 측정된 운영 용량이 아니다. peak RSS, 영상당 시간/임시 디스크, 동시 큐 깊이, 업로드 object 크기, 로그·DB·Redis 증가량을 staging에서 측정한다. 로그는 파일당 10MiB×5로 회전한다. 정상 임시 파일은 작업 종료 시 정리하며 프로세스 crash 뒤 render-temp의 잔여 폴더를 실행 중 작업과 대조한다. 20분 drain window 안에 완료되지 않는 작업과 서버 강제 종료는 DB job/queue 복구 절차로 다룬다. volume/백업 보존·디스크 임계 알림은 운영자 책임이다.
 
 ## 3. App rollback과 DB forward-fix
 
 - app 오류이고 새 schema가 이전 app과 호환되면 네 이미지를 이전 digest로 되돌린다.
+- `20261013010000_scope_asset_checksum` 적용 후에는 전역 checksum unique 계약을 사용하는 19.8 이전 writer로 rollback하지 않는다. channel scope를 지원하는 호환 이미지 또는 forward-fix를 사용한다.
 - 적용된 migration을 파일 삭제나 수동 down SQL로 되돌리지 않는다. 데이터/호환성 문제가 있으면 쓰기를 중지하고 forward-fix migration을 검토·배포한다.
 - 새 schema가 이전 app과 호환되지 않으면 app rollback을 강행하지 말고 traffic 차단 후 forward-fix한다.
 - 게시 timeout이 모호하면 `PublishAttempt`, `PlatformPost`, provider status를 대조하기 전 재게시하지 않는다.

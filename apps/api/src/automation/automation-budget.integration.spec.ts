@@ -47,7 +47,7 @@ describe.skipIf(!enabled).sequential("automation budget isolation", () => {
     await expect(reserve(budget, automationRun.id, 2)).resolves.toBe("HARD_LIMIT");
   });
 
-  it("C: aggregates both channels for workspace budgets but only one for channel budgets", async () => {
+  it("C: enforces workspace and channel limits together", async () => {
     const a = await workspaceFixture("scope-comparison");
     await spend(a.channel1.id, 4);
     await spend(a.channel2.id, 5);
@@ -56,7 +56,7 @@ describe.skipIf(!enabled).sequential("automation budget isolation", () => {
     const workspaceRun = await run(a.channel1.id);
     const channelRun = await run(a.channel1.id);
     await expect(reserve(workspaceBudget, workspaceRun.id, 2)).resolves.toBe("HARD_LIMIT");
-    await expect(reserve(channelBudget, channelRun.id, 2, "INSTAGRAM")).resolves.toBe("RESERVED");
+    await expect(reserve(channelBudget, channelRun.id, 2, "INSTAGRAM")).resolves.toBe("HARD_LIMIT");
   });
 
   it("D: serializes concurrent reservations so only one can consume the remaining limit", async () => {
@@ -67,6 +67,20 @@ describe.skipIf(!enabled).sequential("automation budget isolation", () => {
     const results = await Promise.all([reserve(budget, first.id, 1), reserve(budget, second.id, 1)]);
     expect(results.sort()).toEqual(["HARD_LIMIT", "RESERVED"]);
     expect(await prisma.automationCostReservation.count({ where: { automationRunId: { in: [first.id, second.id] } } })).toBe(1);
+  });
+
+  it("rechecks the budget when retrying a released reservation", async () => {
+    const a = await workspaceFixture("released-retry");
+    const budget = await prisma.automationBudget.create({ data: { workspaceId: a.workspace.id, dailyHardLimit: 2, monthlyHardLimit: 2, currency: "USD" } });
+    const first = await run(a.channel1.id);
+    expect(await reserve(budget, first.id, 1)).toBe("RESERVED");
+    const reservation = await prisma.automationCostReservation.findFirstOrThrow({ where: { automationRunId: first.id } });
+    await prisma.$transaction([prisma.automationCostReservation.update({ where: { id: reservation.id }, data: { releasedAt: new Date() } }), prisma.automationRun.update({ where: { id: first.id }, data: { budgetReserved: 0 } })]);
+    await spend(a.channel1.id, 1.5);
+    expect(await reserve(budget, first.id, 1)).toBe("HARD_LIMIT");
+    expect(await reserve(budget, first.id, 0.4)).toBe("RESERVED");
+    expect((await prisma.automationRun.findUniqueOrThrow({ where: { id: first.id } })).budgetReserved.toNumber()).toBe(0.4);
+    expect(await reserve(budget, first.id, 0.4)).toBe("EXISTING");
   });
 
   it("keeps currencies separate and fails closed for an unattributed ledger entry", async () => {

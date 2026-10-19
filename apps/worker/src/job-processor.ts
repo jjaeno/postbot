@@ -1,3 +1,4 @@
+import { AmbiguousPublishError } from "@postbot/publishers";
 import type { Prisma, PrismaClient } from "@postbot/database";
 import type { EnqueueJobInput } from "@postbot/jobs";
 import { AssetPreparationJobPayloadSchema, CollectAutomationJobPayloadSchema, PolicyAutomationJobPayloadSchema, RenderJobPayloadSchema, ScriptGenerationJobPayloadSchema, TtsPreparationJobPayloadSchema } from "@postbot/contracts";
@@ -169,6 +170,7 @@ export class DeterministicJobProcessor {
         return;
       } catch (error) {
         const message = error instanceof Error ? error.message : "SCRIPT_GENERATION_FAILED";
+        if (message === "AMBIGUOUS_LLM_CALL_RECONCILIATION_REQUIRED") { await this.needsReview(input.id, attemptNumber, { reconciliationRequired: true }, message); return; }
         await this.fail(input.id, attemptNumber, "SCRIPT_GENERATION_FAILED", message);
         throw error;
       }
@@ -185,6 +187,7 @@ export class DeterministicJobProcessor {
         return;
       } catch (error) {
         const message = error instanceof Error ? error.message : "ASSET_PREPARATION_FAILED";
+        if (message === "AMBIGUOUS_MEDIA_CALL_RECONCILIATION_REQUIRED") { await this.needsReview(input.id, attemptNumber, { reconciliationRequired: true }, message); return; }
         await this.fail(input.id, attemptNumber, "ASSET_PREPARATION_FAILED", message);
         throw error;
       }
@@ -192,10 +195,13 @@ export class DeterministicJobProcessor {
 
     if (input.type === "TTS" && TtsPreparationJobPayloadSchema.safeParse(input.payload).success) {
       try {
-        await this.succeed(input.id, attemptNumber, await this.assetPreparation.processTts(input.payload, input.id));
+        const result = await this.assetPreparation.processTts(input.payload, input.id);
+        if (result.needsReview === true) { await this.needsReview(input.id, attemptNumber, result); return; }
+        await this.succeed(input.id, attemptNumber, result);
         return;
       } catch (error) {
         const message = error instanceof Error ? error.message : "TTS_PREPARATION_FAILED";
+        if (message === "AMBIGUOUS_MEDIA_CALL_RECONCILIATION_REQUIRED") { await this.needsReview(input.id, attemptNumber, { reconciliationRequired: true }, message); return; }
         await this.fail(input.id, attemptNumber, "TTS_PREPARATION_FAILED", message);
         throw error;
       }
@@ -223,7 +229,10 @@ export class DeterministicJobProcessor {
         const published = await this.publish.process(input.payload);
         const analytics = automationRunId(input.payload) ? await this.syncAnalyticsAfterPublish(input.payload).catch((error: unknown) => ({ error: error instanceof Error ? error.message : "ANALYTICS_SYNC_FAILED" })) : null;
         await this.succeed(input.id, attemptNumber, { ...published, ...(analytics ? { analytics } : {}) }); return;
-      } catch (error) { const message = error instanceof Error ? error.message : "PUBLISH_FAILED"; await this.fail(input.id, attemptNumber, "PUBLISH_FAILED", message); throw error; }
+       } catch (error) {
+        if (error instanceof AmbiguousPublishError) { await this.needsReview(input.id, attemptNumber, { reconciliationRequired: true, externalOperationId: error.externalOperationId }, "AMBIGUOUS_PUBLISH_RECONCILIATION_REQUIRED"); return; }
+        const message = error instanceof Error ? error.message : "PUBLISH_FAILED"; await this.fail(input.id, attemptNumber, "PUBLISH_FAILED", message); throw error;
+      }
     }
     if (input.type === "ANALYTICS") {
       try { await this.succeed(input.id, attemptNumber, await this.analytics.process(input.payload)); return; } catch (error) { const message = error instanceof Error ? error.message : "ANALYTICS_SYNC_FAILED"; await this.fail(input.id, attemptNumber, "ANALYTICS_SYNC_FAILED", message); throw error; }
@@ -251,6 +260,7 @@ export class DeterministicJobProcessor {
 
   private async start(jobId: string): Promise<number | "completed" | null> {
     return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM production_jobs WHERE id = ${jobId} FOR UPDATE`;
       const record = await tx.productionJob.findUnique({
         where: { id: jobId },
         include: { attempts: { orderBy: { attemptNumber: "desc" }, take: 1 } }
@@ -379,10 +389,10 @@ export class DeterministicJobProcessor {
     const usage = release ? null : await this.prisma.providerUsage.aggregate({ where: { productionJobId: jobId }, _sum: { actualCost: true } });
     const actual = usage?._sum.actualCost;
     const now = new Date();
-    await this.prisma.$transaction([
-      this.prisma.automationCostReservation.update({ where: { id: reservation.id }, data: actual ? { settledAt: now } : { releasedAt: now } }),
-      this.prisma.automationRun.update({ where: { id: runId }, data: { budgetReserved: { decrement: reservation.amount }, ...(actual ? { budgetActual: { increment: actual } } : {}) } })
-    ]);
+    await this.prisma.$transaction(async (tx) => {
+      const claimed = await tx.automationCostReservation.updateMany({ where: { id: reservation.id, releasedAt: null, settledAt: null }, data: actual ? { settledAt: now } : { releasedAt: now } });
+      if (claimed.count === 1) await tx.automationRun.update({ where: { id: runId }, data: { budgetReserved: { decrement: reservation.amount }, ...(actual ? { budgetActual: { increment: actual } } : {}) } });
+    });
   }
 
   private async markAutomationStepRunning(jobId: string, attemptNumber: number): Promise<void> {
@@ -402,10 +412,11 @@ export class DeterministicJobProcessor {
       result: result as Prisma.InputJsonObject,
       finishedAt: new Date(),
       errorCode,
-      errorMessage: errorCode === "POLICY_REVIEW_REQUIRED" ? "Policy findings require manual review." : "Asset license requires manual review."
+      errorMessage: errorCode === "AMBIGUOUS_PUBLISH_RECONCILIATION_REQUIRED" ? "Publication outcome requires reconciliation before retry; no automatic re-upload." : result.reconciliationRequired === true ? "Provider call outcome and billing require reconciliation before retry; no automatic paid retry." : errorCode === "POLICY_REVIEW_REQUIRED" ? "Policy findings require manual review." : "Asset license requires manual review."
     });
-    const job = await this.prisma.productionJob.findUnique({ where: { id: jobId }, select: { payload: true } });
+    const job = await this.prisma.productionJob.findUnique({ where: { id: jobId }, select: { payload: true, type: true } });
     const runId = job ? automationRunId(job.payload as Record<string, unknown>) : null;
+    if (runId && job && result.reconciliationRequired !== true) await this.settleReservation(runId, jobId, job.type, false);
     if (runId) await this.prisma.$transaction([
       this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "HELD", attemptCount: attemptNumber, output: result as Prisma.InputJsonObject, errorCode, errorMessage: "Manual review is required.", finishedAt: new Date() } }),
       this.prisma.automationRun.updateMany({ where: { id: runId, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "RUNNING", pausedReason: null, heartbeatAt: new Date(), nextRunAt: new Date() } })

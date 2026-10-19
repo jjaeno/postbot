@@ -1,0 +1,15 @@
+{$POSTBOT_DOMAIN} {
+  handle_path /api/* {
+    reverse_proxy api:3000 {
+      flush_interval -1
+    }
+  }
+  handle {
+    reverse_proxy web:5173
+  }
+}
+
+# Signed URLs must keep the external Host and canonical path unchanged.
+{$POSTBOT_STORAGE_DOMAIN} {
+  reverse_proxy {$POSTBOT_STORAGE_UPSTREAM}
+}

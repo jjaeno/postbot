@@ -45,3 +45,7 @@
 - `pnpm --filter @postbot/database test`
 
 `db:reset:test`는 `DATABASE_URL`의 DB 이름에 `_test`를 붙인 테스트 DB를 생성하고 migration reset을 수행한다.
+
+## 2026-10-13 자산 checksum 범위 보완
+
+`Asset.dedupScope`는 채널 ID이며 의도적인 공통 library는 `global`이다. 실제 파일 SHA-256은 변형하지 않고 `(dedupScope, checksumSha256)` UNIQUE로 같은 채널의 중복만 제거한다. migration `20261013010000_scope_asset_checksum`은 기존 행의 channelId로 범위를 채우고 기존 자산/사용/증빙 참조를 보존한다. 과거 전역 중복 제거로 다른 채널 소유 자산을 참조한 이력은 자동으로 권리 승인하지 않는다. 게시 gate에서 소유권을 거절하며 운영 전에 해당 참조를 검사하고 해당 채널의 독립 에셋/증빙으로 재등록한다.

@@ -14,6 +14,8 @@
     "backup:verify": "node scripts/verify-mysql-backup.mjs",
     "backup:restore": "node --env-file=.env scripts/restore-mysql.mjs",
     "recover:queues": "pnpm --filter @postbot/worker recover:queues",
+    "preflight": "node apps/worker/dist/preflight.js",
+    "smoke:provider": "node apps/worker/dist/provider-smoke.js",
     "baseline:local": "node scripts/local-performance-baseline.mjs",
     "format": "prettier --write ."
   },

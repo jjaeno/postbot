@@ -8,14 +8,15 @@ import {
   type ScriptGenerationJobPayload
 } from "@postbot/contracts";
 import { Prisma, type PrismaClient } from "@postbot/database";
-import { FakeLlmProvider, OpenAiLlmProvider, type LlmProvider } from "@postbot/providers";
+import { FakeLlmProvider, FakeStorageProvider, OpenAiLlmProvider, type LlmGenerationRequest, type LlmGenerationResult, type LlmProvider } from "@postbot/providers";
 import { AudioStyleSchema, SceneDocumentSchema, VideoStyleSchema, type SceneDocument } from "@postbot/scene-schema";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { assignProductionExperiment } from "@postbot/optimization";
-import { readAssetUsagePurpose, sceneAssetUsageKey } from "@postbot/asset-library";
+import { AssetRepository, readAssetUsagePurpose, sceneAssetUsageKey } from "@postbot/asset-library";
 
 const promptVersion = "script-scene-v1";
+const LlmSnapshotSchema = z.object({ provider: z.string(), idempotencyKey: z.string(), createdAt: z.string(), model: z.string(), promptVersion: z.string(), structuredOutput: z.json(), usage: z.object({ promptTokens: z.number().int().nonnegative(), completionTokens: z.number().int().nonnegative(), totalTokens: z.number().int().nonnegative() }), estimatedCostUsd: z.string() });
 
 const StructuredGenerationSchema = z.object({
   planning: z.object({ title: z.string().min(1).max(255), summary: z.string().min(1).max(2000), metadata: GeneratedMetadataSchema }),
@@ -43,7 +44,7 @@ export class ScriptGenerationProcessor {
     if (prior) return prior;
     if (input.generation.request.partial === "voice" || input.generation.request.partial === "subtitle") return this.reuseVersion(jobId, input.generation);
 
-    const generated = await this.generate(input.generation);
+    const generated = await this.generate(jobId, input.generation);
     return this.save(jobId, input.generation.idea, input.generation.request, generated);
   }
 
@@ -77,16 +78,58 @@ export class ScriptGenerationProcessor {
     });
   }
 
-  private async generate(input: ScriptGenerationJobPayload["generation"]): Promise<GeneratedWithUsage> {
-    const config = loadConfig();
-    const experiment = await this.prisma.$transaction(async (tx) => {
-      const content = await tx.contentItem.upsert({ where: { channelId_topicKey: { channelId: input.idea.channelId, topicKey: `idea:${input.idea.id}` } }, create: { channelId: input.idea.channelId, topicKey: `idea:${input.idea.id}`, title: input.idea.title, status: "GENERATING" }, update: {} });
-      return input.request.partial === "full" ? assignProductionExperiment(tx, input.idea.channelId, content.id, input.request.platform ?? undefined) : null;
+  private async journaledGenerate(jobId: string, request: LlmGenerationRequest, provider: LlmProvider): Promise<LlmGenerationResult> {
+    const key = request.idempotencyKey;
+    const cached = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM production_jobs WHERE id = ${jobId} FOR UPDATE`;
+      const job = await tx.productionJob.findUniqueOrThrow({ where: { id: jobId } });
+      const payload = jsonObject(job.payload);
+      const attempts = jsonObject(payload._llmAttempts ?? null);
+      const previous = jsonObject(attempts[key] ?? null);
+      const snapshot = LlmSnapshotSchema.safeParse(previous.response);
+      if (snapshot.success) return snapshot.data;
+      if (previous.state === "STARTED") throw new Error("AMBIGUOUS_LLM_CALL_RECONCILIATION_REQUIRED");
+      await tx.productionJob.update({ where: { id: jobId }, data: { payload: { ...payload, _llmAttempts: { ...attempts, [key]: { state: "STARTED" } } } } });
+      return null;
     });
+    if (cached) return cached;
+    try {
+      const response = LlmSnapshotSchema.parse(await provider.generateScriptAndScene(request));
+      await this.updateLlmJournal(jobId, key, { state: "COMPLETED", response });
+      return response;
+    } catch (error) {
+      // A definite 4xx rejection may be retried according to provider policy.
+      // A timeout, incomplete response or interrupted DB write can have incurred
+      // a charge: retain STARTED and require reconciliation before another call.
+      if (error instanceof Error && /status 4\d\d\./.test(error.message)) { await this.updateLlmJournal(jobId, key, { state: "REJECTED" }); throw error; }
+      throw new Error("AMBIGUOUS_LLM_CALL_RECONCILIATION_REQUIRED");
+    }
+  }
+
+  private async updateLlmJournal(jobId: string, key: string, value: Prisma.InputJsonObject): Promise<void> {
+    await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM production_jobs WHERE id = ${jobId} FOR UPDATE`;
+      const job = await tx.productionJob.findUniqueOrThrow({ where: { id: jobId } });
+      const payload = jsonObject(job.payload);
+      await tx.productionJob.update({ where: { id: jobId }, data: { payload: { ...payload, _llmAttempts: { ...jsonObject(payload._llmAttempts ?? null), [key]: value } } } });
+    });
+  }
+
+  private async generate(jobId: string, input: ScriptGenerationJobPayload["generation"]): Promise<GeneratedWithUsage> {
+    const config = loadConfig();
+    if (config.LLM_PROVIDER === "openai" && (config.LLM_INPUT_USD_PER_MILLION_TOKENS <= 0 || config.LLM_OUTPUT_USD_PER_MILLION_TOKENS <= 0)) throw new Error("LLM_PRICING_REQUIRED");
+    const context = await this.prisma.$transaction(async (tx) => {
+      const content = await tx.contentItem.upsert({ where: { channelId_topicKey: { channelId: input.idea.channelId, topicKey: `idea:${input.idea.id}` } }, create: { channelId: input.idea.channelId, topicKey: `idea:${input.idea.id}`, title: input.idea.title, status: "GENERATING" }, update: {} });
+      const experiment = input.request.partial === "full" ? await assignProductionExperiment(tx, input.idea.channelId, content.id, input.request.platform ?? undefined) : null;
+      return { experiment, contentItemId: content.id };
+    });
+    const experiment = context.experiment;
     const provider: LlmProvider = config.LLM_PROVIDER === "openai"
       ? new OpenAiLlmProvider({ apiKey: config.OPENAI_API_KEY, baseUrl: config.OPENAI_BASE_URL, timeoutMs: config.LLM_TIMEOUT_MS, inputUsdPerMillionTokens: config.LLM_INPUT_USD_PER_MILLION_TOKENS, outputUsdPerMillionTokens: config.LLM_OUTPUT_USD_PER_MILLION_TOKENS })
       : new FakeLlmProvider();
     let lastError: unknown;
+    let knownCost = new Prisma.Decimal(0);
+    const knownUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     for (let attempt = 1; attempt <= config.LLM_MAX_RETRIES + 1; attempt += 1) {
       try {
         const channel = await this.prisma.channel.findUnique({
@@ -116,23 +159,30 @@ export class ScriptGenerationProcessor {
           strategy: experiment?.strategy ?? (Object.keys(strategy).length > 0 ? strategy : null),
           experiment: experiment ? { experimentId: experiment.experimentId, arm: experiment.arm, assignmentKey: experiment.assignmentKey } : null
         };
-        const response = await provider.generateScriptAndScene({
+        const request: LlmGenerationRequest = {
           model: config.LLM_MODEL, promptVersion, idempotencyKey: `${input.request.idempotencyKey}:attempt:${attempt}`,
           title: input.idea.title, summary: input.idea.summary, topic: input.idea.topic, platform: input.request.platform,
           partial: input.request.partial, sources: [{ title: input.idea.title, summary: input.idea.summary, url: input.idea.canonicalUrl }],
           channelContext: generationContext
-        });
+        };
+        const response = config.LLM_PROVIDER === "openai" ? await this.journaledGenerate(jobId, request, provider) : await provider.generateScriptAndScene(request);
+        if (config.LLM_PROVIDER === "openai") {
+          try { await new AssetRepository(this.prisma, new FakeStorageProvider()).recordProviderCost({ contentItemId: context.contentItemId, productionJobId: jobId, provider: "openai", model: response.model, operation: "script-generation-attempt", quantity: response.usage.totalTokens, unit: "token", category: "llm", estimatedCostUsd: response.estimatedCostUsd, idempotencyKey: `script-attempt-cost:${jobId}:${attempt}` }); } catch { throw new Error("AMBIGUOUS_LLM_CALL_RECONCILIATION_REQUIRED"); }
+        }
+        knownCost = knownCost.plus(response.estimatedCostUsd);
+        knownUsage.promptTokens += response.usage.promptTokens; knownUsage.completionTokens += response.usage.completionTokens; knownUsage.totalTokens += response.usage.totalTokens;
         const structured = this.parse(response.structuredOutput, input.idea);
         if (experiment && (Math.abs(structured.script.durationSeconds - experiment.strategy.durationSeconds) > 1 || Math.abs(structured.sceneDocument.durationInFrames / structured.sceneDocument.fps - experiment.strategy.durationSeconds) > 1)) throw new Error("EXPERIMENT_DURATION_NOT_APPLIED");
         structured.sceneDocument.style = VideoStyleSchema.parse({ ...visual, captionColor: subtitle.color, captionBackground: subtitle.backgroundColor, captionFontSize: subtitle.fontSize, watermark: typeof visual.watermark === "string" ? visual.watermark : channel?.name ?? "Postbot" });
         structured.sceneDocument.aiStockRatio = template?.aiStockRatio.toNumber() ?? 1;
         if (visual.audio) structured.sceneDocument.audio = AudioStyleSchema.parse(visual.audio);
-        return { ...structured, model: response.model, usage: response.usage, estimatedCostUsd: response.estimatedCostUsd, generationContext, strategyVersion: channel?.strategyVersions[0]?.version ?? null };
+        return { ...structured, model: response.model, usage: config.LLM_PROVIDER === "openai" ? knownUsage : response.usage, estimatedCostUsd: config.LLM_PROVIDER === "openai" ? knownCost.toFixed(6) : response.estimatedCostUsd, generationContext, strategyVersion: channel?.strategyVersions[0]?.version ?? null };
       } catch (error) {
         lastError = error;
+        if (error instanceof Error && error.message === "AMBIGUOUS_LLM_CALL_RECONCILIATION_REQUIRED") break;
       }
     }
-    await this.prisma.contentItem.updateMany({ where: { channelId: input.idea.channelId, topicKey: `idea:${input.idea.id}`, status: "GENERATING", scriptVersions: { none: {} } }, data: { status: "FAILED" } });
+    await this.prisma.contentItem.updateMany({ where: { channelId: input.idea.channelId, topicKey: `idea:${input.idea.id}`, status: "GENERATING", scriptVersions: { none: {} } }, data: { status: lastError instanceof Error && lastError.message === "AMBIGUOUS_LLM_CALL_RECONCILIATION_REQUIRED" ? "REVIEW_REQUIRED" : "FAILED" } });
     throw lastError instanceof Error ? lastError : new Error("LLM_GENERATION_FAILED");
   }
 
@@ -171,11 +221,12 @@ export class ScriptGenerationProcessor {
           const latestScene = await tx.sceneVersion.findFirst({ where: { contentItemId: contentItem.id, platform: request.platform }, orderBy: { version: "desc" } });
           const merged = this.merge(request.partial, generated, latestScript, latestScene);
           const version = (latestScript?.version ?? 0) + 1;
-          const scriptVersion = await tx.scriptVersion.create({ data: { contentItemId: contentItem.id, version, platform: request.platform, ...merged.script, durationSeconds: new Prisma.Decimal(merged.script.durationSeconds.toFixed(3)), promptVersion, qualitySnapshot: { metadata: merged.metadata, facts: merged.facts, model: generated.model, generationContext: generated.generationContext, strategyVersion: generated.strategyVersion } } });
+          const scriptVersion = await tx.scriptVersion.create({ data: { contentItemId: contentItem.id, version, platform: request.platform, ...merged.script, durationSeconds: new Prisma.Decimal(merged.script.durationSeconds.toFixed(3)), promptVersion, qualitySnapshot: { metadata: merged.metadata, facts: merged.facts, provider: configProviderName(), model: generated.model, generationContext: generated.generationContext, strategyVersion: generated.strategyVersion } } });
           const sceneVersion = await tx.sceneVersion.create({ data: { contentItemId: contentItem.id, scriptVersionId: scriptVersion.id, version, platform: request.platform, schemaVersion: merged.sceneDocument.schemaVersion, sceneDocument: merged.sceneDocument, durationSeconds: new Prisma.Decimal(merged.script.durationSeconds.toFixed(3)) } });
           const result = { contentItemId: contentItem.id, scriptVersionId: scriptVersion.id, sceneVersionId: sceneVersion.id, version };
-          const usage = await tx.providerUsage.create({ data: { contentItemId: contentItem.id, productionJobId: jobId, provider: configProviderName(), model: generated.model, operation: "script-scene-generation", quantity: new Prisma.Decimal(generated.usage.totalTokens), unit: "token", estimatedCost: new Prisma.Decimal(generated.estimatedCostUsd), idempotencyKey: `script-job:${jobId}`, providerResponse: result } });
-          await tx.costLedger.create({ data: { contentItemId: contentItem.id, providerUsageId: usage.id, direction: "ESTIMATED", category: "llm", amount: new Prisma.Decimal(generated.estimatedCostUsd), note: `model:${generated.model}` } });
+          const real = configProviderName() === "openai";
+          const usage = await tx.providerUsage.create({ data: { contentItemId: contentItem.id, productionJobId: jobId, provider: configProviderName(), model: generated.model, operation: "script-scene-generation", quantity: new Prisma.Decimal(real ? 0 : generated.usage.totalTokens), unit: real ? "logical-result" : "token", estimatedCost: new Prisma.Decimal(real ? 0 : generated.estimatedCostUsd), idempotencyKey: `script-job:${jobId}`, providerResponse: { ...result, usage: generated.usage, billingBasis: "configured-unit-rates" } } });
+          if (!real) await tx.costLedger.create({ data: { contentItemId: contentItem.id, providerUsageId: usage.id, direction: "ESTIMATED", category: "llm", amount: new Prisma.Decimal(generated.estimatedCostUsd), note: `model:${generated.model}` } });
           await tx.contentIdea.update({ where: { id: idea.id }, data: { status: "USED", usedContentItemId: contentItem.id } });
           await tx.contentItem.update({ where: { id: contentItem.id }, data: { status: "REVIEW_REQUIRED" } });
           return result;
@@ -207,7 +258,7 @@ export class ScriptGenerationProcessor {
 
   private readResult(value: Prisma.JsonValue | null): GenerationResult | null {
     const record = jsonObject(value);
-    return typeof record.contentItemId === "string" && typeof record.scriptVersionId === "string" && typeof record.sceneVersionId === "string" && typeof record.version === "number" ? record as GenerationResult : null;
+    return typeof record.contentItemId === "string" && typeof record.scriptVersionId === "string" && typeof record.sceneVersionId === "string" && typeof record.version === "number" ? { contentItemId: record.contentItemId, scriptVersionId: record.scriptVersionId, sceneVersionId: record.sceneVersionId, version: record.version } : null;
   }
 
   private isRetryableConflict(error: unknown): boolean {

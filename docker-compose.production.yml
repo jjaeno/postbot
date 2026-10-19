@@ -1,66 +1,93 @@
+# POSTBOT_ENV_FILE is a secret-manager-rendered 0600 file on tmpfs, outside the repo.
+# Digest references are supplied via the shell or a non-secret release manifest.
+x-app: &app
+  env_file: ${POSTBOT_ENV_FILE:?Set an absolute secret-manager environment file path}
+  restart: unless-stopped
+  init: true
+  stop_grace_period: 20m
+  logging:
+    driver: json-file
+    options: { max-size: 10m, max-file: "5" }
+
 services:
   migrate:
-    build:
-      context: .
-      target: build
+    image: ${POSTBOT_MIGRATE_IMAGE:?Set immutable build-target image digest}
+    env_file: ${POSTBOT_ENV_FILE:?Set environment file path}
     user: node
-    env_file: .env
     command: [./packages/database/node_modules/.bin/prisma, migrate, deploy, --schema, packages/database/prisma/schema.prisma]
     restart: "no"
   api:
-    build:
-      context: .
-      args: { APP: api }
-    env_file: .env
+    <<: *app
+    image: ${POSTBOT_API_IMAGE:?Set immutable API image digest}
     command: node dist/main.js
-    ports: ["3000:3000"]
     depends_on:
       migrate: { condition: service_completed_successfully }
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          'node -e "fetch(''http://127.0.0.1:3000/ready'').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"'
-        ]
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
       timeout: 5s
       retries: 5
   worker:
-    build:
-      context: .
-      args: { APP: worker }
-    env_file: .env
+    <<: *app
+    image: ${POSTBOT_WORKER_IMAGE:?Set immutable worker image digest}
     command: node dist/main.js
+    depends_on:
+      migrate: { condition: service_completed_successfully }
     environment:
       WORKER_QUEUES: collect,script,asset,tts,policy,publish,analytics
       MAINTENANCE_WORKER_ENABLED: "true"
     healthcheck:
-      test: ["CMD-SHELL", "node -e \"process.exit(0)\""]
-      interval: 30s
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3002/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
       timeout: 5s
       retries: 3
+      start_period: 30s
   renderer:
-    build:
-      context: .
-      args: { APP: renderer }
-    env_file: .env
+    <<: *app
+    image: ${POSTBOT_RENDERER_IMAGE:?Set immutable renderer image digest}
+    command: node dist/main.js
+    depends_on:
+      migrate: { condition: service_completed_successfully }
     environment:
       WORKER_QUEUES: render
       MAINTENANCE_WORKER_ENABLED: "false"
+    # One render job per process. Measure peak RSS/tmp use before increasing.
+    mem_limit: ${RENDER_MEMORY_LIMIT:-4g}
+    shm_size: 512m
+    volumes: [render-temp:/tmp]
     healthcheck:
-      test: ["CMD-SHELL", "ffmpeg -version >/dev/null"]
-      interval: 30s
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3002/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
       timeout: 5s
       retries: 3
+      start_period: 30s
   web:
-    build:
-      context: .
-      args: { APP: web }
-    env_file: .env
+    <<: *app
+    image: ${POSTBOT_WEB_IMAGE:?Set immutable web image digest}
     command: node scripts/serve.mjs
-    ports: ["5173:5173"]
+    environment:
+      WEB_PORT: "5173"
     healthcheck:
-      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:5173').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:5173').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
       timeout: 5s
       retries: 5
+  proxy:
+    image: ${POSTBOT_PROXY_IMAGE:?Set reviewed Caddy image digest}
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      POSTBOT_DOMAIN: ${POSTBOT_DOMAIN:?Set public app DNS name}
+      POSTBOT_STORAGE_DOMAIN: ${POSTBOT_STORAGE_DOMAIN:?Set public S3/MinIO DNS name}
+      POSTBOT_STORAGE_UPSTREAM: ${POSTBOT_STORAGE_UPSTREAM:?Set S3/MinIO upstream host and port}
+    volumes:
+      - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
+      - proxy-data:/data
+      - proxy-config:/config
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: "5" }
+volumes:
+  render-temp:
+  proxy-data:
+  proxy-config:

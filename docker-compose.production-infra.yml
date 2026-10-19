@@ -1,0 +1,39 @@
+# Optional single-server dependencies. Choose these deliberately; no host ports.
+# Start with production.yml under a distinct -p for staging and production.
+services:
+  mysql:
+    image: ${POSTBOT_MYSQL_IMAGE:?Set reviewed MySQL 8.4 digest}
+    env_file: ${POSTBOT_ENV_FILE:?Set environment file path}
+    environment: { TZ: UTC }
+    restart: unless-stopped
+    volumes: [mysql-data:/var/lib/mysql]
+    healthcheck:
+      test: [CMD-SHELL, "mysqladmin ping -h 127.0.0.1 --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    logging: { driver: json-file, options: { max-size: 10m, max-file: "5" } }
+  redis:
+    image: ${POSTBOT_REDIS_IMAGE:?Set reviewed Redis 7.4 digest}
+    command: [redis-server, --appendonly, "yes", --appendfsync, everysec, --maxmemory-policy, noeviction]
+    restart: unless-stopped
+    volumes: [redis-data:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: { driver: json-file, options: { max-size: 10m, max-file: "5" } }
+  minio:
+    image: ${POSTBOT_MINIO_IMAGE:?Set reviewed MinIO digest}
+    env_file: ${POSTBOT_ENV_FILE:?Set environment file path}
+    command: [server, /data]
+    restart: unless-stopped
+    volumes: [minio-data:/data]
+    # The readiness endpoint is checked from the host/proxy; images differ in
+    # available HTTP clients. The deployment preflight verifies actual S3 access.
+    logging: { driver: json-file, options: { max-size: 10m, max-file: "5" } }
+volumes:
+  mysql-data:
+  redis-data:
+  minio-data:

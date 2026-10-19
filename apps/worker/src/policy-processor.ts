@@ -23,7 +23,7 @@ export class PolicyProcessor {
       sourceReferences: true,
       assetUsages: {
         where: currentScene ? { sceneVersionId: currentScene.id } : { id: { in: [] } },
-        include: { asset: { include: { licenses: { orderBy: { checkedAt: "desc" }, take: 1 } } } }
+        include: { asset: { include: { licenses: { orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 1 } } } }
       },
       scriptVersions: { where: { platform: input.platform }, orderBy: { version: "desc" }, take: 1 }
     } });
@@ -42,7 +42,7 @@ export class PolicyProcessor {
     const maximumSimilarity = item.channel.contentItems.reduce((maximum, other) => Math.max(maximum, similarity(script?.body ?? "", other.scriptVersions[0]?.body ?? "")), 0);
     const evaluation = evaluatePolicy(rule, {
       durationSeconds: script?.durationSeconds?.toNumber() ?? null, description, factsHaveSources: allFactsLinked,
-      hasAiDisclosure: /(?:ai|인공지능)\s*(?:생성|generated|사용)/i.test(description), assetsVerified: licenses.length > 0 && licenses.every((license) => license?.status === "VERIFIED"),
+      hasAiDisclosure: /(?:ai|인공지능)\s*(?:생성|generated|사용)/i.test(description), assetsVerified: licenses.length > 0 && licenses.every((license) => license?.status === "VERIFIED" && license.derivativeAllowed && (!license.validFrom || license.validFrom <= new Date()) && (!license.validUntil || license.validUntil > new Date())),
       commercialUseVerified: licenses.length > 0 && licenses.every((license) => license?.commercialUseAllowed === true), sourceCount: item.sourceReferences.length,
       minimumSourceReliability: item.sourceReferences.length > 0 ? Math.min(...item.sourceReferences.map((source) => source.reliabilityScore?.toNumber() ?? 0)) : null,
       conflictingSources: item.sourceReferences.some((source) => object(source.normalizedSnapshot ?? {}).conflicting === true), duplicateRisk: maximumSimilarity >= 0.75 || item.duplicateGroupKey !== null,

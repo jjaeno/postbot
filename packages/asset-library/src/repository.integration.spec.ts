@@ -1,11 +1,30 @@
 import { PrismaClient } from "@postbot/database";
-import { FakeStorageProvider } from "@postbot/providers";
-import { afterAll, describe, expect, it } from "vitest";
-import { AssetRepository } from "./index.js";
+import { FakeImageProvider, FakeStorageProvider, FakeTtsProvider } from "@postbot/providers";
+import { afterAll, describe, expect, it, vi } from "vitest";
+import { AssetPreparationService, AssetRepository } from "./index.js";
 const run = process.env.RUN_DB_INTEGRATION === "1" ? describe : describe.skip;
 const prisma = new PrismaClient();
 run("asset repository", () => {
   afterAll(async () => prisma.$disconnect());
+  it("reuses speech and timings after rights approval without another paid call", async () => {
+    const key = crypto.randomUUID();
+    const user = await prisma.user.create({ data: { email: `${key}@tts.test`, displayName: "Fixture", passwordHash: "fixture" } });
+    const workspace = await prisma.workspace.create({ data: { ownerId: user.id, name: "TTS", slug: key } });
+    const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "TTS", slug: key } });
+    const content = await prisma.contentItem.create({ data: { channelId: channel.id, title: "TTS", topicKey: key } });
+    const scene = await prisma.sceneVersion.create({ data: { contentItemId: content.id, version: 1, schemaVersion: "1.0.0", sceneDocument: {} } });
+    const assets = new AssetRepository(prisma, new FakeStorageProvider());
+    const tts = { synthesize: vi.fn(async (input: Parameters<FakeTtsProvider["synthesize"]>[0]) => ({ ...await new FakeTtsProvider().synthesize(input), provider: "mock-real-tts" })) };
+    const service = new AssetPreparationService(assets, new FakeImageProvider(), tts);
+    const input = { channelId: channel.id, contentItemId: content.id, sceneVersionId: scene.id, key, text: "한국어 타이밍 확인", voice: "fixture", model: "fixture", idempotencyKey: key };
+    const first = await service.prepareTts(input);
+    expect(first.needsReview).toBe(true);
+    await prisma.assetLicense.create({ data: { assetId: first.assetId, status: "VERIFIED", licenseName: "Reviewed", commercialUseAllowed: true, derivativeAllowed: true, proofUrl: "https://example.com/proof" } });
+    const reused = await service.prepareTts(input);
+    expect(reused).toMatchObject({ assetId: first.assetId, timings: first.timings, needsReview: false });
+    expect(tts.synthesize).toHaveBeenCalledTimes(1);
+    expect(await prisma.providerUsage.count({ where: { contentItemId: content.id } })).toBe(1);
+  });
   it("preserves usage lineage on fallback and rejects a subsequently revoked license", async () => {
     const suffix = crypto.randomUUID();
     const user = await prisma.user.create({ data: { email: `${suffix}@asset-lineage.test`, displayName: "Fixture", passwordHash: "fixture" } });

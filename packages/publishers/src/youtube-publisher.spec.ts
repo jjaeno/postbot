@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { AmbiguousPublishError, GoogleYouTubePublisherProvider } from "./index.js";
 import { FakeInstagramPublisherProvider, FakeTikTokPublisherProvider, FakeYouTubePublisherProvider, instagramPublishScope, tiktokPublishScope, youtubeUploadScope } from "./index.js";
 
 describe("FakeYouTubePublisherProvider", () => {
@@ -11,6 +12,22 @@ describe("FakeYouTubePublisherProvider", () => {
     const provider = new FakeYouTubePublisherProvider();
     expect(provider.capabilities.requiredScopes).toContain(youtubeUploadScope);
     await expect(provider.refreshAccessToken?.("refresh-token")).resolves.toMatchObject({ accessToken: "fake-refreshed-access-token" });
+  });
+});
+
+describe("YouTube upload safety", () => {
+  const input = { title: "Short", description: "Test", privacyStatus: "private" as const, publishAt: null, video: new Uint8Array([1]), idempotencyKey: "youtube-contract" };
+  it("holds ambiguous uploads after session creation", async () => {
+    const request = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(null, { status: 200, headers: { location: "https://upload.example/session" } })).mockRejectedValueOnce(new TypeError("fetch failed"));
+    const provider = new GoogleYouTubePublisherProvider("client", "secret", { fetchImplementation: request });
+    await expect(provider.upload(input, "token")).rejects.toBeInstanceOf(AmbiguousPublishError);
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+  it("rejects incompatible publishAt/privacy before starting an upload", async () => {
+    const request = vi.fn<typeof fetch>();
+    const provider = new GoogleYouTubePublisherProvider("client", "secret", { fetchImplementation: request });
+    await expect(provider.upload({ ...input, privacyStatus: "public", publishAt: "2099-01-01T00:00:00Z" }, "token")).rejects.toThrow("YOUTUBE_SCHEDULE_REQUIRES_FUTURE_PRIVATE_VIDEO");
+    expect(request).not.toHaveBeenCalled();
   });
 });
 

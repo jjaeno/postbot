@@ -1,5 +1,9 @@
 # Postbot v1 Acceptance Report
 
+## 2026-10-14 실제 운영 준비 보완 — 19.8
+
+현재 운영 준비 판정과 검증 결과는 [19.8 결과 문서](production-readiness-2026-10-13.md)를 기준으로 한다. 아래 과거 blocker 0/Fake 성공은 실제 AI 계약·권리·SNS 권한·HTTPS 배포가 완료됐다는 뜻이 아니다. 이번 단계에서 설정 사전 검사·유료 호출 재시도/비용·SNS 권한·자산 소유권·배포/worker 상태 검사 결함을 보완했으며, 실제 계정·호출/게시 승인·운영 환경 검증은 별도로 남아 있다.
+
 ## 2026-10-06 직접 UX 보완 — 19.4
 
 최종 판정: **PASS_WITH_EXTERNAL_VERIFICATION_PENDING**. [직접 UX 보완 결과](ux-remediation-2026-10-06.md)를 우선 확인한다. 실제 API 브라우저 점검 21개·page error 0, Playwright 18/18, API 96/96, worker 23/23, Fake 전체 여정 3/3, 변경 app/package lint·typecheck·build 및 실제 오디오 합성 4모드·기존/빈 DB migration을 통과했다. 신규 격리 전체 여정에서 DB deadlock 1회는 기존 재시도로 복구됐고 실패 attempt를 보존했다. production 이미지 재빌드/운영 배포/원격 CI/실 Provider·SNS는 이번 검증에 포함되지 않는다.

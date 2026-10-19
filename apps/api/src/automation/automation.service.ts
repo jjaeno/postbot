@@ -11,7 +11,7 @@ import {
   type Platform
 } from "@postbot/contracts";
 import { Prisma, type PrismaClient } from "@postbot/database";
-import { loadConfig } from "@postbot/config";
+import { assertPlatformEnabled, loadConfig } from "@postbot/config";
 import { JobsService } from "../jobs/jobs.service.js";
 import { OperationsService } from "../operations/operations.service.js";
 import { isCostStage } from "./automation-safety.js";
@@ -148,7 +148,9 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
       ...channel.outputProfiles.map((profile) => profile.platform),
       ...channel.platformAccounts.filter((account) => account.status === "CONNECTED").map((account) => account.platform)
     ])].sort();
-    const platforms = input.platforms ? [...new Set(input.platforms)].sort() : availablePlatforms;
+    const operationalPlatforms = availablePlatforms.filter((platform) => { try { assertPlatformEnabled(loadConfig(), platform); return true; } catch { return false; } });
+    const platforms = input.platforms ? [...new Set(input.platforms)].sort() : operationalPlatforms;
+    if (platforms.some((platform) => !operationalPlatforms.includes(platform))) throw new ConflictException("PLATFORM_DISABLED_OR_PUBLISHING_HELD");
     if (platforms.length === 0) throw new ConflictException("ACTIVE_OUTPUT_PLATFORM_REQUIRED");
     if (platforms.some((platform) => !availablePlatforms.includes(platform))) throw new ConflictException("REQUESTED_OUTPUT_PLATFORM_NOT_CONFIGURED");
     const policies = await this.policyProfiles();
@@ -457,31 +459,41 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
           : input.action === "kill"
             ? "KILL"
             : "RESUME";
-      await this.prisma.$transaction([
-        this.prisma.automationRun.update({
+      await this.prisma.$transaction(async (tx) => {
+        // Cancel unclaimed jobs before releasing their reservations. A worker
+        // that already claimed a paid job keeps its reservation until settlement.
+        await tx.productionJob.updateMany({
+          where: { automationSteps: { some: { automationRunId: run.id } }, status: input.action === "kill" ? { in: ["QUEUED", "RETRY_WAIT", "NEEDS_REVIEW"] } : { in: [] } },
+          data: { status: "CANCELLED", finishedAt: new Date() }
+        });
+        await tx.automationStep.updateMany({
+          where: { automationRunId: run.id, status: input.action === "kill" ? { in: ["PENDING", "QUEUED", "HELD"] } : "PENDING" },
+          data: { status: input.action === "kill" ? "CANCELLED" : "PENDING" }
+        });
+        let released = new Prisma.Decimal(0);
+        if (input.action === "kill") {
+          const unstarted = await tx.automationStep.findMany({
+            where: { automationRunId: run.id, productionJob: { is: { status: "CANCELLED", startedAt: null, attempts: { none: {} } } } },
+            select: { stage: true, platform: true }
+          });
+          const keys = unstarted.filter((step) => step.platform !== null).map((step) => `automation:${run.id}:${step.stage.toLowerCase()}:${step.platform!.toLowerCase()}:cost`);
+          const reservations = await tx.automationCostReservation.findMany({ where: { automationRunId: run.id, idempotencyKey: { in: keys }, releasedAt: null, settledAt: null } });
+          for (const reservation of reservations) {
+            const changed = await tx.automationCostReservation.updateMany({ where: { id: reservation.id, releasedAt: null, settledAt: null }, data: { releasedAt: new Date() } });
+            if (changed.count === 1) released = released.plus(reservation.amount);
+          }
+        }
+        await tx.automationRun.update({
           where: { id: run.id },
           data: {
             status,
             pausedReason: input.action === "resume" ? null : input.reason ?? input.action,
-            nextRunAt: input.action === "resume" ? new Date() : null
+            nextRunAt: input.action === "resume" ? new Date() : null,
+            budgetReserved: { decrement: released }
           }
-        }),
-        this.prisma.automationStep.updateMany({
-          where: { automationRunId: run.id, status: input.action === "kill" ? { in: ["PENDING", "QUEUED", "HELD"] } : "PENDING" },
-          data: { status: input.action === "kill" ? "CANCELLED" : "PENDING" }
-        }),
-        this.prisma.productionJob.updateMany({
-          where: { automationSteps: { some: { automationRunId: run.id } }, status: input.action === "kill" ? { in: ["QUEUED", "RETRY_WAIT", "NEEDS_REVIEW"] } : { in: [] } },
-          data: { status: "CANCELLED", finishedAt: new Date() }
-        }),
-        this.prisma.automationCostReservation.updateMany({
-          where: { automationRunId: run.id, releasedAt: null, settledAt: null },
-          data: { releasedAt: input.action === "kill" ? new Date() : undefined }
-        }),
-        this.prisma.automationEvent.create({
-          data: { automationRunId: run.id, action, reason: input.reason }
-        })
-      ]);
+        });
+        await tx.automationEvent.create({ data: { automationRunId: run.id, action, reason: input.reason } });
+      });
     }
     return this.get(workspaceId, run.id);
   }
@@ -768,7 +780,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
       this.prisma.sourceReference.count({ where: { contentItemId } }),
       this.prisma.assetUsage.findMany({
         where: { contentItemId, sceneVersionId },
-        include: { asset: { include: { licenses: { orderBy: { checkedAt: "desc" }, take: 1 } } } }
+        include: { asset: { include: { licenses: { orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 1 } } } }
       }),
       this.prisma.scriptVersion.findFirst({ where: { contentItemId, platform }, orderBy: { version: "desc" } })
     ]);

@@ -40,6 +40,7 @@ export type QueueAdapter = {
 };
 
 export type WorkerAdapter = {
+  isHealthy(): Promise<boolean>;
   close(): Promise<void>;
   onModuleDestroy(): Promise<void>;
 };
@@ -174,7 +175,7 @@ export const createMaintenanceWorker = (
     try { await worker.close(); }
     finally { connection.disconnect(); }
   };
-  return { close, onModuleDestroy: close };
+  return { close, onModuleDestroy: close, isHealthy: async () => worker.isRunning() && !worker.isPaused() && await connection.ping() === "PONG" };
 };
 
 export const createBullMqWorkers = (
@@ -202,5 +203,5 @@ export const createBullMqWorkers = (
       finally { connection.disconnect(); }
     }));
   };
-  return { close, onModuleDestroy: close };
+  return { close, onModuleDestroy: close, isHealthy: async () => workers.length > 0 && (await Promise.all(workers.map(async ({ worker, connection }) => worker.isRunning() && !worker.isPaused() && await connection.ping() === "PONG"))).every(Boolean) };
 };
