@@ -9,7 +9,7 @@ import {
 } from "@postbot/contracts";
 import { Prisma, type PrismaClient } from "@postbot/database";
 import { FakeLlmProvider, FakeStorageProvider, OpenAiLlmProvider, type LlmGenerationRequest, type LlmGenerationResult, type LlmProvider } from "@postbot/providers";
-import { AudioStyleSchema, SceneDocumentSchema, VideoStyleSchema, type SceneDocument } from "@postbot/scene-schema";
+import { alignSceneNarration, AudioStyleSchema, SceneDocumentSchema, VideoStyleSchema, type SceneDocument } from "@postbot/scene-schema";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { assignProductionExperiment } from "@postbot/optimization";
@@ -159,10 +159,12 @@ export class ScriptGenerationProcessor {
           strategy: experiment?.strategy ?? (Object.keys(strategy).length > 0 ? strategy : null),
           experiment: experiment ? { experimentId: experiment.experimentId, arm: experiment.arm, assignmentKey: experiment.assignmentKey } : null
         };
+        const sourceIdea = await this.prisma.contentIdea.findUnique({ where: { id: input.idea.id }, select: { rawSnapshot: true } });
+        const sourceBody = jsonObject(sourceIdea?.rawSnapshot ?? null).body;
         const request: LlmGenerationRequest = {
           model: config.LLM_MODEL, promptVersion, idempotencyKey: `${input.request.idempotencyKey}:attempt:${attempt}`,
           title: input.idea.title, summary: input.idea.summary, topic: input.idea.topic, platform: input.request.platform,
-          partial: input.request.partial, sources: [{ title: input.idea.title, summary: input.idea.summary, url: input.idea.canonicalUrl }],
+          partial: input.request.partial, sources: [{ title: input.idea.title, summary: [input.idea.summary, typeof sourceBody === "string" ? sourceBody : "Original source text was not collected; verify claims manually."].join("\n"), url: input.idea.canonicalUrl }],
           channelContext: generationContext
         };
         const response = config.LLM_PROVIDER === "openai" ? await this.journaledGenerate(jobId, request, provider) : await provider.generateScriptAndScene(request);
@@ -207,6 +209,8 @@ export class ScriptGenerationProcessor {
           const existing = await tx.providerUsage.findUnique({ where: { idempotencyKey: `script-job:${jobId}` } });
           const prior = this.readResult(existing?.providerResponse ?? null);
           if (prior) return prior;
+          const originalIdea = await tx.contentIdea.findUniqueOrThrow({ where: { id: idea.id } });
+          const originalBody = jsonObject(originalIdea.rawSnapshot).body;
           const contentItem = await tx.contentItem.upsert({
             where: { channelId_topicKey: { channelId: idea.channelId, topicKey: `idea:${idea.id}` } },
             update: { title: idea.title, summary: idea.summary, status: "GENERATING" },
@@ -215,11 +219,13 @@ export class ScriptGenerationProcessor {
           await tx.sourceReference.upsert({
             where: { contentItemId_urlHash: { contentItemId: contentItem.id, urlHash: sha256(idea.canonicalUrl) } },
             update: {},
-            create: { contentItemId: contentItem.id, kind: idea.sourceKind, title: idea.title, url: idea.canonicalUrl, urlHash: sha256(idea.canonicalUrl), sourceName: idea.sourceName, publishedAt: idea.publishedAt ? new Date(idea.publishedAt) : null, reliabilityScore: new Prisma.Decimal("0.800000"), isPrimary: true, normalizedSnapshot: { facts: generated.facts } }
+            create: { contentItemId: contentItem.id, kind: idea.sourceKind, title: idea.title, url: idea.canonicalUrl, urlHash: sha256(idea.canonicalUrl), sourceName: idea.sourceName, publishedAt: idea.publishedAt ? new Date(idea.publishedAt) : null, reliabilityScore: originalIdea.reliabilityScore, isPrimary: true, normalizedSnapshot: { facts: generated.facts, body: typeof originalBody === "string" ? originalBody : null } }
           });
           const latestScript = await tx.scriptVersion.findFirst({ where: { contentItemId: contentItem.id, platform: request.platform }, orderBy: { version: "desc" } });
           const latestScene = await tx.sceneVersion.findFirst({ where: { contentItemId: contentItem.id, platform: request.platform }, orderBy: { version: "desc" } });
           const merged = this.merge(request.partial, generated, latestScript, latestScene);
+          merged.sceneDocument = alignSceneNarration(merged.sceneDocument, [merged.script.hook, merged.script.body, merged.script.callToAction].filter(Boolean).join(" "));
+          if (["hook", "body"].includes(request.partial)) merged.facts = [];
           const version = (latestScript?.version ?? 0) + 1;
           const scriptVersion = await tx.scriptVersion.create({ data: { contentItemId: contentItem.id, version, platform: request.platform, ...merged.script, durationSeconds: new Prisma.Decimal(merged.script.durationSeconds.toFixed(3)), promptVersion, qualitySnapshot: { metadata: merged.metadata, facts: merged.facts, provider: configProviderName(), model: generated.model, generationContext: generated.generationContext, strategyVersion: generated.strategyVersion } } });
           const sceneVersion = await tx.sceneVersion.create({ data: { contentItemId: contentItem.id, scriptVersionId: scriptVersion.id, version, platform: request.platform, schemaVersion: merged.sceneDocument.schemaVersion, sceneDocument: merged.sceneDocument, durationSeconds: new Prisma.Decimal(merged.script.durationSeconds.toFixed(3)) } });
@@ -262,7 +268,7 @@ export class ScriptGenerationProcessor {
   }
 
   private isRetryableConflict(error: unknown): boolean {
-    return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+    return error instanceof Prisma.PrismaClientKnownRequestError && (error.code === "P2002" || error.code === "P2034");
   }
 }
 

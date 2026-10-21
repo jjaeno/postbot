@@ -8,7 +8,7 @@ import { readFile, rm, writeFile, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CaptionTiming } from "@postbot/renderer";
-import { SceneDocumentSchema } from "@postbot/scene-schema";
+import { retimeNarration, SceneDocumentSchema } from "@postbot/scene-schema";
 
 export interface MediaPostProcessor {
   postprocess(input: { videoInput: string; output: string; narrationInput?: string; backgroundInput?: string; effectsInput?: string; backgroundVolume?: number; effectsVolume?: number }): Promise<void>;
@@ -60,7 +60,7 @@ export class RenderProcessor {
     if (previous && typeof previous === "object" && !Array.isArray(previous) && (previous as Record<string, unknown>).idempotencyKey === input.idempotencyKey) {
       return previous;
     }
-    const sceneDocument = SceneDocumentSchema.parse(sceneVersion.sceneDocument);
+    let sceneDocument = SceneDocumentSchema.parse(sceneVersion.sceneDocument);
     let brandLogo: string | undefined;
     if (sceneDocument.style?.logoAssetId) {
       const logo = await this.prisma.asset.findFirst({ where: { id: sceneDocument.style.logoAssetId, channelId: input.channelId, kind: "GRAPHIC" } });
@@ -85,8 +85,7 @@ export class RenderProcessor {
     const background = usages.find((usage) => readAssetUsagePurpose(usage) === "bgm");
     const effects = usages.find((usage) => readAssetUsagePurpose(usage) === "sfx");
     const captions = narration ? readCaptions(narration.usageSnapshot) : [];
-    const expectedDuration = sceneDocument.durationInFrames / sceneDocument.fps;
-    if (captions.some((caption) => caption.startSeconds < 0 || caption.endSeconds <= caption.startSeconds || caption.endSeconds > expectedDuration + 0.25 || caption.text.length > 160)) throw new Error("SUBTITLE_SAFE_AREA_OR_TIMING_INVALID");
+    let expectedDuration = sceneDocument.durationInFrames / sceneDocument.fps;
     const directory = await mkdtemp(join(tmpdir(), `postbot-render-${jobId}-`));
     try {
       const draftPath = join(directory, "draft.mp4");
@@ -96,6 +95,13 @@ export class RenderProcessor {
       const backgroundPath = background ? join(directory, "background.audio") : undefined;
       const effectsPath = effects ? join(directory, "effects.audio") : undefined;
       if (narration && narrationPath) await writeFile(narrationPath, await this.storage.download(narration.asset.storageKey));
+      if (narration && narrationPath) {
+        const audio = await this.postProcessor.probe(narrationPath);
+        const profile = sceneVersion.platform ? await this.prisma.platformOutputProfile.findFirst({ where: { channelId: input.channelId, platform: sceneVersion.platform, isActive: true }, orderBy: { version: "desc" } }) : null;
+        sceneDocument = retimeNarration(sceneDocument, captions, audio.durationSeconds, { min: profile?.minDurationSeconds ?? 0, max: profile?.maxDurationSeconds ?? 180 });
+        expectedDuration = sceneDocument.durationInFrames / sceneDocument.fps;
+      }
+      if (captions.some((caption) => caption.text.length > 160)) throw new Error("SUBTITLE_SAFE_AREA_OR_TIMING_INVALID");
       if (background && backgroundPath) await writeFile(backgroundPath, await this.storage.download(background.asset.storageKey));
       if (effects && effectsPath) await writeFile(effectsPath, await this.storage.download(effects.asset.storageKey));
       const sceneAssets: Record<string, string> = {};
@@ -128,7 +134,8 @@ export class RenderProcessor {
       const config = loadConfig();
       const rate = config.RENDER_COST_MODE === "free" ? 0 : config.APP_ENV === "local" || config.APP_ENV === "test" ? 0.01 : config.RENDER_USD_PER_MINUTE;
       await audioAssets.recordProviderCost({ contentItemId: input.contentItemId, productionJobId: jobId, provider: "renderer", model: "remotion-ffmpeg", operation: "video-render", quantity: qa.durationSeconds / 60, unit: "minute", category: "render", estimatedCostUsd: (qa.durationSeconds / 60 * rate).toFixed(6), idempotencyKey: `render:${input.idempotencyKey}` });
-      await this.prisma.sceneVersion.update({ where: { id: sceneVersion.id }, data: { renderManifest: manifest } });
+      await this.prisma.sceneVersion.update({ where: { id: sceneVersion.id }, data: { renderManifest: manifest, sceneDocument, durationSeconds: expectedDuration } });
+      if (sceneVersion.scriptVersionId) await this.prisma.scriptVersion.update({ where: { id: sceneVersion.scriptVersionId }, data: { durationSeconds: expectedDuration } });
       return manifest;
     } finally {
       await rm(directory, { recursive: true, force: true });

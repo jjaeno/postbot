@@ -626,7 +626,7 @@ export const PublishCalendarItemSchema = z.object({
   id: z.string(), contentItemId: z.string(), channelId: z.string(), platform: PlatformSchema,
   status: z.enum(["DRAFT", "SCHEDULED", "PUBLISHING", "PUBLISHED", "FAILED", "HELD", "CANCELLED"]),
   scheduledAt: z.string().datetime(), title: z.string(), postUrl: z.string().url().nullable(),
-  publishedAt: z.string().datetime().nullable(), failureReason: z.string().nullable()
+  publishedAt: z.string().datetime().nullable(), failureReason: z.string().nullable(), reconciliationRequired: z.boolean().optional()
 });
 export type PublishCalendarItem = z.infer<typeof PublishCalendarItemSchema>;
 
@@ -673,8 +673,8 @@ export const AutomationBudgetResponseSchema = z.object({
 });
 export type AutomationBudgetResponse = z.infer<typeof AutomationBudgetResponseSchema>;
 export const AnalyticsSyncRequestSchema = z.object({ channelId: z.string().min(1), platform: PlatformSchema, periodStart: z.string().datetime(), periodEnd: z.string().datetime(), timezone: z.string().min(1).max(64), idempotencyKey: z.string().min(8).max(191) }).refine((value) => value.periodStart < value.periodEnd, { message: "periodStart must precede periodEnd" });
-export const AnalyticsMetricResponseSchema = z.object({ metric: z.string(), status: z.enum(["AVAILABLE", "UNAVAILABLE", "PARTIAL"]), value: z.number().nullable(), unit: z.string().nullable(), aggregation: z.string().nullable(), unavailableReason: z.string().nullable(), observedAt: z.string().datetime(), revision: z.number().int(), mappingVersion: z.string() });
-export const AnalyticsReportResponseSchema = z.object({ channelId: z.string(), platform: PlatformSchema.optional(), periodStart: z.string().datetime(), periodEnd: z.string().datetime(), metrics: z.array(AnalyticsMetricResponseSchema), partial: z.boolean(), lastSyncedAt: z.string().datetime().nullable() });
+export const AnalyticsMetricResponseSchema = z.object({ id: z.string().optional(), contentItemId: z.string().optional(), platformPostId: z.string().optional(), externalPostId: z.string().optional(), title: z.string().optional(), platform: PlatformSchema.optional(), periodStart: z.string().optional(), periodEnd: z.string().optional(), latest: z.boolean().optional(), metric: z.string(), status: z.enum(["AVAILABLE", "UNAVAILABLE", "PARTIAL"]), value: z.number().nullable(), unit: z.string().nullable(), aggregation: z.string().nullable(), unavailableReason: z.string().nullable(), observedAt: z.string().datetime(), revision: z.number().int(), mappingVersion: z.string() });
+export const AnalyticsReportResponseSchema = z.object({ channelId: z.string(), platform: PlatformSchema.optional(), periodStart: z.string().datetime(), periodEnd: z.string().datetime(), metrics: z.array(AnalyticsMetricResponseSchema), partial: z.boolean(), lastSyncedAt: z.string().datetime().nullable(), lastError: z.string().nullable().optional() });
 export type AnalyticsSyncRequest = z.infer<typeof AnalyticsSyncRequestSchema>;
 export type AnalyticsReportResponse = z.infer<typeof AnalyticsReportResponseSchema>;
 
@@ -686,7 +686,7 @@ export const OptimizationSettingsSchema = z.object({
   maxChangeRatio: z.number().min(0).max(0.5).default(0.2)
 });
 export const UpdateOptimizationSettingsRequestSchema = z.object({ channelId: z.string().min(1), settings: OptimizationSettingsSchema });
-export const GenerateSuggestionsRequestSchema = z.object({ channelId: z.string().min(1), platform: PlatformSchema, metric: z.enum(["views", "impressions", "average_watch_seconds", "completion_rate", "engagement_rate"]), periodStart: z.string().datetime(), periodEnd: z.string().datetime(), idempotencyKey: z.string().min(8).max(128) }).refine((value) => value.periodStart < value.periodEnd, { message: "periodStart must precede periodEnd" });
+export const GenerateSuggestionsRequestSchema = z.object({ channelId: z.string().min(1), platform: PlatformSchema, metric: z.enum(["views", "impressions", "reach", "average_view_ratio", "average_watch_seconds", "completion_rate", "engagement_rate"]), periodStart: z.string().datetime(), periodEnd: z.string().datetime(), idempotencyKey: z.string().min(8).max(128) }).refine((value) => value.periodStart < value.periodEnd, { message: "periodStart must precede periodEnd" });
 export const SuggestionActionRequestSchema = z.object({ action: z.enum(["approve", "reject", "apply", "expire"]), reason: z.string().min(1).max(500).optional() });
 export const ExperimentStrategySchema = z.object({ durationSeconds: z.number().positive().max(180) }).strict();
 export const CreateExperimentRequestSchema = z.object({ channelId: z.string().min(1), name: z.string().min(1).max(120), hypothesis: z.string().min(1).max(2000), platform: PlatformSchema.default("YOUTUBE"), periodDays: z.number().int().min(1).max(90).default(30), targetMetric: z.string().min(1).max(80), minSampleSize: z.number().int().min(2).max(10_000), control: ExperimentStrategySchema, variant: ExperimentStrategySchema, successCriteria: z.object({ direction: z.enum(["higher", "lower"]).default("higher"), minRelativeImprovement: z.number().positive().max(1).default(0.1) }).strict(), stopCriteria: z.object({ maxAssignments: z.number().int().min(4).max(20_000) }).strict().optional() }).refine((value) => !value.stopCriteria || value.stopCriteria.maxAssignments >= value.minSampleSize * 2, "배정 상한은 두 그룹 최소 표본의 합 이상이어야 합니다.");

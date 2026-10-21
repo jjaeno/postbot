@@ -36,7 +36,7 @@ export class PolicyProcessor {
     };
     const script = item.scriptVersions[0]; const metadata = object(script?.qualitySnapshot ?? {}); const nested = metadata.metadata; const description = nested && typeof nested === "object" && !Array.isArray(nested) && typeof (nested as Record<string, unknown>).description === "string" ? String((nested as Record<string, unknown>).description) : item.summary ?? "";
     const sourceUrls = new Set(item.sourceReferences.map((source) => source.url));
-    const facts = typeof metadata.factsConfirmedBy === "string" && Array.isArray(metadata.facts) ? metadata.facts as unknown[] : item.sourceReferences.flatMap((source): unknown[] => { const raw = object(source.normalizedSnapshot ?? {}); return Array.isArray(raw.facts) ? raw.facts as unknown[] : []; });
+    const facts = Array.isArray(metadata.facts) ? metadata.facts as unknown[] : item.sourceReferences.flatMap((source): unknown[] => { const raw = object(source.normalizedSnapshot ?? {}); return Array.isArray(raw.facts) ? raw.facts as unknown[] : []; });
     const allFactsLinked = facts.length > 0 && facts.every((fact) => fact && typeof fact === "object" && !Array.isArray(fact) && typeof (fact as Record<string, unknown>).sourceUrl === "string" && sourceUrls.has(String((fact as Record<string, unknown>).sourceUrl)));
     const licenses = item.assetUsages.map((usage) => usage.asset.licenses[0]);
     const maximumSimilarity = item.channel.contentItems.reduce((maximum, other) => Math.max(maximum, similarity(script?.body ?? "", other.scriptVersions[0]?.body ?? "")), 0);

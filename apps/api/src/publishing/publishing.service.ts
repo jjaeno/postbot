@@ -51,13 +51,13 @@ export class PublishingService {
   }
   async list(workspaceId: string): Promise<PublishCalendarItem[]> {
     const plans = await this.prisma.publishPlan.findMany({ where: { contentItem: { channel: { workspaceId } } }, include: { contentItem: { select: { channelId: true } }, platformPost: true, attempts: { orderBy: { attemptNumber: "desc" }, take: 1 } }, orderBy: { scheduledAt: "asc" }, take: 200 });
-    return plans.map((plan) => ({ id: plan.id, contentItemId: plan.contentItemId, channelId: plan.contentItem.channelId, platform: plan.platform, status: plan.status, scheduledAt: plan.scheduledAt.toISOString(), title: plan.title, postUrl: plan.platformPost?.postUrl ?? null, publishedAt: plan.platformPost?.publishedAt.toISOString() ?? null, failureReason: plan.attempts[0]?.errorMessage ?? plan.attempts[0]?.errorCode ?? null }));
+    return plans.map((plan) => ({ id: plan.id, contentItemId: plan.contentItemId, channelId: plan.contentItem.channelId, platform: plan.platform, status: plan.status, scheduledAt: plan.scheduledAt.toISOString(), title: plan.title, postUrl: plan.platformPost?.postUrl ?? null, publishedAt: plan.platformPost?.publishedAt.toISOString() ?? null, reconciliationRequired: plan.status === "HELD" && ["RUNNING", "RETRY_WAIT"].includes(plan.attempts[0]?.status ?? ""), failureReason: plan.attempts[0]?.errorMessage ?? plan.attempts[0]?.errorCode ?? null }));
   }
   async cancel(workspaceId: string, planId: string): Promise<{ ok: true }> {
     const plan = await this.prisma.publishPlan.findFirst({ where: { id: planId, contentItem: { channel: { workspaceId } } } });
     if (!plan) throw new NotFoundException("PUBLISH_PLAN_NOT_FOUND");
     if (plan.status === "CANCELLED") return { ok: true };
-    const updated = await this.prisma.publishPlan.updateMany({ where: { id: plan.id, status: "SCHEDULED" }, data: { status: "CANCELLED" } });
+    const updated = await this.prisma.publishPlan.updateMany({ where: { id: plan.id, status: { in: ["SCHEDULED", "HELD", "FAILED"] }, platformPost: null, attempts: { none: { status: { in: ["RUNNING", "RETRY_WAIT", "SUCCEEDED"] } } } }, data: { status: "CANCELLED" } });
     if (updated.count !== 1) throw new ConflictException({ code: "PUBLISH_ALREADY_STARTED", message: "게시가 이미 시작되었거나 종료되어 예약을 변경할 수 없습니다." });
     const jobs = await this.prisma.productionJob.findMany({ where: { contentItemId: plan.contentItemId, type: "PUBLISH", status: "QUEUED" }, select: { id: true, payload: true } });
     for (const job of jobs) if (jsonObject(jsonObject(job.payload).publish ?? null).publishPlanId === plan.id) await this.jobs.cancel(workspaceId, job.id);

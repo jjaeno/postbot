@@ -15,7 +15,7 @@ describe.skipIf(!enabled)("completed job redelivery", () => {
     const workspace = await prisma.workspace.create({ data: { ownerId: user.id, name: "Fixture", slug: key } });
     const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Fixture", slug: key } });
     const run = await prisma.automationRun.create({ data: { channelId: channel.id, idempotencyKey: key, status: "RUNNING" } });
-    const job = await prisma.productionJob.create({ data: { channelId: channel.id, type: "COLLECT", queueName: "collect", idempotencyKey: key, payload: { automation: { runId: run.id }, deterministicBehavior: "timeout", timeoutMs: 200 } } });
+    const job = await prisma.productionJob.create({ data: { channelId: channel.id, type: "COLLECT", queueName: "collect", idempotencyKey: key, payload: { automation: { runId: run.id, stage: "COLLECT" }, deterministicBehavior: "timeout", timeoutMs: 200 } } });
     const processor = new DeterministicJobProcessor(prisma);
     // The private completion routine is exercised through its actual typed method, without replacing DB calls.
     const complete = processor as unknown as { succeed(jobId: string, attemptNumber: number, result: Record<string, unknown>): Promise<void> };
@@ -23,8 +23,8 @@ describe.skipIf(!enabled)("completed job redelivery", () => {
     await prisma.automationRun.update({ where: { id: run.id }, data: { status: "CANCELLED" } });
     await complete.succeed(job.id, 1, { done: true });
     expect(await prisma.automationRun.findUniqueOrThrow({ where: { id: run.id } })).toMatchObject({ status: "CANCELLED" });
-    const queued = await prisma.productionJob.create({ data: { channelId: channel.id, type: "COLLECT", queueName: "collect", idempotencyKey: `${key}:queued`, payload: { automation: { runId: run.id } } } });
-    await processor.process({ id: queued.id, type: "COLLECT", queueName: "collect", payload: { automation: { runId: run.id } }, runAfter: null });
+    const queued = await prisma.productionJob.create({ data: { channelId: channel.id, type: "COLLECT", queueName: "collect", idempotencyKey: `${key}:queued`, payload: { automation: { runId: run.id, stage: "COLLECT" } } } });
+    await processor.process({ id: queued.id, type: "COLLECT", queueName: "collect", payload: { automation: { runId: run.id, stage: "COLLECT" } }, runAfter: null });
     expect(await prisma.productionJob.findUniqueOrThrow({ where: { id: queued.id } })).toMatchObject({ status: "CANCELLED" });
     expect(await prisma.jobAttempt.count({ where: { productionJobId: queued.id } })).toBe(0);
   });

@@ -2,7 +2,11 @@
 
 분석 데이터는 플랫폼 원본 응답(`rawSnapshot`)과 정규화 metric snapshot을 분리해 저장한다. 원본은 덮어쓰지 않으며 같은 post·metric·관측 시각의 수정값은 revision으로 보존한다.
 
-## Metric mapping v1
+## Metric mapping v2 (2026-10-21)
+
+`average_view_ratio`는 YouTube 평균 시청 비율이며 `completion_rate`와 다르다. Instagram `reach`도 `impressions`와 다르다. 기존 혼동 매핑은 미제공으로 격리하며 raw 응답을 유지한다. snapshot은 sync·post·metric·관측 시각·revision으로 구분한다. 영상 식별자·제목·조회 기간·최신/이전 관측을 함께 반환하고 합산하지 않는다.
+
+`ANALYTICS_COLLECTION_HOURS`의 기본은 `24,72,168`이다. 수동 게시도 정기 수집 대상이며 부분 실패는 성공한 게시물을 제외하고 재개한다. 상세 복구·migration·공식 문서 확인 범위는 [운영 보완 보고서](image-motion-mvp-2026-10-21.md)를 따른다.
 
 | 공통 metric | 단위 | 집계 | 미지원 처리 |
 | --- | --- | --- | --- |

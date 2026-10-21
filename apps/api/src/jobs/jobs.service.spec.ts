@@ -312,7 +312,8 @@ describe("JobsService", () => {
 
     expect(second.id).toBe(first.id);
     expect(second.duplicate).toBe(true);
-    expect(queue.enqueued).toHaveLength(1);
+    // A duplicate request also repairs an interrupted DB-to-Redis handoff.
+    expect(queue.enqueued.map((job) => job.id)).toEqual([first.id, first.id]);
   });
 
   it("cancels queued work", async () => {

@@ -1,6 +1,7 @@
 import { Prisma, PrismaClient } from "@prisma/client";
 
 export { Prisma, PrismaClient };
+export { assertJobScope } from "./job-scope.js";
 
 export type DatabaseClient = PrismaClient;
 export type TransactionClient = Prisma.TransactionClient;

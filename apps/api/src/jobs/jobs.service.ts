@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import {
   CreateProductionJobRequestSchema,
   RecoverProductionJobRequestSchema,
@@ -33,7 +33,7 @@ export class JobsService {
         queueName: queueNameForJobType(tracedInput.type),
         runAfterDate: parseRunAfter(tracedInput.runAfter)
       });
-      if (result.created) {
+      if (result.created || result.job.status === "QUEUED") {
         await this.queue.enqueue({
           id: result.job.id,
           type: result.job.type,
@@ -62,6 +62,7 @@ export class JobsService {
       throw new NotFoundException({ code: "JOB_NOT_FOUND", message: "Job was not found." });
     }
     await this.queue.cancel(job.id, queueNameForJobType(job.type));
+    if (await this.queue.state?.(job.id, queueNameForJobType(job.type)) === "active") return job;
     if (job.status === "CANCEL_REQUESTED") {
       await this.repository.cancel(job.id, job.attempts.at(-1)?.attemptNumber ?? null);
       return this.get(workspaceId, jobId);
@@ -71,11 +72,15 @@ export class JobsService {
 
   async recover(workspaceId: string, jobId: string, rawInput: unknown): Promise<ProductionJobResponse> {
     const input = RecoverProductionJobRequestSchema.parse(rawInput) satisfies RecoverProductionJobRequest;
+    const previous = await this.get(workspaceId, jobId);
+    if (previous.result?.reconciliationRequired === true || previous.errorCode?.includes("RECONCILIATION_REQUIRED")) {
+      throw new ConflictException({ code: "RECONCILIATION_REQUIRED", message: "Confirm the provider outcome and billing or published post before recovery. Ordinary retry is blocked." });
+    }
     const job = await this.repository.recover(workspaceId, jobId, parseRunAfter(input.runAfter));
     if (!job) {
       throw new NotFoundException({ code: "JOB_NOT_FOUND", message: "Job was not found." });
     }
-    if (job.status === "QUEUED") {
+    if (job.status === "QUEUED" || job.status === "RETRY_WAIT") {
       await this.queue.enqueue({
         id: job.id,
         type: job.type,
@@ -108,7 +113,7 @@ export class JobsService {
     if (!(error instanceof Error)) {
       return new BadRequestException({ code: "JOB_CREATE_FAILED", message: "Job could not be created." });
     }
-    if (error.message === "CHANNEL_NOT_FOUND" || error.message === "CONTENT_ITEM_NOT_FOUND") {
+    if (error.message === "CHANNEL_NOT_FOUND" || error.message === "CONTENT_ITEM_NOT_FOUND" || error.message === "JOB_SCOPE_MISMATCH") {
       return new ForbiddenException({ code: error.message, message: "The requested resource is not in this workspace." });
     }
     if (error.message === "IDEMPOTENCY_CONFLICT") {

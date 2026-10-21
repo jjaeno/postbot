@@ -8,7 +8,7 @@ export { deterministicExperimentArm } from "@postbot/optimization";
 
 const MIN_SAMPLE_SIZE = 4;
 const RULE_VERSION = "optimization-rules-v1";
-const METRIC_VERSION = "analytics-mapping-v1";
+const METRIC_VERSION = "analytics-mapping-v2";
 const terminalSuggestion = new Set(["REJECTED", "APPLIED", "EXPIRED"]);
 const terminalExperiment = new Set(["COMPLETED", "CANCELLED", "STOPPED", "INCONCLUSIVE"]);
 const asRecord = (value: Prisma.JsonValue | null): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -40,11 +40,15 @@ export class OptimizationService {
   async generate(workspaceId: string, raw: unknown): Promise<OptimizationSuggestionResponse> {
     const input = GenerateSuggestionsRequestSchema.parse(raw);
     const existing = await this.prisma.optimizationSuggestion.findUnique({ where: { suggestionKey: hash(input.idempotencyKey) } });
-    if (existing) return this.suggestionResponse(existing);
+    if (existing) {
+      if (existing.channelId !== input.channelId) throw new ConflictException("OPTIMIZATION_IDEMPOTENCY_CONFLICT");
+      await this.channel(workspaceId, existing.channelId);
+      return this.suggestionResponse(existing);
+    }
     const channel = await this.channel(workspaceId, input.channelId);
     const settings = OptimizationSettingsSchema.parse(asRecord(channel.optimizationSettings));
     const snapshots = await this.prisma.analyticsMetricSnapshot.findMany({
-      where: { metric: input.metric, status: "AVAILABLE", value: { not: null }, observedAt: { gte: new Date(input.periodStart), lte: new Date(input.periodEnd) }, platformPost: { platform: input.platform, publishPlan: { contentItem: { channelId: channel.id } } } },
+      where: { mappingVersion: { not: "legacy-ambiguous-v1" }, metric: input.metric, status: "AVAILABLE", value: { not: null }, observedAt: { gte: new Date(input.periodStart), lte: new Date(input.periodEnd) }, platformPost: { platform: input.platform, publishPlan: { contentItem: { channelId: channel.id } } } },
       include: {
         platformPost: {
           include: {
@@ -112,6 +116,8 @@ export class OptimizationService {
     }
     if (input.action === "approve") { const updated = await this.prisma.optimizationSuggestion.update({ where: { id: suggestion.id }, data: { status: "APPROVED", decidedAt: new Date() } }); await this.operations.audit(workspaceId, userId, "optimization.suggestion.approve", "optimization_suggestion", updated.id); return this.suggestionResponse(updated); }
     if (suggestion.status !== "APPROVED") throw new ConflictException("SUGGESTION_REQUIRES_APPROVAL");
+    const evidence = asRecord(suggestion.evidence);
+    if (suggestion.metricVersion !== METRIC_VERSION && ((evidence.platform === "YOUTUBE" && evidence.metric === "completion_rate") || (evidence.platform === "INSTAGRAM" && evidence.metric === "impressions"))) throw new ConflictException("LEGACY_METRIC_REQUIRES_RESYNC_AND_NEW_SUGGESTION");
     const applied = await this.applyStrategy(suggestion);
     await this.operations.audit(workspaceId, userId, "optimization.suggestion.apply", "optimization_suggestion", applied.id);
     return this.suggestionResponse(applied);
@@ -153,7 +159,7 @@ export class OptimizationService {
           include: {
             sceneVersion: { include: { scriptVersion: true } },
             platformPost: { include: { analyticsSnapshots: {
-              where: { metric: experiment.targetMetric ?? "", status: "AVAILABLE", value: { not: null }, observedAt: { gte: experiment.startedAt, lte: end } },
+              where: { mappingVersion: { not: "legacy-ambiguous-v1" }, metric: experiment.targetMetric ?? "", status: "AVAILABLE", value: { not: null }, observedAt: { gte: experiment.startedAt, lte: end } },
               orderBy: [{ observedAt: "desc" }, { revision: "desc" }]
             } } }
           }

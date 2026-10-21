@@ -1,5 +1,9 @@
 # Renderer
 
+## 19.8 음성 타이밍
+
+실제 ffprobe 음성 길이와 TTS 단어 정렬로 장면 경계를 확정하며 전체 대본과 narration 텍스트를 맞춘다. 최대 길이 초과/텍스트 불일치/겹친 자막/빈 장면 구간/중복 ID는 오류로 멈추고 문장을 자르지 않는다. Remotion 프레임 동시성의 기본값은 2로 제한한다. 로컬 미디어 검증과 부분 재사용·권리 절차는 [운영 보완 보고서](image-motion-mvp-2026-10-21.md)를 따른다.
+
 ## 19.2 브랜드·자막 snapshot
 
 SCRIPT worker는 현재 template의 스타일·AI 비율을 SceneDocument에 기록한다. Remotion은 이 snapshot의 brand/background 색상, Arial/sans-serif/serif, watermark, caption color/background/fontSize(32~64)를 직접 적용한다. logoAssetId는 channel-owned GRAPHIC의 현재 권리를 검사하고 storage bytes를 data URL로 전달하며 SceneVersion usage로 기록한다. 임의 외부 logo URL을 renderer에서 불러오지 않는다. 기존 예약의 style은 설정 변경으로 덮어쓰지 않는다.

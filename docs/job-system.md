@@ -19,11 +19,13 @@
 
 ## API
 
-- `POST /jobs`: 작업을 생성하고 즉시 `ProductionJobResponse`를 반환한다.
+- `POST /jobs`: 외부 생성은 403. 도메인 workflow API가 내부 JobsService를 호출한다 (19.8 보완).
 - `GET /jobs/:jobId`: MySQL에 저장된 현재 작업 상태와 시도 목록을 반환한다.
 - `GET /jobs/:jobId/events`: Server-Sent Events로 현재 진행 상태를 반복 전송한다. 재연결 시에도 MySQL 상태에서 최신 이벤트를 재구성한다.
 - `POST /jobs/:jobId/cancel`: queue에서 제거 가능한 작업은 제거하고, 영속 상태를 `CANCELLED`로 전이한다.
-- `POST /jobs/:jobId/recover`: `FAILED`, `CANCELLED`, `NEEDS_REVIEW` 작업을 다시 `QUEUED`로 되돌리고 queue에 재등록한다.
+- `POST /jobs/:jobId/recover`: 외부 직접 복구는 403. 권리·예산·승인 gate를 확인하는 제작 workflow에서 재개한다. 불명확 호출은 일반 복구를 차단한다.
+
+현재 DB/BullMQ 상태별 복구·취소·대사 계약은 [이미지 모션 MVP 운영 보완](image-motion-mvp-2026-10-21.md)을 따른다.
 
 모든 API는 workspace 인증 상태를 사용한다. 작업 생성과 조회는 요청 workspace에 속한 채널의 job에만 허용된다.
 

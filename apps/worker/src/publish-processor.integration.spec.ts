@@ -41,7 +41,7 @@ enabled("publish processor integration", () => {
   it("holds a confirmed publication after a database failure instead of uploading twice", async () => {
     const { processor, plan } = await fixture();
     const upload = vi.spyOn(FakeYouTubePublisherProvider.prototype, "upload");
-    vi.spyOn(prisma, "$transaction").mockRejectedValueOnce(new Error("Injected persistence failure"));
+    vi.spyOn(prisma.platformPost, "create").mockImplementationOnce(() => { throw new Error("Injected persistence failure"); });
     await expect(processor.process({ publish: { publishPlanId: plan.id } })).rejects.toBeInstanceOf(AmbiguousPublishError);
     const saved = await prisma.publishPlan.findUniqueOrThrow({ where: { id: plan.id }, include: { attempts: true, platformPost: true } });
     expect(saved.status).toBe("HELD"); expect(saved.platformPost).toBeNull();
@@ -55,7 +55,7 @@ enabled("publish processor integration", () => {
     const { plan } = await fixture();
     vi.spyOn(PublishProcessor.prototype, "process").mockRejectedValueOnce(new AmbiguousPublishError("PUBLISH_PERSISTENCE_RECONCILIATION_REQUIRED", "fixture-post-id"));
     const payload = { publish: { publishPlanId: plan.id } };
-    const job = await prisma.productionJob.create({ data: { type: "PUBLISH", queueName: "publish", idempotencyKey: randomUUID(), payload } });
+    const job = await prisma.productionJob.create({ data: { channelId: (await prisma.contentItem.findUniqueOrThrow({ where: { id: plan.contentItemId } })).channelId, contentItemId: plan.contentItemId, type: "PUBLISH", queueName: "publish", idempotencyKey: randomUUID(), payload } });
     await new DeterministicJobProcessor(prisma).process({ id: job.id, type: "PUBLISH", queueName: "publish", runAfter: null, payload });
     expect(await prisma.productionJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ status: "NEEDS_REVIEW", errorCode: "AMBIGUOUS_PUBLISH_RECONCILIATION_REQUIRED", result: { reconciliationRequired: true, externalOperationId: "fixture-post-id" } });
   });

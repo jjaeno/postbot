@@ -552,3 +552,28 @@ test("creates, starts and compares a limited experiment without claiming causali
   await expect(panel).toContainText("25.0%"); await expect(panel).toContainText("변경군 우세 가설");
   await expect(panel).toContainText("인과 효과나 통계적 유의성을 주장하지 않습니다");
 });
+
+test("recovers a held plan from the calendar without typing an internal identifier", async ({ page }) => {
+  await mockApi(page);
+  let cancelled = false;
+  await page.route("**/publishing/plans", (route) => route.fulfill({ json: cancelled ? [] : [{ id: "held-plan", contentItemId: "content-1", channelId: "channel-1", platform: "YOUTUBE", status: "HELD", scheduledAt: "2099-01-01T00:00:00.000Z", title: "수정으로 보류된 예약", postUrl: null, publishedAt: null, failureReason: null }] }));
+  await page.route("**/publishing/plans/held-plan/cancel", (route) => { cancelled = true; return route.fulfill({ json: { ok: true } }); });
+  page.on("dialog", (dialog) => dialog.accept());
+  await page.goto("/#calendar");
+  await expect(page.getByText("수정으로 보류된 예약 · YouTube")).toBeVisible();
+  await page.getByRole("button", { name: "예약 변경", exact: true }).click();
+  await expect.poll(() => cancelled).toBe(true);
+  await expect(page.getByTestId("review-panel")).toBeVisible();
+  await expect(page.getByLabel("검토할 콘텐츠")).toHaveValue("content-1");
+});
+
+test("distinguishes per-video snapshots, native metrics and collection failure", async ({ page }) => {
+  await mockApi(page);
+  const base = { metric: "average_view_ratio", status: "AVAILABLE", value: 0.5, unit: "ratio", aggregation: "average", unavailableReason: null, observedAt: "2026-10-05T00:00:00.000Z", revision: 1, mappingVersion: "v2", platform: "YOUTUBE", periodStart: "2026-10-01", periodEnd: "2026-10-05" };
+  await page.route("**/analytics/report?**", (route) => route.fulfill({ json: { channelId: "channel-1", periodStart: "2026-10-01T00:00:00.000Z", periodEnd: "2026-10-05T00:00:00.000Z", metrics: [{ ...base, id: "one", title: "첫 영상", externalPostId: "post-one", platformPostId: "one", latest: true }, { ...base, id: "two", title: "둘째 영상", externalPostId: "post-two", platformPostId: "two", latest: false }], partial: false, lastSyncedAt: base.observedAt, lastError: "ANALYTICS_SYNC_FAILED" } }));
+  await page.goto("/#insights");
+  const panel = page.getByTestId("analytics-panel");
+  await expect(panel).toContainText("첫 영상"); await expect(panel).toContainText("둘째 영상");
+  await expect(panel).toContainText("이전 스냅샷"); await expect(panel).toContainText("post-two");
+  await expect(panel).toContainText("ANALYTICS_SYNC_FAILED"); await expect(panel).toContainText("완주율·노출 수와 다릅니다");
+});

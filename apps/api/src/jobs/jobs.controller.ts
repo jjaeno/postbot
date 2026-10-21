@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, Param, Post, Req, Res, UseGuards } from "@nestjs/common";
+import { Controller, ForbiddenException, Get, Inject, Param, Post, Req, Res, UseGuards } from "@nestjs/common";
 import type { Response } from "express";
 import { AccessTokenGuard } from "../auth/access-token.guard.js";
 import type { AuthenticatedRequest } from "../auth/request-types.js";
@@ -15,8 +15,8 @@ export class JobsController {
   constructor(@Inject(JobsService) private readonly jobs: JobsService) {}
 
   @Post()
-  create(@Req() req: AuthenticatedRequest, @Body() body: unknown) {
-    return this.jobs.create(req.auth.workspaceId, body);
+  create() {
+    throw new ForbiddenException({ code: "DOMAIN_WORKFLOW_REQUIRED", message: "Use the collection, production, review, publishing or analytics workflow. Generic job creation is internal only." });
   }
 
   @Get(":jobId")
@@ -30,8 +30,8 @@ export class JobsController {
   }
 
   @Post(":jobId/recover")
-  recover(@Req() req: AuthenticatedRequest, @Param("jobId") jobId: string, @Body() body: unknown) {
-    return this.jobs.recover(req.auth.workspaceId, jobId, body);
+  recover() {
+    throw new ForbiddenException({ code: "DOMAIN_WORKFLOW_REQUIRED", message: "Recover through the production workflow after resolving rights, approval and budget gates." });
   }
 
   @Get(":jobId/events")
@@ -40,6 +40,7 @@ export class JobsController {
     @Param("jobId") jobId: string,
     @Res() response: Response
   ): Promise<void> {
+    await this.jobs.get(req.auth.workspaceId, jobId);
     response.setHeader("Content-Type", "text/event-stream");
     response.setHeader("Cache-Control", "no-cache, no-transform");
     response.setHeader("Connection", "keep-alive");

@@ -97,7 +97,7 @@ describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, 
       platforms: ["YOUTUBE"],
       collectionRule: { keywords: ["science"], recencyHours: 24, collectionFrequencyMinutes: 1440 },
       template: { name: "Acceptance", tone: "clear", voiceProfile: "neutral", subtitleStyle: {}, visualStyle: {}, aiStockRatio: 1 },
-      outputProfiles: [{ platform: "YOUTUBE", minDurationSeconds: 15, maxDurationSeconds: 60, hookStyle: "question", captionStyle: "simple", metadataRules: {} }],
+      outputProfiles: [{ platform: "YOUTUBE", minDurationSeconds: 30, maxDurationSeconds: 60, hookStyle: "question", captionStyle: "simple", metadataRules: {} }],
       scheduleRules: [{ platform: "YOUTUBE", dayOfWeek: 1, timeOfDayLocal: "12:00", timezone: "UTC", maxPosts: 1 }],
       automation: { mode: "APPROVAL", minInventoryCount: 1, dailyPublishLimit: 1,
         errorAction: { onPolicyFailure: "hold", onAssetLicenseUnknown: "hold", onConsecutiveFailures: "pause_channel" } }
@@ -121,10 +121,15 @@ describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, 
     expect(CollectIdeasResponseSchema.parse(await session.json("/ideas/collect", collection))).toEqual(collected);
     const idea = collected.ideas[0];
     if (!idea) throw new Error("No collected idea");
-    const generation = { ideaId: idea.id, platform: "YOUTUBE", idempotencyKey: `script:${suffix}` };
+    await session.json("/automation/budgets", { channelId: channel.id, currency: "USD", dailyHardLimit: 100, monthlyHardLimit: 1000 });
+    const production = AutomationRunResponseSchema.parse(await session.json("/automation/runs", { channelId: channel.id, ideaId: idea.id, platforms: ["YOUTUBE"], idempotencyKey: `production:${suffix}` }));
     const scriptStartedAt = performance.now();
-    const scriptJob = ProductionJobResponseSchema.parse(await session.json("/generation/script-scene", generation));
-    expect(ProductionJobResponseSchema.parse(await session.json("/generation/script-scene", generation)).id).toBe(scriptJob.id);
+    const ready = await session.automationRun(production.id, (run) => run.steps.some((step) => step.stage === "RENDER" && step.status === "SUCCEEDED"));
+    const scriptJobId = ready.steps.find((step) => step.stage === "SCRIPT")?.productionJobId;
+    if (!scriptJobId) throw new Error("Production script job missing");
+    const scriptJob = ProductionJobResponseSchema.parse(await session.json(`/jobs/${scriptJobId}`));
+    // This manual publishing journey pauses automatic scheduling before approval.
+    await session.json(`/automation/runs/${production.id}/control`, { action: "pause" });
     const sseStartedAt = performance.now();
     const sseResponse = await session.response(`/jobs/${scriptJob.id}/events`);
     timings.sseConnectMs = Math.round(performance.now() - sseStartedAt);
@@ -132,20 +137,12 @@ describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, 
     const generated = z.object({ contentItemId: z.string(), sceneVersionId: z.string() }).parse((await session.job(scriptJob.id)).result);
     expect(await sseResponse.text()).toContain('"progress":100');
     timings.scriptJobMs = Math.round(performance.now() - scriptStartedAt);
-    const { contentItemId, sceneVersionId } = generated;
-    const enqueue = async (type: string, payload: Record<string, unknown>) => {
-      const startedAt = performance.now();
-      const input = { type, channelId: channel.id, contentItemId, idempotencyKey: `${type}:${suffix}`, payload };
-      const job = ProductionJobResponseSchema.parse(await session.json("/jobs", input));
-      const result = await session.job(job.id);
-      expect(ProductionJobResponseSchema.parse(await session.json("/jobs", input)).id).toBe(job.id);
-      timings[`${type.toLowerCase()}JobMs`] = Math.round(performance.now() - startedAt);
-      return result;
-    };
-    await enqueue("ASSET", { assetPreparation: { channelId: channel.id, contentItemId, sceneVersionId, platform: "YOUTUBE", prompt: "Science", idempotencyKey: `image:${suffix}` } });
-    await enqueue("TTS", { ttsPreparation: { channelId: channel.id, contentItemId, sceneVersionId, platform: "YOUTUBE", text: idea.summary, voice: "neutral", idempotencyKey: `tts:${suffix}` } });
-    const render = await enqueue("RENDER", { render: { channelId: channel.id, contentItemId, sceneVersionId, idempotencyKey: `render:${suffix}` } });
+    const { contentItemId } = generated;
+    const renderJobId = ready.steps.find((step) => step.stage === "RENDER")?.productionJobId;
+    if (!renderJobId) throw new Error("Production render job missing");
+    const render = await session.job(renderJobId);
     expect(render.result).toMatchObject({ qa: { width: 1080, height: 1920 } });
+    expect((await session.response("/jobs", { type: "PUBLISH", channelId: channel.id, contentItemId, payload: { publish: { publishPlanId: "injected" } } })).status).toBe(403);
     const reviewed = ContentReviewResponseSchema.parse(await session.json(`/content/${contentItemId}/review/policy-check`, { platform: "YOUTUBE" }));
     expect(reviewed.policy?.status).toBe("pass");
     expect(ContentReviewResponseSchema.parse(await session.json(`/content/${contentItemId}/review/action`, { action: "approve" })).status).toBe("APPROVED");

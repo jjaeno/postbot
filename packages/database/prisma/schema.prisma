@@ -1093,7 +1093,8 @@ model AnalyticsMetricSnapshot {
   analyticsSync     AnalyticsSync         @relation(fields: [analyticsSyncId], references: [id], onDelete: Restrict)
   platformPost      PlatformPost          @relation(fields: [platformPostId], references: [id], onDelete: Restrict)
 
-  @@unique([platformPostId, metric, observedAt, revision])
+  @@unique([analyticsSyncId, platformPostId, metric, observedAt, revision], map: "analytics_snapshot_sync_post_metric_observed_revision_key")
+  @@index([platformPostId], map: "analytics_snapshot_post_idx")
   @@index([analyticsSyncId, metric])
   @@map("analytics_metric_snapshots")
 }

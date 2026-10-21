@@ -28,6 +28,7 @@ export interface VideoRenderer {
 }
 
 export class RemotionVideoRenderer implements VideoRenderer {
+  constructor(private readonly concurrency = 2) {}
   async render(input: RenderInput): Promise<RenderedMedia> {
     assertRenderableDocument(input.sceneDocument);
     await mkdir(dirname(input.outputLocation), { recursive: true });
@@ -39,6 +40,7 @@ export class RemotionVideoRenderer implements VideoRenderer {
       composition,
       serveUrl,
       codec: "h264",
+      concurrency: this.concurrency,
       outputLocation: input.outputLocation,
       inputProps
     });
@@ -92,15 +94,19 @@ export class FfmpegPostProcessor {
     const record = parsed as { format?: { duration?: string }; streams?: Array<{ codec_type?: string; width?: number; height?: number }> };
     const stream = record.streams?.find((entry) => entry.width && entry.height);
     const durationSeconds = Number(record.format?.duration);
-    if (!stream || !Number.isFinite(durationSeconds) || !stream.width || !stream.height) throw new Error("Incomplete ffprobe output.");
+    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) throw new Error("Incomplete ffprobe output.");
     const hasAudio = record.streams?.some((entry) => entry.codec_type === "audio") ?? false;
+    if (!stream) {
+      if (!hasAudio) throw new Error("Incomplete ffprobe output.");
+      return { durationSeconds, width: 0, height: 0, hasAudio };
+    }
     const [volumeOutput, blackOutput] = await Promise.all([
       hasAudio ? captureError("ffmpeg", ["-i", videoInput, "-af", "volumedetect", "-f", "null", "-"]) : Promise.resolve(""),
       captureError("ffmpeg", ["-i", videoInput, "-vf", "blackdetect=d=0.5:pix_th=0.10", "-an", "-f", "null", "-"])
     ]);
     const volume = /mean_volume:\s*(-?[\d.]+)\s*dB/i.exec(volumeOutput)?.[1];
     const blackDuration = [...blackOutput.matchAll(/black_duration:([\d.]+)/g)].reduce((total, match) => total + Number(match[1] ?? 0), 0);
-    return { durationSeconds, width: stream.width, height: stream.height, hasAudio, meanVolumeDb: volume ? Number(volume) : null, blackFrameRatio: Math.min(1, blackDuration / durationSeconds) };
+    return { durationSeconds, width: stream.width ?? 0, height: stream.height ?? 0, hasAudio, meanVolumeDb: volume ? Number(volume) : null, blackFrameRatio: Math.min(1, blackDuration / durationSeconds) };
   }
 }
 

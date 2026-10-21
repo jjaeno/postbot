@@ -15,19 +15,36 @@ export class PublishProcessor {
     if (!publish || typeof publish !== "object" || Array.isArray(publish) || typeof (publish as Record<string, unknown>).publishPlanId !== "string") throw new Error("INVALID_PUBLISH_PAYLOAD");
     const plan = await this.prisma.publishPlan.findUniqueOrThrow({ where: { id: (publish as Record<string, string>).publishPlanId }, include: { sceneVersion: true, platformAccount: { include: { credential: true } }, platformPost: true, attempts: { orderBy: { attemptNumber: "desc" }, take: 1 }, contentItem: { include: { scriptVersions: { orderBy: { version: "desc" } }, sceneVersions: { orderBy: { version: "desc" } }, policyChecks: { orderBy: { checkedAt: "desc" } }, sourceReferences: true, assetUsages: { include: { asset: { include: { sources: true, licenses: { orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 1 } } } } } } } } });
     if (plan.platformPost) return { externalVideoId: plan.platformPost.externalPostId, url: plan.platformPost.postUrl, duplicate: true };
+    if (plan.status === "CANCELLED") return { cancelled: true };
     assertPlatformEnabled(loadConfig(), plan.platform);
     const branchUsages = plan.contentItem.assetUsages.filter((usage) => usage.sceneVersionId === plan.sceneVersionId || usage.sceneVersionId === null);
     const rightsVerified = branchUsages.length > 0 && branchUsages.every((usage) => (usage.asset.channelId === null || usage.asset.channelId === plan.contentItem.channelId) && usage.asset.licenses[0]?.status === "VERIFIED" && usage.asset.licenses[0]?.commercialUseAllowed === true && usage.asset.licenses[0]?.derivativeAllowed === true && (!usage.asset.licenses[0]?.validFrom || usage.asset.licenses[0].validFrom <= new Date()) && (!usage.asset.licenses[0]?.validUntil || usage.asset.licenses[0].validUntil > new Date()));
     const policyCheck = plan.contentItem.policyChecks.find((check) => check.platform === plan.platform);
+    if (policyCheck) {
+      const checkedRule = await this.prisma.policyRule.findUniqueOrThrow({ where: { id: policyCheck.policyRuleId } });
+      const currentRule = await this.prisma.policyRule.findFirst({ where: { platform: plan.platform, region: checkedRule.region, effectiveAt: { lte: new Date() } }, orderBy: [{ effectiveAt: "desc" }, { version: "desc" }] });
+      if (currentRule?.id !== checkedRule.id) throw new Error("PUBLISH_POLICY_VERSION_CHANGED_RECHECK_REQUIRED");
+    }
     const script = plan.contentItem.scriptVersions.find((version) => version.platform === plan.platform);
     const latestScene = plan.contentItem.sceneVersions.find((version) => version.platform === plan.platform);
     const quality = script?.qualitySnapshot && typeof script.qualitySnapshot === "object" && !Array.isArray(script.qualitySnapshot) ? script.qualitySnapshot : {};
     const environment = loadConfig();
     if ((environment.APP_ENV === "production" || environment.APP_ENV === "staging") && !environment.STAGING_FAKE_CANARY && (quality.provider !== "openai" || branchUsages.some((usage) => usage.asset.sources.some((source) => source.provider.startsWith("fake") || source.provider === "fixture")))) throw new Error("NON_PRODUCTION_ARTIFACT_PUBLISH_BLOCKED");
+    const metadata = quality.metadata && typeof quality.metadata === "object" && !Array.isArray(quality.metadata) ? quality.metadata : {};
+    const currentTitle = typeof quality.reviewTitle === "string" ? quality.reviewTitle : plan.contentItem.title;
+    const currentDescription = typeof metadata.description === "string" ? metadata.description : plan.contentItem.summary;
+    if (plan.title !== currentTitle || plan.description !== currentDescription || JSON.stringify(plan.hashtags ?? []) !== JSON.stringify(metadata.hashtags ?? [])) throw new Error("PUBLISH_METADATA_GATE_FAILED");
     if (!script || quality.reviewStatus !== "APPROVED" || latestScene?.id !== plan.sceneVersionId || !policyCheck || policyCheck.checkedAt < script.createdAt || policyCheck.checkedAt < latestScene.createdAt) throw new Error("PUBLISH_VERSION_GATE_FAILED");
     if (plan.status !== "SCHEDULED" || !plan.sceneVersion?.renderManifest || plan.platformAccount.status !== "CONNECTED" || policyCheck?.status !== "PASS" || plan.contentItem.sourceReferences.length === 0 || !rightsVerified) throw new Error("PUBLISH_GATE_FAILED");
     const attemptNumber = (plan.attempts[0]?.attemptNumber ?? 0) + 1;
-    const claimed = await this.prisma.publishPlan.updateMany({ where: { id: plan.id, status: "SCHEDULED" }, data: { status: "PUBLISHING" } });
+    const claimed = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM channels WHERE id = ${plan.contentItem.channelId} FOR UPDATE`;
+      const currentScript = await tx.scriptVersion.findFirst({ where: { contentItemId: plan.contentItemId, platform: plan.platform }, orderBy: { version: "desc" } });
+      const currentScene = await tx.sceneVersion.findFirst({ where: { contentItemId: plan.contentItemId, platform: plan.platform }, orderBy: { version: "desc" } });
+      const currentCheck = await tx.policyCheck.findFirst({ where: { contentItemId: plan.contentItemId, platform: plan.platform }, orderBy: { checkedAt: "desc" } });
+      if (currentScript?.id !== script.id || currentScene?.id !== latestScene.id || currentCheck?.id !== policyCheck.id || JSON.stringify(currentScript.qualitySnapshot) !== JSON.stringify(script.qualitySnapshot)) throw new Error("PUBLISH_VERSION_GATE_FAILED");
+      return tx.publishPlan.updateMany({ where: { id: plan.id, status: "SCHEDULED", updatedAt: plan.updatedAt }, data: { status: "PUBLISHING" } });
+    });
     if (claimed.count !== 1) throw new Error("PUBLISH_PLAN_ALREADY_CLAIMED_OR_CANCELLED");
     const attempt = await this.prisma.publishAttempt.create({ data: { publishPlanId: plan.id, attemptNumber, status: "RUNNING", idempotencyKey: `${plan.idempotencyKey}:attempt:${attemptNumber}`, startedAt: new Date() } });
     let confirmedExternalId: string | null = null;

@@ -5,7 +5,7 @@ import type {
   ProductionJobResponse,
   ProductionJobStatus
 } from "@postbot/contracts";
-import { Prisma, type PrismaClient } from "@postbot/database";
+import { assertJobScope, Prisma, type PrismaClient } from "@postbot/database";
 import type { CreateJobRecordInput, CreateJobRecordResult, JobsRepository } from "./jobs.repository.js";
 
 type JobWithAttempts = Prisma.ProductionJobGetPayload<{
@@ -83,6 +83,7 @@ export class PrismaJobsRepository implements JobsRepository {
         if (!channel) {
           throw new Error("CHANNEL_NOT_FOUND");
         }
+        await assertJobScope(tx, input);
         if (input.contentItemId) {
           const contentItem = await tx.contentItem.findFirst({
             where: { id: input.contentItemId, channelId: input.channelId }
@@ -155,16 +156,15 @@ export class PrismaJobsRepository implements JobsRepository {
     if (existing.status === "SUCCEEDED" || existing.status === "FAILED" || existing.status === "CANCELLED") {
       return existing;
     }
-    const updated = await this.prisma.productionJob.update({
-      where: { id: jobId },
+    await this.prisma.productionJob.updateMany({
+      where: { id: jobId, status: { notIn: ["SUCCEEDED", "FAILED", "CANCELLED"] } },
       data: {
         status: "CANCEL_REQUESTED",
         errorCode: null,
         errorMessage: null
-      },
-      include: { attempts: { orderBy: { attemptNumber: "asc" } } }
+      }
     });
-    return toJobResponse(updated);
+    return this.findForWorkspace(workspaceId, jobId);
   }
 
   async recover(workspaceId: string, jobId: string, runAfter: Date | null): Promise<ProductionJobResponse | null> {
@@ -175,29 +175,29 @@ export class PrismaJobsRepository implements JobsRepository {
     if (!["FAILED", "CANCELLED", "NEEDS_REVIEW"].includes(existing.status)) {
       return existing;
     }
-    const updated = await this.prisma.productionJob.update({
-      where: { id: jobId },
+    if (existing.result?.reconciliationRequired === true || existing.errorCode?.includes("RECONCILIATION_REQUIRED")) throw new Error("RECONCILIATION_REQUIRED");
+    await this.prisma.productionJob.updateMany({
+      where: { id: jobId, status: existing.status, updatedAt: new Date(existing.updatedAt) },
       data: {
         status: "QUEUED",
-        runAfter,
+        runAfter: runAfter ?? (existing.runAfter ? new Date(existing.runAfter) : null),
         startedAt: null,
         finishedAt: null,
         errorCode: null,
-        errorMessage: null,
-        result: Prisma.JsonNull
-      },
-      include: { attempts: { orderBy: { attemptNumber: "asc" } } }
+        errorMessage: null
+      }
     });
-    return toJobResponse(updated);
+    return this.findForWorkspace(workspaceId, jobId);
   }
 
   async start(jobId: string): Promise<number | null> {
     return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM production_jobs WHERE id = ${jobId} FOR UPDATE`;
       const job = await tx.productionJob.findUnique({
         where: { id: jobId },
         include: { attempts: { orderBy: { attemptNumber: "desc" }, take: 1 } }
       });
-      if (!job || job.status === "CANCEL_REQUESTED" || job.status === "CANCELLED") {
+      if (!job || !["QUEUED", "RETRY_WAIT", "FAILED"].includes(job.status)) {
         return null;
       }
       const attemptNumber = (job.attempts[0]?.attemptNumber ?? 0) + 1;

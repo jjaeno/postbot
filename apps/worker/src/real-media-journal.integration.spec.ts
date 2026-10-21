@@ -16,9 +16,11 @@ describe.skipIf(!enabled).sequential("real media journal (mock HTTP, no paid cal
     const workspace = await prisma.workspace.create({ data: { ownerId: user.id, name: "Journal", slug: key } });
     const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Journal", slug: key } });
     const content = await prisma.contentItem.create({ data: { channelId: channel.id, title: "Media", topicKey: key } });
-    const payload = { ttsPreparation: { channelId: channel.id, contentItemId: content.id, text: "Software verification.", voice: "fixture-voice", idempotencyKey: key } };
+    const run = await prisma.automationRun.create({ data: { channelId: channel.id, idempotencyKey: key, status: "RUNNING" } });
+    await prisma.automationCostReservation.create({ data: { automationRunId: run.id, stage: "TTS", amount: 1, idempotencyKey: `${key}:tts-cost` } });
+    const payload = { automation: { runId: run.id, stage: "TTS", platform: null }, ttsPreparation: { channelId: channel.id, contentItemId: content.id, text: "Software verification.", voice: "fixture-voice", idempotencyKey: key } };
     const job = await prisma.productionJob.create({ data: { channelId: channel.id, contentItemId: content.id, type: "TTS", queueName: "tts", idempotencyKey: key, payload } });
-    return { job, payload };
+    return { job, payload, run };
   };
   it("holds uncertain synthesis and prevents a second paid call on redelivery", async () => {
     const item = await fixture();
@@ -34,7 +36,8 @@ describe.skipIf(!enabled).sequential("real media journal (mock HTTP, no paid cal
     vi.stubEnv("IMAGE_PROVIDER", "google"); vi.stubEnv("GOOGLE_API_KEY", "contract-only"); vi.stubEnv("IMAGE_USD_PER_OUTPUT", "1");
     const version = await prisma.sceneVersion.create({ data: { contentItemId: item.job.contentItemId!, version: 1, schemaVersion: "1.0.0", sceneDocument: { schemaVersion: "1.0.0", title: "Image", width: 1080, height: 1920, fps: 30, durationInFrames: 450, scenes: [{ id: "only", startFrame: 0, durationInFrames: 450, visualPrompt: "Software", narration: { text: "Software", sourceUrl: "https://example.com/source" }, overlays: [{ kind: "title", text: "Software" }] }] } } });
     await prisma.asset.create({ data: { channelId: item.job.channelId!, dedupScope: item.job.channelId!, checksumSha256: randomUUID(), storageKey: "unused-fallback", kind: "IMAGE", origin: "INTERNAL", mimeType: "image/png", licenses: { create: { status: "VERIFIED", licenseName: "Fixture", commercialUseAllowed: true, derivativeAllowed: true, attributionRequired: false } } } });
-    const payload = { assetPreparation: { channelId: item.job.channelId!, contentItemId: item.job.contentItemId!, sceneVersionId: version.id, prompt: "Software", idempotencyKey: item.job.idempotencyKey } };
+    await prisma.automationCostReservation.create({ data: { automationRunId: item.run.id, stage: "ASSET", amount: 1, idempotencyKey: `${item.job.id}:asset-cost` } });
+    const payload = { automation: { runId: item.run.id, stage: "ASSET", platform: null }, assetPreparation: { channelId: item.job.channelId!, contentItemId: item.job.contentItemId!, sceneVersionId: version.id, prompt: "Software", idempotencyKey: item.job.idempotencyKey } };
     const job = await prisma.productionJob.create({ data: { channelId: item.job.channelId, contentItemId: item.job.contentItemId, type: "ASSET", queueName: "asset", idempotencyKey: randomUUID(), payload } });
     const network = vi.fn<typeof fetch>().mockRejectedValue(new DOMException("Aborted", "AbortError")); vi.stubGlobal("fetch", network);
     await new DeterministicJobProcessor(prisma).process({ id: job.id, type: "ASSET", queueName: "asset", runAfter: null, payload });

@@ -66,7 +66,7 @@ export class StockAssetsController {
     const held = await this.prisma.automationStep.findMany({ where: { stage: "ASSET", status: "HELD", errorCode: "STOCK_ASSET_REQUIRED", automationRun: { channelId, status: { in: ["PAUSED", "RUNNING"] } } } });
     for (const step of held) await this.prisma.$transaction([
       this.prisma.automationStep.update({ where: { id: step.id }, data: { status: "PENDING", errorCode: null, errorMessage: null, finishedAt: null } }),
-      this.prisma.automationRun.update({ where: { id: step.automationRunId }, data: { status: "QUEUED", pausedReason: null, nextRunAt: new Date() } })
+      this.prisma.automationRun.updateMany({ where: { id: step.automationRunId, OR: [{ status: { in: ["QUEUED", "RUNNING"] } }, { status: "PAUSED", pausedReason: { in: ["STOCK_ASSET_REQUIRED", "BRANCH_HELD"] } }] }, data: { status: "QUEUED", pausedReason: null, nextRunAt: new Date() } })
     ]);
     return { id: result.assetId };
   }
