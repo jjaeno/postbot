@@ -1,3 +1,4 @@
+import { FirstChannelWelcome, WorkspaceShell, WorkspaceView, useWorkspacePage } from "./workspace-shell";
 import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -9,7 +10,6 @@ import {
   CirclePlay,
   Lightbulb,
   LogIn,
-  LogOut,
   Pencil,
   Plus,
   RefreshCw,
@@ -531,6 +531,7 @@ const LegacyField = ({
 );
 
 const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
+  const page = useWorkspacePage();
   const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   const [wizardOpen, setWizardOpen] = useState(() => readWizardDraft() !== null);
@@ -580,51 +581,41 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
   const publishPlans = useQuery({ queryKey: ["publish-plans"], queryFn: fetchPublishPlans, enabled: Boolean(session), refetchInterval: 30_000 });
 
   return (
-    <main className="min-h-screen bg-background px-5 py-6 text-foreground md:px-8">
-      <section className="mx-auto flex w-full max-w-6xl flex-col gap-6">
-        <header className="flex flex-col gap-4 border-b border-border pb-5 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <div className="mb-2 flex items-center gap-2 text-primary">
-              <ShieldCheck aria-hidden="true" className="h-5 w-5" />
-              <span className="text-sm font-semibold">Postbot</span>
-            </div>
-            <h1 className="text-2xl font-semibold">채널 운영 설정</h1>
-            <p className="mt-2 text-sm text-muted-foreground">
-              {session.workspace.name} · {session.user.displayName}
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button className="gap-2" data-testid="create-channel" onClick={() => setWizardOpen(true)}>
-              <Plus aria-hidden="true" className="h-4 w-4" />
-              채널 만들기
-            </Button>
-            <Button className="gap-2 bg-foreground" onClick={() => logout.mutate()} disabled={logout.isPending}>
-              <LogOut aria-hidden="true" className="h-4 w-4" />
-              로그아웃
-            </Button>
-          </div>
-        </header>
-
+    <WorkspaceShell page={page} workspace={session.workspace.name} user={session.user.displayName} logout={() => logout.mutate()} loggingOut={logout.isPending} action={<Button className="gap-2" data-testid="create-channel" onClick={() => setWizardOpen(true)}><Plus aria-hidden="true" className="h-4 w-4" />채널 만들기</Button>}>
         {error ? <p className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</p> : null}
         {oauthResult ? <p role={oauthResult === "connected" ? "status" : "alert"} className="rounded-md border border-border bg-white p-3 text-sm">{oauthResult === "connected" ? "플랫폼 계정 연결이 완료되었습니다. 채널의 연결 상태를 확인해 주세요." : "연결을 완료하지 못했습니다. 권한 거절, 연결 만료 또는 제공자 설정을 확인한 뒤 원래 채널에서 다시 연결해 주세요."}</p> : null}
 
-        <nav aria-label="운영 메뉴" className="flex flex-wrap gap-2 text-sm">{[["home", "홈"], ["channels", "채널"], ["ideas", "아이디어"], ["content", "콘텐츠"], ["calendar", "캘린더"], ["insights", "분석·최적화"], ["settings", "사용량·설정"]].map(([id, label]) => <a className="rounded border border-border bg-white px-3 py-2 hover:border-primary" href={`#${id}`} key={id}>{label}</a>)}</nav>
+
         {[channels, platformAccounts, content, automationRuns, analytics, suggestions, costs, budgets, notifications, publishPlans].some((query) => query.isError) ? <p role="alert" className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">일부 운영 정보를 불러오지 못했습니다. 표시되지 않은 항목은 데이터 없음이나 비용 0을 뜻하지 않습니다. <Button onClick={() => void queryClient.invalidateQueries()}>다시 불러오기</Button></p> : null}
+        <WorkspaceView active={page} page="home">
+        {!channels.isLoading && !channels.isError && channels.data?.length === 0 ? <FirstChannelWelcome onCreate={() => setWizardOpen(true)} /> : null}
         <div id="home"><OperationsOverview channels={channels.data ?? []} content={content.data ?? []} /></div>
-        <HomeActions channels={channels.data ?? []} content={content.data ?? []} plans={publishPlans.data ?? []} accounts={platformAccounts.data ?? []} budgets={budgets.data ?? []} />
+        {channels.data?.length ? <HomeActions channels={channels.data ?? []} content={content.data ?? []} plans={publishPlans.data ?? []} accounts={platformAccounts.data ?? []} budgets={budgets.data ?? []} /> : null}
         <AutomationPanel runs={automationRuns.data ?? []} isLoading={automationRuns.isLoading} />
+        </WorkspaceView>
+        <WorkspaceView active={page} page="insights">
+        <div className="workspace-filterbar">
         <label id="insights" className="max-w-sm text-sm font-medium">분석할 채널<select className="mt-2 h-10 w-full rounded-md border border-border px-3" value={insightChannelId} onChange={(event) => setInsightChannelId(event.target.value)}>{(channels.data ?? []).map((channel) => <option key={channel.id} value={channel.id}>{channel.name}</option>)}</select></label>
-        <AnalyticsPanel report={analytics.data} isLoading={analytics.isLoading} />
         <div className="flex flex-wrap gap-3 text-sm"><label>분석 플랫폼<select className="ml-2 rounded border p-2" value={insightPlatform} onChange={(event) => setInsightPlatform(event.target.value)}><option value="">전체</option>{(["YOUTUBE", "INSTAGRAM", "TIKTOK"] as const).map((platform) => <option key={platform} value={platform}>{platformLabel(platform)}</option>)}</select></label><label>분석 기간<select className="ml-2 rounded border p-2" value={insightDays} onChange={(event) => setInsightDays(Number(event.target.value))}><option value={7}>최근 7일</option><option value={30}>최근 30일</option><option value={90}>최근 90일</option></select></label></div>
+        </div>
+        <AnalyticsPanel report={analytics.data} isLoading={analytics.isLoading} />
+        <div className="workspace-analysis-grid">
         <InsightControls request={request} channelId={insightChannelId} platform={insightPlatform} days={insightDays} owner={session.workspace.role === "OWNER"} />
         <OptimizationPanel suggestions={suggestions.data ?? []} isLoading={suggestions.isLoading} />
+        </div>
+        <details className="workspace-advanced"><summary>실험 및 전략 관리<span>영상 길이 비교 · 적용 이력</span></summary><div className="workspace-advanced-content">
         <ExperimentPanel channelId={insightChannelId || channels.data?.[0]?.id || ""} />
         <StrategyPanel channelId={insightChannelId} />
+        </div></details>
+        </WorkspaceView>
+        <WorkspaceView active={page} page="settings">
         <div aria-label="비용 필터" className="cost-filters flex flex-wrap gap-3 rounded border bg-white p-3 text-sm" data-testid="cost-filters" role="group"><label>비용 채널<select className="ml-2 rounded border p-2" value={costChannel} onChange={(event) => { setCostChannel(event.target.value); setCostContent(""); }}><option value="">전체</option>{channels.data?.map((channel) => <option key={channel.id} value={channel.id}>{channel.name}</option>)}</select></label><label>비용 콘텐츠<select className="ml-2 rounded border p-2" value={costContent} onChange={(event) => setCostContent(event.target.value)}><option value="">전체</option>{content.data?.filter((item) => !costChannel || item.channelId === costChannel).map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label><label>비용 제공자<input className="ml-2 rounded border p-2" placeholder="전체 또는 제공자 이름" value={costProvider} onChange={(event) => setCostProvider(event.target.value)} /></label><label>비용 기간<select className="ml-2 rounded border p-2" value={costDays} onChange={(event) => setCostDays(Number(event.target.value))}>{[7, 30, 90].map((days) => <option key={days} value={days}>최근 {days}일</option>)}</select></label></div>
         <div id="settings"><OperationsPanel costs={costs.data} notifications={notifications.data ?? []} isLoading={costs.isLoading || notifications.isLoading} /></div>
         <ProviderControls request={request} owner={session.workspace.role === "OWNER"} />
         <BudgetPanel budgets={budgets.data ?? []} channels={channels.data ?? []} isLoading={budgets.isLoading} onError={setError} />
 
+        </WorkspaceView>
+        <WorkspaceView active={page} page="channels">
         <div id="channels" className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
           <ChannelList
             accounts={platformAccounts.data ?? []}
@@ -635,13 +626,20 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
           />
           <EditPanel channel={editing} onClose={() => setEditing(null)} onError={setError} />
         </div>
+        </WorkspaceView>
+        <WorkspaceView active={page} page="ideas">
         <div id="ideas"><IdeasPanel channels={channels.data ?? []} onError={setError} /></div>
+        </WorkspaceView>
+        <WorkspaceView active={page} page="content">
         <ContentPanel channels={channels.data ?? []} content={content.data ?? []} isLoading={content.isLoading} onError={setError} selectedId={selectedContentId} onSelect={(id) => { setSelectedContentId(id); const url = new URL(window.location.href); url.searchParams.set("content", id); window.history.replaceState({}, "", url); }} />
-        <div id="calendar"><CalendarPanel channels={channels.data ?? []} plans={publishPlans.data ?? []} onSelect={(id, platform) => { selectReviewPlatform(platform); setSelectedContentId(id); const url = new URL(window.location.href); url.searchParams.set("content", id); window.history.replaceState({}, "", url); }} /></div>
+
         <ReviewPanel owner={session.workspace.role === "OWNER"} channels={channels.data ?? []} platform={selectedReviewPlatform} setPlatform={selectReviewPlatform} accounts={platformAccounts.data ?? []} content={content.data ?? []} contentItemId={selectedContentId} onSelectContent={(id) => { setSelectedContentId(id); const url = new URL(window.location.href); url.searchParams.set("content", id); window.history.replaceState({}, "", url); }} onError={setError} />
-      </section>
+        </WorkspaceView>
+        <WorkspaceView active={page} page="calendar">
+        <div id="calendar"><CalendarPanel channels={channels.data ?? []} plans={publishPlans.data ?? []} onSelect={(id, platform) => { window.location.hash = "content"; selectReviewPlatform(platform); setSelectedContentId(id); const url = new URL(window.location.href); url.searchParams.set("content", id); window.history.replaceState({}, "", url); }} /></div>
+        </WorkspaceView>
       {wizardOpen ? <ChannelWizard onClose={() => setWizardOpen(false)} onError={setError} /> : null}
-    </main>
+    </WorkspaceShell>
   );
 };
 

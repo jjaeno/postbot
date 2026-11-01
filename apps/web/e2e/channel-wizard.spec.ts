@@ -275,7 +275,7 @@ test("keeps long cost filter options inside narrow screens without losing select
   await mockApi(page);
   const title = "Reusable rocket test reaches new altitude";
   await page.route("**/content", (route) => route.fulfill({ json: { items: [{ id: "content-1", channelId: "channel-1", title, status: "REVIEW_REQUIRED", updatedAt: "2026-09-21T00:00:00.000Z", sceneVersionId: "scene-1", renderReady: true }] } }));
-  await page.goto("/");
+  await page.goto("/#settings");
   await page.getByLabel("비용 채널").selectOption("channel-1");
   await page.getByLabel("비용 콘텐츠").selectOption("content-1");
   await page.getByLabel("비용 제공자", { exact: true }).fill("fake-llm");
@@ -303,7 +303,7 @@ test("saves operational controls without overwriting independent platform settin
     expect(route.request().postDataJSON()).toMatchObject({ topic: "Verified rocket", collectionRule: { keywords: ["rocket", "space"], allowedSources: ["https://example.com"] }, outputProfiles: [{ platform: "YOUTUBE", hookStyle: "YT only" }], automation: { minInventoryCount: 3 } });
     saved = true; await route.fulfill({ json: channel("Science Today") });
   });
-  await page.setViewportSize({ width: 390, height: 844 }); await page.goto("/");
+  await page.setViewportSize({ width: 390, height: 844 }); await page.goto("/#channels");
   await page.getByTestId("edit-channel-channel-1").click();
   const editor = page.getByTestId("channel-operations-editor");
   await editor.getByLabel("주제", { exact: true }).fill("Verified rocket");
@@ -325,7 +325,7 @@ test("saves operational controls without overwriting independent platform settin
 });
 
 test("uses keyboard review tabs and labels populated descriptions independently of textarea content", async ({ page }) => {
-  await mockApi(page); await page.goto("/?contentItemId=content-1&platform=YOUTUBE");
+  await mockApi(page); await page.goto("/?contentItemId=content-1&platform=YOUTUBE#content");
   await page.getByLabel("검토할 콘텐츠").selectOption("content-1");
   const panel = page.getByTestId("review-panel");
   await expect(panel.getByLabel("설명", { exact: true })).toHaveValue("Verified science content");
@@ -342,7 +342,7 @@ test("loads the regenerated scene preview without requiring a page reload", asyn
   let version = 1;
   await page.route("**/content/content-1/review", (route) => route.fulfill({ json: { id: "content-1", channelId: "channel-1", status: "REVIEW_REQUIRED", title: "Rocket", description: "AI generated", durationSeconds: 30, sources: [], assets: [], policy: null, outputs: [{ platform: "YOUTUBE", scriptVersionId: `script-${version}`, sceneVersionId: `scene-${version}`, videoReady: true, scriptStatus: "ready", renderStatus: "ready", metadata: { description: "AI generated", hashtags: [] } }] } }));
   await page.route("**/content/content-1/review/preview?**", (route) => route.fulfill({ json: { url: `https://example.com/scene-${version}.mp4`, expiresInSeconds: 900 } }));
-  await page.goto("/"); await page.getByLabel("검토할 콘텐츠").selectOption("content-1");
+  await page.goto("/#content"); await page.getByLabel("검토할 콘텐츠").selectOption("content-1");
   const video = page.getByTestId("review-panel").locator("video");
   await expect(video).toHaveAttribute("src", "https://example.com/scene-1.mp4");
   version = 2;
@@ -376,9 +376,10 @@ test("shows suggestion failures and confirms provider stop and recovery", async 
     else await route.fulfill({ json: [{ provider: "image", isEnabled: enabled, reason: null }] });
   });
   await page.route("**/optimization/suggestions/generate", (route) => route.fulfill({ status: 409, json: { message: "표본을 확인할 수 없습니다" } }));
-  await page.goto("/"); await page.getByLabel("분석 플랫폼").selectOption("YOUTUBE");
+  await page.goto("/#insights"); await page.getByLabel("분석 플랫폼").selectOption("YOUTUBE");
   await page.getByTestId("insight-controls").getByRole("button", { name: "최적화 제안 생성" }).click();
   await expect(page.getByTestId("insight-controls").getByRole("alert")).toContainText("표본을 확인할 수 없습니다");
+  await page.getByRole("navigation", { name: "운영 메뉴" }).getByRole("link", { name: "사용량·설정" }).click();
   const provider = page.getByTestId("provider-controls").locator("article").filter({ hasText: /^image:/ });
   page.once("dialog", (dialog) => dialog.accept()); await provider.getByRole("button", { name: "중지", exact: true }).click(); await expect(provider).toContainText("차단");
   page.once("dialog", (dialog) => dialog.accept()); await provider.getByRole("button", { name: "복구 후 활성화" }).click(); await expect(provider).toContainText("활성");
@@ -387,8 +388,8 @@ test("shows suggestion failures and confirms provider stop and recovery", async 
 test("creates and edits a channel through the eight-step wizard", async ({ page }) => {
   await mockApi(page);
 
-  await page.goto("/");
-  await expect(page.getByRole("heading", { name: "채널 운영 설정" })).toBeVisible();
+  await page.goto("/#channels");
+  await expect(page.getByRole("heading", { name: "채널", exact: true })).toBeVisible();
 
   await page.getByTestId("create-channel").click();
   await expect(page.getByRole("heading", { name: "기본" })).toBeVisible();
@@ -423,7 +424,7 @@ test("creates and edits a channel through the eight-step wizard", async ({ page 
 test("connects and disconnects YouTube with the fake OAuth provider", async ({ page }) => {
   await mockApi(page);
 
-  await page.goto("/");
+  await page.goto("/#channels");
   await page.getByTestId("connect-youtube-channel-1").click();
 
   await expect(page.getByTestId("channel-card-channel-1")).toContainText("연결됨");
@@ -437,8 +438,11 @@ test("restores the operating dashboard and calendar after refresh", async ({ pag
   await mockApi(page);
   await page.goto("/");
   await expect(page.getByLabel("운영 현황")).toContainText("검토 필요");
+  await page.getByRole("navigation", { name: "운영 메뉴" }).getByRole("link", { name: "캘린더" }).click();
   await expect(page.getByTestId("calendar-panel")).toContainText("09:00");
+  await page.getByRole("navigation", { name: "운영 메뉴" }).getByRole("link", { name: "콘텐츠", exact: true }).click();
   await expect(page.getByRole("button", { name: /Reusable rocket/ })).toBeVisible();
+  await page.getByRole("navigation", { name: "운영 메뉴" }).getByRole("link", { name: "캘린더" }).click();
   await page.reload();
   await expect(page.getByTestId("calendar-panel")).toContainText("Science Today");
 });
@@ -446,7 +450,7 @@ test("restores the operating dashboard and calendar after refresh", async ({ pag
 test("approves reviewed content through the fake API", async ({ page }) => {
   await mockApi(page);
 
-  await page.goto("/");
+  await page.goto("/#content");
   await page.getByLabel("검토할 콘텐츠").selectOption("content-1");
   await page.getByRole("button", { name: "정책 검사" }).click();
   await expect(page.getByText("통과", { exact: true })).toBeVisible();
@@ -458,7 +462,7 @@ test("approves reviewed content through the fake API", async ({ page }) => {
 test("creates a full-auto channel through the fake API", async ({ page }) => {
   await mockApi(page);
 
-  await page.goto("/");
+  await page.goto("/#channels");
   await page.getByTestId("create-channel").click();
   await page.locator('input[name="name"]').fill("Auto Science");
 
@@ -484,7 +488,7 @@ test("creates a full-auto channel through the fake API", async ({ page }) => {
 });
 
 test("starts production from an idea without internal identifiers", async ({ page }) => {
-  await mockApi(page); await page.goto("/");
+  await mockApi(page); await page.goto("/#ideas");
   await page.getByLabel("제작 플랫폼").selectOption("YOUTUBE");
   const request = page.waitForRequest((candidate) => candidate.url().endsWith("/automation/runs") && candidate.method() === "POST");
   await page.getByRole("button", { name: "이 소재로 영상 만들기" }).click();
@@ -493,7 +497,7 @@ test("starts production from an idea without internal identifiers", async ({ pag
 });
 
 test("configures a workspace budget from the screen", async ({ page }) => {
-  await mockApi(page); await page.goto("/");
+  await mockApi(page); await page.goto("/#settings");
   await page.getByLabel("일간 중단 (USD)").fill("12.5");
   const request = page.waitForRequest((candidate) => candidate.url().endsWith("/automation/budgets") && candidate.method() === "POST");
   await page.getByRole("button", { name: "예산 저장" }).click();
@@ -529,6 +533,7 @@ test("explains OAuth return failure and does not display unavailable costs as ze
   await page.route("**/operations/costs?**", (route) => route.fulfill({ status: 503, json: { message: "Unavailable" } }));
   await page.goto("/?oauth=failed#channels");
   await expect(page.getByText(/권한 거절, 연결 만료/)).toBeVisible();
+  await page.getByRole("navigation", { name: "운영 메뉴" }).getByRole("link", { name: "사용량·설정" }).click();
   await expect(page.getByTestId("operations-panel")).toContainText("조회 실패");
 });
 
@@ -542,7 +547,8 @@ test("creates, starts and compares a limited experiment without claiming causali
     created = true; await route.fulfill({ json: experiment() });
   });
   await page.route("**/optimization/experiments/experiment-1/action", async (route) => { const input = route.request().postDataJSON() as { action: string }; state = input.action === "start" ? "RUNNING" : "COMPLETED"; await route.fulfill({ json: experiment() }); });
-  await page.goto("/");
+  await page.goto("/#insights");
+  await page.getByText("실험 및 전략 관리", { exact: false }).click();
   const panel = page.getByTestId("experiment-panel");
   await panel.getByLabel("실험 이름", { exact: true }).fill("Duration test");
   await panel.getByLabel("가설", { exact: true }).fill("Longer duration may help");
@@ -551,6 +557,42 @@ test("creates, starts and compares a limited experiment without claiming causali
   await panel.getByRole("button", { name: "가용 성과로 비교 완료" }).click();
   await expect(panel).toContainText("25.0%"); await expect(panel).toContainText("변경군 우세 가설");
   await expect(panel).toContainText("인과 효과나 통계적 유의성을 주장하지 않습니다");
+});
+
+test("separates sidebar pages, restores history and preserves unsaved input", async ({ page }) => {
+  await mockApi(page); await page.goto("/#home");
+  const nav = page.getByRole("navigation", { name: "운영 메뉴" });
+  await expect(page.getByRole("heading", { level: 1, name: "홈" })).toBeVisible();
+  await expect(page.getByTestId("experiment-panel")).not.toBeVisible();
+  await nav.getByRole("link", { name: "콘텐츠", exact: true }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "콘텐츠" })).toBeVisible();
+  await expect(nav.getByRole("link", { name: "콘텐츠", exact: true })).toHaveAttribute("aria-current", "page");
+  await page.getByLabel("검토할 콘텐츠").selectOption("content-1");
+  const title = page.getByTestId("review-panel").getByLabel("제목", { exact: true });
+  await title.fill("아직 저장하지 않은 제목");
+  await nav.getByRole("link", { name: "사용량·설정" }).click();
+  await page.getByLabel("일간 중단 (USD)").fill("17.5");
+  await page.goBack();
+  await expect(title).toBeVisible(); await expect(title).toHaveValue("아직 저장하지 않은 제목");
+  await page.goForward(); await expect(page.getByLabel("일간 중단 (USD)")).toHaveValue("17.5");
+  await page.reload(); await expect(page.getByRole("heading", { level: 1, name: "사용량·설정" })).toBeVisible();
+});
+
+test("opens mobile navigation and keeps page layouts within the viewport", async ({ page }) => {
+  await mockApi(page); await page.setViewportSize({ width: 390, height: 844 }); await page.goto("/#home");
+  await expect(page.getByRole("link", { name: "분석·최적화" })).not.toBeInViewport();
+  await page.getByRole("button", { name: "메뉴 열기" }).click();
+  await expect(page.getByRole("link", { name: "분석·최적화" })).toBeInViewport();
+  await page.getByRole("link", { name: "콘텐츠", exact: true }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "콘텐츠" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "메뉴 열기" })).toHaveAttribute("aria-expanded", "false");
+  for (const hash of ["home", "channels", "ideas", "content", "calendar", "insights", "settings"]) {
+    await page.goto("/#" + hash);
+    for (const width of [320, 390, 768, 1440]) {
+      await page.setViewportSize({ width, height: 844 });
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    }
+  }
 });
 
 test("recovers a held plan from the calendar without typing an internal identifier", async ({ page }) => {
