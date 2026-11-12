@@ -64,7 +64,9 @@ class Session {
     while (Date.now() < deadline) {
       const run = AutomationRunResponseSchema.parse(await this.json(`/automation/runs/${id}`));
       if (predicate(run)) return run;
-      if (["FAILED", "CANCELLED"].includes(run.status)) throw new Error(`Automation ended ${run.status}: ${run.lastErrorCode ?? "unknown"}`);
+      if (["FAILED", "CANCELLED", "PAUSED"].includes(run.status)) {
+        throw new Error(`Automation ended ${run.status}: ${run.pausedReason ?? run.lastErrorCode ?? "unknown"}`);
+      }
       await delay(2_000);
     }
     throw new Error(`Timed out waiting for automation run ${id}`);
@@ -198,7 +200,7 @@ describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, 
       };
     }));
     const channel = ChannelResponseSchema.parse(await session.json("/channels", {
-      name: `${mode} ${suffix}`, language: "en", targetAudience: "Science readers", topic: "science", platforms,
+      name: `${mode} ${suffix}`, startPaused: true, language: "en", targetAudience: "Science readers", topic: "science", platforms,
       collectionRule: { keywords: ["rocket"], recencyHours: 24, collectionFrequencyMinutes: 1440 },
       template: { name: mode, tone: "clear", voiceProfile: "neutral", subtitleStyle: {}, visualStyle: {}, aiStockRatio: 1 },
       outputProfiles: platforms.map((platform) => ({ platform, minDurationSeconds: 30, maxDurationSeconds: 30, hookStyle: "question", captionStyle: "simple", metadataRules: {} })),
@@ -222,6 +224,9 @@ describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, 
       OAuthCallbackResultSchema.parse(await session.json(`${callbackUrl.pathname}${callbackUrl.search}`));
     }
     await session.json("/automation/budgets", { channelId: channel.id, currency: "USD", dailySoftLimit: 50, dailyHardLimit: 100, monthlySoftLimit: 500, monthlyHardLimit: 1_000 });
+    // Let the scheduler see the channel only after all required setup is ready.
+    // Otherwise FULL_AUTO can retain a held run created during OAuth setup.
+    await session.json(`/channels/${channel.id}/resume`, {});
     const input = { channelId: channel.id, idempotencyKey: `automation:${mode.toLowerCase()}:${suffix}` };
     const started = AutomationRunResponseSchema.parse(await session.json("/automation/runs", input));
     expect(AutomationRunResponseSchema.parse(await session.json("/automation/runs", input)).id).toBe(started.id);
