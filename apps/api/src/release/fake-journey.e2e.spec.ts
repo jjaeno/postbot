@@ -61,15 +61,18 @@ class Session {
 
   async automationRun(id: string, predicate: (run: ReturnType<typeof AutomationRunResponseSchema.parse>) => boolean) {
     const deadline = Date.now() + 600_000;
+    let lastState = "not observed";
     while (Date.now() < deadline) {
       const run = AutomationRunResponseSchema.parse(await this.json(`/automation/runs/${id}`));
+      lastState = JSON.stringify({ status: run.status, pausedReason: run.pausedReason,
+        steps: run.steps.map(({ stage, platform, status, errorCode }) => ({ stage, platform, status, errorCode })) });
       if (predicate(run)) return run;
       if (["FAILED", "CANCELLED", "PAUSED"].includes(run.status)) {
         throw new Error(`Automation ended ${run.status}: ${run.pausedReason ?? run.lastErrorCode ?? "unknown"}`);
       }
       await delay(2_000);
     }
-    throw new Error(`Timed out waiting for automation run ${id}`);
+    throw new Error(`Timed out waiting for automation run ${id}: ${lastState}`);
   }
 }
 

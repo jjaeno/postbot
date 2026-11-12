@@ -42,6 +42,8 @@
 
 각 attempt는 `JobAttempt.attemptNumber`로 순서를 가진다. 작업 idempotency는 `ProductionJob.idempotencyKey` UNIQUE 제약으로 보장하고, 중복 생성 요청은 기존 job을 반환한다.
 
+자동화 단계의 `productionJobId` 연결은 BullMQ enqueue 전에 DB에 저장한다. 빠른 worker가 먼저 완료해 단계 상태 갱신이 누락되는 경합을 방지하며, enqueue 이후 API가 단계 상태를 다시 `QUEUED`로 덮어쓰지 않는다. 연결 저장에 실패하면 큐 전송도 수행하지 않는다.
+
 ## Worker
 
 `apps/worker`는 각 queue마다 BullMQ worker를 생성한다. 현재 단계의 processor는 deterministic behavior만 수행한다. 실제 수집, 대본, 에셋, TTS, 렌더, 정책, 게시, 분석 로직은 후속 단계에서 각 Provider 인터페이스 뒤에 연결한다.

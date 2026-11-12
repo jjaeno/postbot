@@ -582,24 +582,25 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     const prepared = await this.prepareStage(workspaceId, runId, channelId, stage, platform);
     if (!prepared) return;
     const platformKey = platform?.toLowerCase() ?? "common";
-    const job = await this.jobs.create(workspaceId, {
+    await this.jobs.create(workspaceId, {
       type: stage,
       channelId,
       contentItemId: prepared.contentItemId,
       idempotencyKey: `automation:${runId}:${platformKey}:${stage.toLowerCase()}`,
       payload: prepared.payload,
       runAfter: prepared.runAfter
+    }, async (job) => {
+      await this.prisma.$transaction([
+        this.prisma.automationStep.updateMany({
+          where: { id: step.id, status: { not: "CANCELLED" } },
+          data: { productionJobId: job.id }
+        }),
+        this.prisma.automationRun.updateMany({
+          where: { id: runId, status: { in: ["QUEUED", "RUNNING"] } },
+          data: { status: "RUNNING", heartbeatAt: new Date(), nextRunAt: null }
+        })
+      ]);
     });
-    await this.prisma.$transaction([
-      this.prisma.automationStep.updateMany({
-        where: { id: step.id, status: { not: "CANCELLED" } },
-        data: { status: "QUEUED", productionJobId: job.id }
-      }),
-      this.prisma.automationRun.updateMany({
-        where: { id: runId, status: { in: ["QUEUED", "RUNNING"] } },
-        data: { status: "RUNNING", heartbeatAt: new Date(), nextRunAt: null }
-      })
-    ]);
   }
 
   private async prepareStage(

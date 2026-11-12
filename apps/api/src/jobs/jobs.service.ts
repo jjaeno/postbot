@@ -23,7 +23,11 @@ export class JobsService {
     @Inject(QUEUE_ADAPTER) private readonly queue: QueueAdapter
   ) {}
 
-  async create(workspaceId: string, rawInput: unknown): Promise<ProductionJobResponse> {
+  async create(
+    workspaceId: string,
+    rawInput: unknown,
+    beforeEnqueue?: (job: ProductionJobResponse) => Promise<void>
+  ): Promise<ProductionJobResponse> {
     const input = this.parseCreateInput(rawInput);
     const context = getLogContext();
     const tracedInput = { ...input, payload: { ...input.payload, _trace: { correlationId: context.correlationId ?? crypto.randomUUID(), workspaceId, channelId: input.channelId, contentItemId: input.contentItemId ?? null } } };
@@ -34,6 +38,8 @@ export class JobsService {
         runAfterDate: parseRunAfter(tracedInput.runAfter)
       });
       if (result.created || result.job.status === "QUEUED") {
+        // Persist dependent records before a worker can observe this job.
+        await beforeEnqueue?.(result.job);
         await this.queue.enqueue({
           id: result.job.id,
           type: result.job.type,
