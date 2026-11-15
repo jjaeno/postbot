@@ -62,17 +62,33 @@ class Session {
   async automationRun(id: string, predicate: (run: ReturnType<typeof AutomationRunResponseSchema.parse>) => boolean) {
     const deadline = Date.now() + 600_000;
     let lastState = "not observed";
+    let lastJobs = "not observed";
+    let lastInspectedAt = Date.now();
     while (Date.now() < deadline) {
       const run = AutomationRunResponseSchema.parse(await this.json(`/automation/runs/${id}`));
       lastState = JSON.stringify({ status: run.status, pausedReason: run.pausedReason,
-        steps: run.steps.map(({ stage, platform, status, errorCode }) => ({ stage, platform, status, errorCode })) });
+        steps: run.steps.map(({ stage, platform, status, errorCode, productionJobId }) => ({ stage, platform, status, errorCode, productionJobId })) });
       if (predicate(run)) return run;
       if (["FAILED", "CANCELLED", "PAUSED"].includes(run.status)) {
         throw new Error(`Automation ended ${run.status}: ${run.pausedReason ?? run.lastErrorCode ?? "unknown"}`);
       }
+      if (Date.now() - lastInspectedAt >= 60_000) {
+        lastInspectedAt = Date.now();
+        const states = await Promise.all(run.steps.filter((step) => step.status === "QUEUED" && step.productionJobId).map(async (step) => {
+          const job = ProductionJobResponseSchema.parse(await this.json(`/jobs/${step.productionJobId}`));
+          // Only state metadata is safe to log; payloads/results may contain credentials or content.
+          return { stage: step.stage, platform: step.platform, jobId: job.id, status: job.status, startedAt: job.startedAt,
+            runAfter: job.runAfter, errorCode: job.errorCode,
+            attempts: job.attempts.map(({ attemptNumber, status, errorCode }) => ({ attemptNumber, status, errorCode })) };
+        }));
+        lastJobs = JSON.stringify(states);
+        if (states.some((job) => job.status === "RUNNING" && job.startedAt && Date.now() - Date.parse(job.startedAt) >= 60_000)) {
+          throw new Error(`Worker claim did not advance its automation step: ${lastJobs}`);
+        }
+      }
       await delay(2_000);
     }
-    throw new Error(`Timed out waiting for automation run ${id}: ${lastState}`);
+    throw new Error(`Timed out waiting for automation run ${id}: ${lastState}; jobs: ${lastJobs}`);
   }
 }
 
