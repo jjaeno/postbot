@@ -126,7 +126,6 @@ export class DeterministicJobProcessor {
       await this.cancel(input.id, null);
       return;
     }
-    await this.markAutomationStepRunning(input.id, attemptNumber);
     const config = loadConfig();
     const realPaid = (input.type === "SCRIPT" && config.LLM_PROVIDER === "openai") || (input.type === "ASSET" && config.IMAGE_PROVIDER === "google") || (input.type === "TTS" && config.TTS_PROVIDER === "elevenlabs");
     if (realPaid) {
@@ -317,6 +316,9 @@ export class DeterministicJobProcessor {
           errorMessage: null
         }
       });
+      // A failed automation-state write must roll back the claim and attempt.
+      // Otherwise redelivery sees RUNNING and drops work that never executed.
+      await this.markAutomationStepRunning(jobId, attemptNumber, tx);
       return attemptNumber;
     });
   }
@@ -422,15 +424,13 @@ export class DeterministicJobProcessor {
     });
   }
 
-  private async markAutomationStepRunning(jobId: string, attemptNumber: number): Promise<void> {
-    const job = await this.prisma.productionJob.findUnique({ where: { id: jobId }, select: { payload: true } });
+  private async markAutomationStepRunning(jobId: string, attemptNumber: number, tx: Prisma.TransactionClient): Promise<void> {
+    const job = await tx.productionJob.findUnique({ where: { id: jobId }, select: { payload: true } });
     const runId = job ? automationRunId(job.payload as Record<string, unknown>) : null;
     if (!runId) return;
     const now = new Date();
-    await this.prisma.$transaction([
-      this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "RUNNING", attemptCount: attemptNumber, startedAt: now } }),
-      this.prisma.automationRun.updateMany({ where: { id: runId, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "RUNNING", heartbeatAt: now } })
-    ]);
+    await tx.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "RUNNING", attemptCount: attemptNumber, startedAt: now } });
+    await tx.automationRun.updateMany({ where: { id: runId, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "RUNNING", heartbeatAt: now } });
   }
 
   private async needsReview(jobId: string, attemptNumber: number, result: Record<string, unknown>, errorCode = "ASSET_LICENSE_REVIEW_REQUIRED"): Promise<void> {
