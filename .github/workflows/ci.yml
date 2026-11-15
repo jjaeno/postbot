@@ -76,9 +76,14 @@ jobs:
       - run: pnpm build
       - run: pnpm audit --prod --audit-level=high
 
-  docker-smoke:
+  docker-smoke-build:
     needs: validate
     runs-on: ubuntu-latest
+    # Keep each production image on a separate runner to bound disk usage.
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [api, worker, web, renderer]
     services:
       mysql:
         image: mysql:8.4
@@ -109,18 +114,19 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v4
+        if: matrix.app == 'api'
         with:
           version: 10.34.5
       - uses: actions/setup-node@v5
+        if: matrix.app == 'api'
         with:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+        if: matrix.app == 'api'
       - run: pnpm --filter @postbot/database exec prisma migrate deploy --schema prisma/schema.prisma
-      - run: docker build --build-arg APP=api -t postbot-api:${{ github.sha }} .
-      - run: docker build --build-arg APP=worker -t postbot-worker:${{ github.sha }} .
-      - run: docker build --build-arg APP=web -t postbot-web:${{ github.sha }} .
-      - run: docker build --build-arg APP=renderer -t postbot-renderer:${{ github.sha }} .
+        if: matrix.app == 'api'
+      - run: docker build --build-arg APP=${{ matrix.app }} -t postbot-${{ matrix.app }}:${{ github.sha }} .
       - run: >-
           docker run --detach --name postbot-api --network host
           --env DATABASE_URL --env REDIS_URL
@@ -129,11 +135,24 @@ jobs:
           --env STORAGE_PROVIDER
           --env YOUTUBE_OAUTH_PROVIDER --env INSTAGRAM_OAUTH_PROVIDER --env TIKTOK_OAUTH_PROVIDER
           postbot-api:${{ github.sha }}
+        if: matrix.app == 'api'
       - run: curl --fail --retry 10 --retry-connrefused --retry-delay 2 http://127.0.0.1:3000/ready
-      - if: always()
+        if: matrix.app == 'api'
+      - if: always() && matrix.app == 'api'
         run: docker logs postbot-api
-      - if: always()
+      - if: always() && matrix.app == 'api'
         run: docker rm --force postbot-api
+
+  # Preserve the existing required-check name while aggregating all matrix jobs.
+  docker-smoke:
+    needs: docker-smoke-build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all production image smoke checks
+        env:
+          BUILD_RESULT: ${{ needs.docker-smoke-build.result }}
+        run: test "$BUILD_RESULT" = success
 
   browser-e2e:
     needs: validate
