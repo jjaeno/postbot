@@ -44,6 +44,8 @@
 
 자동화 단계의 `productionJobId` 연결은 BullMQ enqueue 전에 DB에 저장한다. 빠른 worker가 먼저 완료해 단계 상태 갱신이 누락되는 경합을 방지하며, enqueue 이후 API가 단계 상태를 다시 `QUEUED`로 덮어쓰지 않는다. 연결 저장에 실패하면 큐 전송도 수행하지 않는다.
 
+스케줄러는 60초 이상 갱신되지 않은 `QUEUED`/`RUNNING` 단계도 재확인한다. 작업 연결 전 중단된 claim은 갱신 시각을 비교해 회수하고, DB에 대기 중인 작업은 같은 job ID로 큐 등록을 복구한다. 이미 끝난 작업은 저장된 결과만 단계에 반영하며 재실행하지 않는다. `NEEDS_REVIEW`는 `HELD`, 실패·취소는 `FAILED`로 반영해 자동 유료 재호출이나 재게시를 막는다. 실제 실행 중인 작업은 그대로 둔다.
+
 ## Worker
 
 `apps/worker`는 각 queue마다 BullMQ worker를 생성한다. 현재 단계의 processor는 deterministic behavior만 수행한다. 실제 수집, 대본, 에셋, TTS, 렌더, 정책, 게시, 분석 로직은 후속 단계에서 각 Provider 인터페이스 뒤에 연결한다.

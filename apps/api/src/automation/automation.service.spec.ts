@@ -78,6 +78,20 @@ describe("automation platform branches", () => {
     });
   });
 
+  it("revisits stale queued and running branches without reclaiming fresh claims", () => {
+    const now = Date.now();
+    const state = steps().map((step) => ({ ...step, updatedAt: new Date(now - 120_000) }));
+    for (const step of state) {
+      if (step.stage === "SCRIPT") step.status = step.platform === "TIKTOK" ? "RUNNING" : "QUEUED";
+      if (step.stage === "SCRIPT" && step.platform === "INSTAGRAM") step.updatedAt = new Date(now);
+    }
+    expect(evaluateAutomationBranches(state)).toEqual({
+      status: "RUNNING", runnable: [{ stage: "SCRIPT", platform: "YOUTUBE" }, { stage: "SCRIPT", platform: "TIKTOK" }]
+    });
+    state[0]!.status = "QUEUED";
+    expect(evaluateAutomationBranches(state)).toEqual({ status: "RUNNING", runnable: [{ stage: "COLLECT", platform: null }] });
+  });
+
   it("blocks only the platform whose policy is held while other branches continue", () => {
     const state = steps();
     for (const step of state) {

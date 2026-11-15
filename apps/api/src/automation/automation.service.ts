@@ -47,7 +47,11 @@ type RunStep = {
   stage: string;
   platform: Platform | null;
   status: string;
+  updatedAt?: Date;
 };
+
+const canDispatchAutomationStep = (step: RunStep): boolean => step.status === "PENDING"
+  || (["QUEUED", "RUNNING"].includes(step.status) && step.updatedAt !== undefined && isAbandonedAutomationClaim(step.updatedAt));
 
 export type AutomationRunDecision =
   | { status: "RUNNING"; runnable: Array<{ stage: Stage; platform: BranchPlatform }> }
@@ -59,7 +63,7 @@ export const evaluateAutomationBranches = (steps: RunStep[]): AutomationRunDecis
   if (common.status === "FAILED") return { status: "FAILED", runnable: [] };
   if (common.status === "HELD") return { status: "PAUSED", runnable: [] };
   if (!isComplete(common.status)) {
-    return common.status === "PENDING"
+    return canDispatchAutomationStep(common)
       ? { status: "RUNNING", runnable: [{ stage: "COLLECT", platform: null }] }
       : { status: "RUNNING", runnable: [] };
   }
@@ -80,7 +84,7 @@ export const evaluateAutomationBranches = (steps: RunStep[]): AutomationRunDecis
     const step = branch[firstIncomplete]!;
     if (step.status === "FAILED") failed = true;
     else if (step.status === "HELD") held = true;
-    else if (step.status === "PENDING") {
+    else if (canDispatchAutomationStep(step)) {
       runnable.push({ stage: step.stage as Stage, platform });
       active = true;
     } else {
@@ -535,8 +539,23 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     if (step.productionJobId) {
       const existingJob = await this.prisma.productionJob.findUnique({
         where: { id: step.productionJobId },
-        select: { status: true }
+        select: { status: true, result: true, errorCode: true, errorMessage: true, finishedAt: true,
+          attempts: { orderBy: { attemptNumber: "desc" }, take: 1, select: { attemptNumber: true } } }
       });
+      // Reconcile a missed worker notification without executing terminal work again.
+      if (existingJob && ["QUEUED", "RUNNING"].includes(step.status)
+        && ["SUCCEEDED", "FAILED", "NEEDS_REVIEW", "CANCELLED"].includes(existingJob.status)) {
+        const status = existingJob.status === "SUCCEEDED" ? "SUCCEEDED" : existingJob.status === "NEEDS_REVIEW" ? "HELD" : "FAILED";
+        await this.prisma.automationStep.updateMany({
+          where: { id: step.id, productionJobId: step.productionJobId, status: { in: ["QUEUED", "RUNNING"] } },
+          data: { status, output: existingJob.result === null ? Prisma.DbNull : existingJob.result,
+            attemptCount: existingJob.attempts[0]?.attemptNumber ?? step.attemptCount,
+            finishedAt: existingJob.finishedAt ?? new Date(),
+            errorCode: status === "SUCCEEDED" ? null : existingJob.errorCode ?? `JOB_${existingJob.status}`,
+            errorMessage: status === "SUCCEEDED" ? null : existingJob.errorMessage }
+        });
+        return;
+      }
       if (existingJob && ["FAILED", "NEEDS_REVIEW", "CANCELLED"].includes(existingJob.status)) {
         if (isCostStage(stage) && !await this.reserveCost(workspaceId, runId, channelId, stage, platform)) return;
         if (stage === "PUBLISH") {
@@ -566,7 +585,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     if (step.status === "QUEUED") {
       if (!isAbandonedAutomationClaim(step.updatedAt)) return;
       await this.prisma.automationStep.updateMany({
-        where: { id: step.id, status: "QUEUED", productionJobId: null },
+        where: { id: step.id, status: "QUEUED", productionJobId: null, updatedAt: step.updatedAt },
         data: { status: "PENDING" }
       });
     }
@@ -1100,7 +1119,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     channelId: string;
     status: string;
     channel: { workspaceId: string };
-    steps: Array<{ id: string; stage: string; platform: Platform | null; status: string; errorCode: string | null; errorMessage?: string | null }>;
+    steps: Array<{ id: string; stage: string; platform: Platform | null; status: string; errorCode: string | null; errorMessage?: string | null; updatedAt?: Date }>;
   }): Promise<void> {
     const decision = evaluateAutomationBranches(run.steps);
     if (decision.status !== "RUNNING") {
