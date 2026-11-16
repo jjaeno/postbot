@@ -18,6 +18,10 @@ export async function recoverQueues(prisma: PrismaClient, queue: QueueAdapter, s
       const review = ["SCRIPT", "ASSET", "TTS", "PUBLISH"].includes(job.type);
       await tx.productionJob.update({ where: { id: job.id }, data: { executionToken: null, heartbeatAt: null, status: review ? "NEEDS_REVIEW" : "RETRY_WAIT", errorCode: review ? "RECONCILIATION_REQUIRED" : "QUEUE_STATE_RECOVERED", ...(review ? { result: { reconciliationRequired: true } } : {}) } });
       await tx.jobAttempt.updateMany({ where: { productionJobId: job.id, status: "RUNNING" }, data: { status: review ? "NEEDS_REVIEW" : "FAILED", finishedAt: new Date(), errorCode: "OWNER_LOST" } });
+      if (job.type === "ANALYTICS") {
+        const domain = (job.payload as Record<string, unknown>).analytics as { syncId?: string } | undefined;
+        if (domain?.syncId) await tx.analyticsSync.updateMany({ where: { id: domain.syncId, status: "COLLECTING" }, data: { status: "PARTIAL", nextAttemptAt: null } });
+      }
       if (job.type === "PUBLISH") {
         const payload = job.payload as Record<string, unknown>;
         const publish = payload.publish as { publishPlanId?: string } | undefined;

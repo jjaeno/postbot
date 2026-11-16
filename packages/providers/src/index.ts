@@ -8,13 +8,14 @@ export interface ProviderResult {
 
 export type AnalyticsMetric = "views" | "impressions" | "reach" | "average_view_ratio" | "average_watch_seconds" | "completion_rate" | "engagement_rate";
 export type AnalyticsMetricValue = { metric: AnalyticsMetric; value: number | null; unit: "count" | "seconds" | "ratio" | null; aggregation: "sum" | "average" | "ratio" | null; unavailableReason: string | null };
-export type AnalyticsPostResult = { externalPostId: string; observedAt: string; raw: Record<string, unknown>; metrics: readonly AnalyticsMetricValue[] };
+export type AnalyticsObservation = { kind: "PERIOD_TOTAL" | "LIFETIME_SNAPSHOT"; periodStart?: string; periodEnd?: string };
+export type AnalyticsPostResult = { observation?: AnalyticsObservation; externalPostId: string; observedAt: string; raw: Record<string, unknown>; metrics: readonly AnalyticsMetricValue[] };
 export type AnalyticsPage = { posts: readonly AnalyticsPostResult[]; nextPageToken: string | null; dataDelayHours: number | null };
 export interface AnalyticsProvider { fetchPage(input: { platform: "YOUTUBE" | "INSTAGRAM" | "TIKTOK"; postIds: readonly string[]; periodStart: string; periodEnd: string; pageToken: string | null }): Promise<AnalyticsPage>; }
 
 export class FakeAnalyticsProvider implements AnalyticsProvider {
   fetchPage(input: { platform: "YOUTUBE" | "INSTAGRAM" | "TIKTOK"; postIds: readonly string[]; periodStart: string; periodEnd: string; pageToken: string | null }): Promise<AnalyticsPage> {
-    const posts = input.postIds.slice(Number(input.pageToken ?? 0), Number(input.pageToken ?? 0) + 1).map((externalPostId, index) => ({ externalPostId, observedAt: input.periodEnd, raw: { platform: input.platform, periodStart: input.periodStart, page: input.pageToken ?? "first" }, metrics: [
+    const posts = input.postIds.slice(Number(input.pageToken ?? 0), Number(input.pageToken ?? 0) + 1).map((externalPostId, index) => ({ externalPostId, observedAt: new Date().toISOString(), observation: { kind: "PERIOD_TOTAL" as const, periodStart: input.periodStart, periodEnd: input.periodEnd }, raw: { platform: input.platform, periodStart: input.periodStart, page: input.pageToken ?? "first" }, metrics: [
       { metric: "views" as const, value: 100 + index, unit: "count" as const, aggregation: "sum" as const, unavailableReason: null },
       { metric: "average_watch_seconds" as const, value: 12.5, unit: "seconds" as const, aggregation: "average" as const, unavailableReason: null },
       { metric: "completion_rate" as const, value: null, unit: null, aggregation: null, unavailableReason: "NOT_PROVIDED_BY_PLATFORM" }
@@ -39,11 +40,24 @@ const analyticsFetchJson = async <Body>(url: string, options: AnalyticsHttpOptio
 
 const unavailableMetric = (metric: AnalyticsMetric, reason: string): AnalyticsMetricValue => ({ metric, value: null, unit: null, aggregation: null, unavailableReason: reason });
 
+// YouTube report days are Pacific calendar days, including DST transitions.
+const pacificMidnight = (date: string): string => {
+  const target = new Date(`${date}T00:00:00.000Z`).getTime();
+  let instant = target;
+  const format = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+  for (let pass = 0; pass < 3; pass++) {
+    const parts = Object.fromEntries(format.formatToParts(instant).map((part) => [part.type, part.value]));
+    const local = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute), Number(parts.second));
+    instant += target - local;
+  }
+  return new Date(instant).toISOString();
+};
+
 export class YouTubeAnalyticsProvider implements AnalyticsProvider {
   constructor(private readonly options: AnalyticsHttpOptions) {}
 
   async fetchPage(input: Parameters<AnalyticsProvider["fetchPage"]>[0]): Promise<AnalyticsPage> {
-    if (input.pageToken || input.postIds.length === 0) return { posts: [], nextPageToken: null, dataDelayHours: 48 };
+    if (input.pageToken || input.postIds.length === 0) return { posts: [], nextPageToken: null, dataDelayHours: 72 };
     const url = new URL("https://youtubeanalytics.googleapis.com/v2/reports");
     url.searchParams.set("ids", "channel==MINE");
     url.searchParams.set("startDate", input.periodStart.slice(0, 10));
@@ -54,7 +68,7 @@ export class YouTubeAnalyticsProvider implements AnalyticsProvider {
     const raw = await analyticsFetchJson<{ columnHeaders?: Array<{ name?: string }>; rows?: Array<Array<string | number>> }>(url.toString(), this.options);
     const headers = raw.columnHeaders?.map((header) => header.name ?? "") ?? [];
     const index = (name: string): number => headers.indexOf(name);
-    const observedAt = input.periodEnd;
+    const observedAt = new Date().toISOString();
     const rows = new Map((raw.rows ?? []).map((row) => [String(row[index("video")]), row]));
     const posts = input.postIds.map((externalPostId): AnalyticsPostResult => {
       const row = rows.get(externalPostId);
@@ -62,14 +76,14 @@ export class YouTubeAnalyticsProvider implements AnalyticsProvider {
       const views = number("views");
       const averageSeconds = number("averageViewDuration");
       const completion = number("averageViewPercentage");
-      return { externalPostId, observedAt, raw: { headers, row: row ?? null }, metrics: [
+      return { externalPostId, observedAt, observation: { kind: "PERIOD_TOTAL", periodStart: pacificMidnight(input.periodStart.slice(0, 10)), periodEnd: pacificMidnight(new Date(new Date(`${input.periodEnd.slice(0, 10)}T00:00:00.000Z`).getTime() + 86_400_000).toISOString().slice(0, 10)) }, raw: { headers, row: row ?? null }, metrics: [
         views === null ? unavailableMetric("views", "NOT_RETURNED_BY_YOUTUBE") : { metric: "views", value: views, unit: "count", aggregation: "sum", unavailableReason: null },
         averageSeconds === null ? unavailableMetric("average_watch_seconds", "NOT_RETURNED_BY_YOUTUBE") : { metric: "average_watch_seconds", value: averageSeconds, unit: "seconds", aggregation: "average", unavailableReason: null },
         completion === null ? unavailableMetric("average_view_ratio", "NOT_RETURNED_BY_YOUTUBE") : { metric: "average_view_ratio", value: completion / 100, unit: "ratio", aggregation: "ratio", unavailableReason: null },
         unavailableMetric("completion_rate", "NOT_PROVIDED_BY_YOUTUBE"), unavailableMetric("impressions", "REQUIRES_SEPARATE_YOUTUBE_REPORT"), unavailableMetric("engagement_rate", "PLATFORM_METRIC_NOT_EQUIVALENT")
       ] };
     });
-    return { posts, nextPageToken: null, dataDelayHours: 48 };
+    return { posts, nextPageToken: null, dataDelayHours: 72 };
   }
 }
 
@@ -85,12 +99,12 @@ export class InstagramAnalyticsProvider implements AnalyticsProvider {
       const values = new Map((raw.data ?? []).map((entry) => [entry.name ?? "", entry.values?.[0]?.value ?? entry.total_value?.value ?? null]));
       const metric = (name: string): number | null => typeof values.get(name) === "number" ? values.get(name) as number : null;
       const views = metric("views"); const reach = metric("reach"); const interactions = metric("total_interactions"); const watchMs = metric("ig_reels_avg_watch_time");
-      return { externalPostId, observedAt: input.periodEnd, raw, metrics: [
+      return { externalPostId, observedAt: new Date().toISOString(), observation: { kind: "LIFETIME_SNAPSHOT" }, raw, metrics: [
         views === null ? unavailableMetric("views", "NOT_RETURNED_BY_INSTAGRAM") : { metric: "views", value: views, unit: "count", aggregation: "sum", unavailableReason: null },
         unavailableMetric("impressions", "NOT_PROVIDED_BY_INSTAGRAM"),
         reach === null ? unavailableMetric("reach", "NOT_RETURNED_BY_INSTAGRAM") : { metric: "reach", value: reach, unit: "count", aggregation: "sum", unavailableReason: null },
         watchMs === null ? unavailableMetric("average_watch_seconds", "NOT_RETURNED_BY_INSTAGRAM") : { metric: "average_watch_seconds", value: watchMs / 1_000, unit: "seconds", aggregation: "average", unavailableReason: null },
-        reach && interactions !== null ? { metric: "engagement_rate", value: interactions / reach, unit: "ratio", aggregation: "ratio", unavailableReason: null } : unavailableMetric("engagement_rate", "REACH_OR_INTERACTIONS_UNAVAILABLE"),
+        reach && interactions !== null ? { metric: "engagement_rate", value: interactions / reach, unit: "ratio", aggregation: "ratio", unavailableReason: null } : unavailableMetric("engagement_rate", reach === 0 ? "ZERO_DENOMINATOR" : "REACH_OR_INTERACTIONS_UNAVAILABLE"),
         unavailableMetric("completion_rate", "NOT_PROVIDED_BY_INSTAGRAM")
       ] };
     }));
@@ -109,9 +123,9 @@ export class TikTokAnalyticsProvider implements AnalyticsProvider {
     const posts = input.postIds.map((externalPostId): AnalyticsPostResult => {
       const video = rows.get(externalPostId); const views = video?.view_count;
       const engagement = views && video ? ((video.like_count ?? 0) + (video.comment_count ?? 0) + (video.share_count ?? 0)) / views : null;
-      return { externalPostId, observedAt: input.periodEnd, raw: video ? { ...video } : {}, metrics: [
+      return { externalPostId, observedAt: new Date().toISOString(), observation: { kind: "LIFETIME_SNAPSHOT" }, raw: video ? { ...video } : {}, metrics: [
         typeof views === "number" ? { metric: "views", value: views, unit: "count", aggregation: "sum", unavailableReason: null } : unavailableMetric("views", "NOT_RETURNED_BY_TIKTOK"),
-        engagement === null ? unavailableMetric("engagement_rate", "VIEWS_UNAVAILABLE") : { metric: "engagement_rate", value: engagement, unit: "ratio", aggregation: "ratio", unavailableReason: null },
+        engagement === null ? unavailableMetric("engagement_rate", views === 0 ? "ZERO_DENOMINATOR" : "VIEWS_UNAVAILABLE") : { metric: "engagement_rate", value: engagement, unit: "ratio", aggregation: "ratio", unavailableReason: null },
         unavailableMetric("impressions", "NOT_PROVIDED_BY_TIKTOK"), unavailableMetric("average_watch_seconds", "NOT_PROVIDED_BY_TIKTOK"), unavailableMetric("completion_rate", "NOT_PROVIDED_BY_TIKTOK")
       ] };
     });

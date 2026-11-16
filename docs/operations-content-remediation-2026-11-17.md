@@ -16,3 +16,15 @@
 운영 복구: 먼저 `recover:queues`를 실행해 누락 전달을 복원한다. `RECONCILIATION_REQUIRED` 및 HELD는 Provider 사용/게시 결과를 확인한 후 기존 대사 절차로 처리한다. legacy PUBLISHING에 시도가 없으면 결과 확정 전 예약 상태로 되돌리지 않는다. 실 Provider 중단·외부 게시 확정은 자격 증명 없이 검증하지 않았다.
 
 최종 1단계 검증: 강제 종료/경쟁/이전 token 완료 차단 2건, 기존 worker 게시·재전달 7건, 정책 1건, API 게시 6건 통과(총 16건). worker/API/database lint·typecheck 성공. 빈 DB migration 및 데이터가 있는 복제 DB의 추가 migration 적용과 작업 상태 보존 확인. 실제 강제 종료는 tsx worker 프로세스를 SIGKILL한 후 heartbeat 시각을 테스트에서 앞당겨 검증했다.
+
+## 2단계: 지표 수집·게시 버전
+
+- 확인: API 응답만으로 SUCCEEDED 처리했고 snapshot이 하나라도 있으면 해당 post 전체를 건너뛰어 부분 누락을 다시 수집하지 않았다. observedAt에도 요청 periodEnd를 넣었고 누적값을 요청 기간 값으로 표시했다.
+- 수정: COLLECTING 원자 claim, WAITING/PARTIAL/SUCCEEDED/UNAVAILABLE/EXPIRED 구분. 다음 수집은 Provider delay와 지수 backoff 중 큰 값(최대 backoff 24시간), 최대 6회다. 최신 metric revision으로 완료 여부를 판단하며 이전 결과는 보존한다. 페이지 단위 DB 트랜잭션으로 실제 501개 batch 회귀의 성능을 유지한다. 빈 page와 NOT_RETURNED는 일시적, NOT_PROVIDED/별도 보고서/분모 0은 영구 또는 정의 불가로 구분한다.
+- 자동 스케줄러는 게시 후 수집뿐 아니라 수동 sync의 지연·부분 실패도 재수집한다. production job은 수집 시도별 새 키를 사용하고 게시 작업을 변경하지 않는다. worker 유실 시 COLLECTING도 복구한다.
+- migration `202611170002_analytics_observations`: collectionAttempts/nextAttemptAt와 관측 종류, 실제 collectedAt, 표현 기간, 게시 scene/script ID를 추가한다. 이전 snapshot은 LEGACY_UNKNOWN이며 기간/버전을 추정 backfill하지 않는다. 이전 row의 collectedAt 기본값은 migration 시각이므로 정확한 과거 수집 시각으로 사용하면 안 된다. 원본 지표·revision은 유지한다. 컬럼 삭제 rollback은 신규 관측 메타데이터를 잃는다.
+- 실제 Provider: YouTube는 Pacific calendar 기간 보고서이며 날짜 양 끝을 포함하는 요청을 UTC 경계(종료 exclusive)로 변환한다. 집계 가능성을 고려해 보수적 72시간을 사용한다. Instagram/TikTok은 현재 누적 스냅샷으로 표시하고 요청한 과거 24시간 값이라고 하지 않는다. actualAgeSeconds를 원본 메타데이터에 별도 보존한다. 관측 정의/기간이 없는 legacy는 비교 근거에서 제외할 대상이다.
+- 기존 SUCCEEDED 재검사: 기존 analytics sync 요청에 `recheck: true`를 명시한다. 해당 workspace 권한 검증 후 같은 sync에 한 번의 durable recheck를 만들고 원본을 보존하며 새 revision을 저장한다. 추가적인 새 관측 요청은 새 idempotencyKey를 사용한다. 같은 복구 요청의 반복은 중복 수집을 만들지 않는다.
+- API 보고서는 실제 관측 기간과 collectedAt, 관측 종류, 게시 버전 ID를 반환한다. UI는 누적값과 기간 미확인을 구분한다.
+- 공식 문서 확인일 2026-11-17: [YouTube dimensions](https://developers.google.com/youtube/analytics/dimensions), [YouTube reports.query](https://developers.google.com/youtube/analytics/reference/reports/query), [TikTok Query Videos](https://developers.tiktok.com/docs/en/tiktok-api-v2-video-query). Meta 공식 media insights 문서는 접근 실패했으며 누적 지표의 실제 권한/응답과 변경 정책은 실 계정으로 별도 확인해야 한다. 실 요청은 하지 않았다.
+- 검증: worker 수집 5건(501개 부분 실패 포함), 복구 2건, API 수집/동시 recheck 1건, Provider 3건, web 10건 통과. 변경 worker/API/web/providers/contracts/database lint·typecheck 성공. 기존 데이터 DB migration 적용 성공. 최초 501개 테스트는 개별 트랜잭션으로 제한시간을 초과하여 batch 저장으로 수정 후 통과했다. Redis 미지정으로 발생한 재검증 연결 실패도 격리 URL을 명시한 후 통과했다.
