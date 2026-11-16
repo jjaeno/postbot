@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { Prisma, type PrismaClient } from "@postbot/database";
+import { assertExecutionOwner, Prisma, type PrismaClient } from "@postbot/database";
 import type { ImageProvider, StorageProvider, TtsProvider } from "@postbot/providers";
 export { scoreStockMatch, type StockCandidate } from "./stock-matching.js";
 import type { StockCandidate } from "./stock-matching.js";
@@ -112,11 +112,17 @@ export class AssetRepository {
   async attachUsage(input: { assetId: string; contentItemId: string; sceneVersionId?: string | null; purpose: string; snapshot: Record<string, unknown> }): Promise<void> {
     const snapshot = { ...input.snapshot, originalPurpose: input.purpose } as Prisma.InputJsonObject;
     const purpose = sceneAssetUsageKey(input.purpose, input.sceneVersionId);
-    await this.prisma.assetUsage.upsert({ where: { assetId_contentItemId_purpose: { assetId: input.assetId, contentItemId: input.contentItemId, purpose } }, update: { sceneVersionId: input.sceneVersionId, usageSnapshot: snapshot }, create: { assetId: input.assetId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose, usageSnapshot: snapshot } });
+    await this.prisma.$transaction(async (tx) => {
+      await assertExecutionOwner(tx);
+      await tx.assetUsage.upsert({ where: { assetId_contentItemId_purpose: { assetId: input.assetId, contentItemId: input.contentItemId, purpose } }, update: { sceneVersionId: input.sceneVersionId, usageSnapshot: snapshot }, create: { assetId: input.assetId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose, usageSnapshot: snapshot } });
+    });
   }
 
   markContentNeedsReview(contentItemId: string): Promise<void> {
-    return this.prisma.contentItem.update({ where: { id: contentItemId }, data: { status: "REVIEW_REQUIRED" } }).then(() => undefined);
+    return this.prisma.$transaction(async (tx) => {
+      await assertExecutionOwner(tx);
+      await tx.contentItem.update({ where: { id: contentItemId }, data: { status: "REVIEW_REQUIRED" } });
+    });
   }
 }
 
@@ -129,10 +135,10 @@ export class AssetPreparationService {
     }
     try {
       const result = await this.image.generate({ ...input, width: 1080, height: 1920 });
+      if (input.contentItemId) await this.assets.recordProviderCost({ contentItemId: input.contentItemId, productionJobId: input.productionJobId, provider: result.provider, model: result.model, operation: "image-generation", quantity: 1, unit: "image", category: "image", estimatedCostUsd: result.estimatedCostUsd, idempotencyKey: `image:${input.idempotencyKey}` });
       const license = result.provider === "fake-image" ? { status: "verified" as const, commercialUseAllowed: true, derivativeAllowed: true, attributionRequired: false, attributionText: null, proofUrl: null } : { status: "unknown" as const, commercialUseAllowed: false, derivativeAllowed: false, attributionRequired: false, attributionText: null, proofUrl: null };
       const stored = await this.assets.store({ channelId: input.channelId, kind: "IMAGE", origin: "AI_GENERATED", key: input.key, body: result.bytes, mimeType: result.mimeType, width: result.width, height: result.height, source: { provider: result.provider, model: result.model, prompt: input.prompt }, license });
       if (input.contentItemId) await this.assets.attachUsage({ assetId: stored.assetId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose: input.purpose ?? "scene-image", snapshot: { prompt: input.prompt, provider: result.provider, model: result.model, license: "provider-generated" } });
-      if (input.contentItemId) await this.assets.recordProviderCost({ contentItemId: input.contentItemId, productionJobId: input.productionJobId, provider: result.provider, model: result.model, operation: "image-generation", quantity: 1, unit: "image", category: "image", estimatedCostUsd: result.estimatedCostUsd, idempotencyKey: `image:${input.idempotencyKey}` });
       const needsReview = assetNeedsReview(await this.assets.getLicense(stored.assetId));
       if (needsReview && input.contentItemId) await this.assets.markContentNeedsReview(input.contentItemId);
       return { assetId: stored.assetId, fallback: false, needsReview };
@@ -148,10 +154,10 @@ export class AssetPreparationService {
     const existing = await this.assets.findPreparedTts({ contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose: input.purpose ?? "tts-narration" });
     if (existing) return { ...existing, needsReview: assetNeedsReview(await this.assets.getLicense(existing.assetId)) };
     const result = await this.tts.synthesize({ model: input.model, voice: input.voice, text: input.text, idempotencyKey: input.idempotencyKey });
+    await this.assets.recordProviderCost({ contentItemId: input.contentItemId, productionJobId: input.productionJobId, provider: result.provider, model: result.model, operation: "speech-synthesis", quantity: input.text.length, unit: "character", category: "tts", estimatedCostUsd: result.estimatedCostUsd, idempotencyKey: `tts:${input.idempotencyKey}` });
     const fake = result.provider === "fake-tts";
     const stored = await this.assets.store({ channelId: input.channelId, kind: "AUDIO", origin: "AI_GENERATED", key: input.key, body: result.bytes, mimeType: result.mimeType, source: { provider: result.provider, model: result.model, prompt: input.text }, license: { status: fake ? "verified" : "unknown", commercialUseAllowed: fake, derivativeAllowed: fake, attributionRequired: false, attributionText: null, proofUrl: null } });
-    await this.assets.attachUsage({ assetId: stored.assetId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose: input.purpose ?? "tts-narration", snapshot: { text: input.text, durationSeconds: result.durationSeconds, timings: result.timings, provider: result.provider, model: result.model, license: "provider-generated" } });
-    await this.assets.recordProviderCost({ contentItemId: input.contentItemId, productionJobId: input.productionJobId, provider: result.provider, model: result.model, operation: "speech-synthesis", quantity: input.text.length, unit: "character", category: "tts", estimatedCostUsd: result.estimatedCostUsd, idempotencyKey: `tts:${input.idempotencyKey}` });
+    await this.assets.attachUsage({ assetId: stored.assetId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose: input.purpose ?? "tts-narration", snapshot: { voice: input.voice, text: input.text, durationSeconds: result.durationSeconds, timings: result.timings, provider: result.provider, model: result.model, license: "provider-generated" } });
     return { assetId: stored.assetId, timings: result.timings, needsReview: assetNeedsReview(await this.assets.getLicense(stored.assetId)) };
   }
 }

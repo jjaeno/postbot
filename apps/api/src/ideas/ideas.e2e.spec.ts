@@ -138,7 +138,7 @@ describe("IdeasController", () => {
             url: "https://example.org/rocket?utm_source=e2e",
             sourceName: "Manual",
             sourceKind: "MANUAL",
-            publishedAt: null,
+            publishedAt: new Date().toISOString(),
             body: "rocket",
             reliabilityScore: 0.7
           }

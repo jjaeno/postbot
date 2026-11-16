@@ -60,3 +60,47 @@
 - 검증: renderer 7건, scene-schema 14건, worker 렌더/생성/journal 9건, Provider 5건 통과. 변경 renderer/worker/providers/scene-schema lint·typecheck 성공. 실제 Chromium 대표 프레임 9개를 직접 시각 확인했고 첫 frame, 전환, 20:100 동일 단위 막대 비율, CTA, 긴 한국어·영어 제목/자막 및 제목이 사라진 6초 프레임을 확인했다.
 - 실제 2초 smoke 결과: 1080×1920, 출력 2.09초, audio 있음, 평균 -21.3 dB, black-frame 비율 0. 증거 `.artifacts/templates-2026-11-17/result.json`, PNG 9개, `templates-smoke.mp4`. Windows Remotion 내장 FFmpeg에는 volumedetect/blackdetect가 없어 해당 검사만 기존 renderer image의 full FFmpeg로 실행했다. 최종 `template-smoke.mjs` 전체 실행은 `TEMPLATE_SMOKE_QA_IMAGE=postbot-internal-renderer:20261020`으로 통과했고 기존 frame 재사용은 false다. 환경이 full FFmpeg이면 이 변수 없이 실행한다. 대표 frame만 재검사할 때 이미 검증된 출력은 `TEMPLATE_SMOKE_RESUME=1`로 재사용할 수 있다.
 - DB migration 없음. 기존 JSON은 읽을 수 있고 기존 성공 manifest는 유지한다. 이미지 제작 문서에 이미지가 없으면 명시적인 GRAPHIC 전환이나 소재 준비가 필요하다. 문서의 sidechain ducking 표현과 실제 볼륨+amix 구현의 불일치를 발견해 실제 동작에 맞게 정정했다.
+
+## 6단계: 게시 특성·성과 비교·실험 판정
+
+- 확인: 현재 설정/대본을 과거 게시 특성처럼 읽고 서로 다른 관측 기간과 누적 나이를 섞었다. 기존 confidenceScore는 통계적 신뢰수준이 아닌 규칙 점수였다.
+- 렌더 시 실제 측정 길이, script/scene ID, Hook 종류, 역할 템플릿, 전환 빈도, 자막 밀도/설정, 실제 TTS voice/model/provider를 manifest에 기록하고 게시 성공 트랜잭션에서 productionSnapshot으로 고정한다. 이후 편집과 채널 설정 변경은 과거 표본에 반영하지 않는다. 이전 게시물의 알 수 없는 특성은 추정하지 않는다.
+- 비교 키는 플랫폼·지표·mapping·단위·집계 정의 및 실제 기간 경계 또는 실제 수집 당시 게시 나이(시간 단위, ±300초)다. 요청한 24시간과 실제 96시간 누적값을 같은 군으로 취급하지 않는다. 게시 버전과 지표 버전이 불일치하거나 legacy/미완료이면 제외한다. 가장 큰 관측군을 값과 무관하게 선택하고 제외 표본 수를 공개한다.
+- 길이 제안은 최소 4개 동질 표본, 지표 변동과 실제 길이 차이가 있어야 한다. Hook/템플릿/전환/자막/음성별 기술적 비교도 저장하되 각 그룹 표본이 부족하면 보류한다. 인과관계나 조회수 보장을 주장하지 않는다. confidenceScore는 null이며 UI도 미산정으로 표시한다.
+- 실험 목표와 허용 오차(기본 1초)는 제작 배정에 고정한다. TTS 반영 후와 최종 파일 측정 길이가 어긋나면 NEEDS_REVIEW로 보내며 음성을 자르거나 빠르게 하지 않는다. 실제 게시 특성의 목표 준수, 배정/게시 시각과 플랫폼, 관측군 일치, 표본 포함률 80%를 확인한다. 사전 기간 종료 또는 배정 상한 도달 전에 최종 판정을 허용하지 않는다.
+- 평균·표준편차·중앙값·IQR 이상치·표본 균형과 평균차의 기술적 2-standard-error 범위를 제공한다. 작은 표본, 2:1 초과 불균형, 이상치, 큰 변동성, 0 대조군 기준값은 판정을 유보한다. 보정된 통계적 신뢰수준이나 인과 추론으로 표시하지 않는다.
+- migration `202611170004_publication_features`: nullable JSON 추가, 기존 v1 confidenceScore를 evidence.legacyRuleScore에 보관하고 null 처리한다. 과거 게시 특성은 null로 유지한다. 이전 제안은 새 근거로 재생성해야 한다. rollback 전에 신규 스냅샷을 백업하고 컬럼을 제거해야 하며 점수 복원은 통계 신뢰도 복원이 아니다. 자동 down migration은 제공하지 않는다.
+
+## 최종 경계 감사
+
+- 이전 실행자의 늦은 완료는 유료 호출 시작·대본/자산 연결·분석 claim·게시 상태 저장 전에 소유권을 검사한다. 이미 발생한 유료 사용량과 외부 게시 영수증은 보존하여 비용/게시 대사에서 유실하지 않는다. 새 실행의 게시 상태를 이전 실행의 실패로 되돌리지 않는다.
+- 렌더 파일 키에 실행 token을 포함하여 DB 저장 차단뿐 아니라 이전 실행의 늦은 업로드가 새 바이트를 덮어쓰는 문제도 막았다. 실제 MySQL에서 두 실행을 교차시켜 manifest와 파일 바이트 보존을 확인한다.
+- 수집 본문이 10,000자에서 잘리면 FULL_TEXT 대신 SUMMARY로 저장하여 전체 원문을 검증했다는 잘못된 판정을 막는다.
+- 추가 API 환경 계약: 실험 생성의 durationToleranceSeconds(0.1~3), 선택 정책 및 스톡 메타데이터 API는 위 단계 설명을 따른다. 운영 복구는 기존 recover:queues와 자동 스캔을 사용한다. 불명확 외부 결과는 먼저 Provider/플랫폼의 operation ID 및 비용 영수증을 대사한 뒤 수동 재개한다.
+
+## 확인 범위와 남은 제한
+
+| 단계 | 핵심 파일 | 후보 판정 |
+| --- | --- | --- |
+| 1 | worker/queue-recovery.ts, job-processor.ts, publish-processor.ts, API publishing.service.ts, database/job-execution.ts | 자동 복구·예약/시도 원자성 결함 확인. JobAttempt 시작 원자성은 이미 해결 |
+| 2 | worker/analytics-processor.ts, automation-orchestrator.ts, providers/analytics*, API analytics | 부분 누락·지연·관측 종류·버전 결함 확인 |
+| 3 | policy-engine/fact-evidence.ts, worker/script-generation-processor.ts, API generation·review, providers/openai* | URL만으로 근거 인정·최대 출력 예약 누락 확인 |
+| 4 | providers/topic-scoring.ts, worker/collect-processor.ts, asset-preparation-processor.ts, asset-library/stock-matching.ts | 과거 점수·약한 최신성·스톡 순환 배정 확인. 일부 현재 필터·권리 검사는 이미 존재 |
+| 5 | renderer/sample-composition.tsx, text-layout.ts, technical-quality.ts, scene-schema, worker/render-processor.ts | 고정 제목·fade-in·오버레이 누락·긴 텍스트 처리 결함 확인 |
+| 6 | optimization/comparability.ts, API optimization.service.ts, worker/render-processor.ts·publish-processor.ts | 혼합 관측·현재 설정 소급·규칙 점수 오표시·최종 길이 누락 확인 |
+
+최신 코드에서 전혀 성립하지 않는다고 결론낸 후보는 없다. 일부 이미 해결된 하위 경로와 실제 남은 결함을 구분한 결과다. 위 파일명은 각 app/package의 src 기준이며 migration은 단계 설명에 별도로 기록했다.
+
+보고된 복구·예약 원자성/부분 지표 재수집/URL만 이용한 근거 판정/오래된 후보 점수/무관한 스톡 순환 배정/텍스트 잘림/혼합 관측 비교 문제는 현재 코드에서 확인하여 수정했다. 기존 중복 작업 ID, 권리·채널 격리, 사용량 journal과 부분적인 현재 후보 필터는 이미 존재하여 유지·강화했다. 독립적 진실 검증, 의미 모델 전체, 통계적 인과 추론과 실제 성과 개선 보장은 미구현 범위이며 성공으로 기록하지 않는다.
+
+실제 Provider 과금·SNS 권한/지표 응답·외부 게시 결과와 운영 규모 부하 검증은 외부 확인이 필요하다. 요청에 따라 유료 호출·실제 게시·운영 DB 변경·배포·push·merge를 수행하지 않았다. 모든 DB/Redis 장애 검증은 별도 포트의 테스트 전용 컨테이너에서 수행했다.
+
+## 최종 검증 결과
+
+- 6단계 분석 unit 7건, API 분석/실험 6건, worker 렌더/게시/실제 호출 journal/부분 수집 21건, 복구/게시 7건, 대본/미디어 journal 6건, 자산 DB 3건 통과(중복 실행은 합산하지 않는다). DB 회귀는 실제 격리 MySQL/Redis, 외부 Provider는 Fake/Mock이다.
+- 전체 lint와 typecheck/build 대상을 검사했다. lint의 미사용 import 1건을 제거하고 해당 API lint를 재실행했다. 전체 typecheck 27개 task와 build 15개 task 성공. 최종 자산 변경의 lint/typecheck 및 API fixture 수정의 lint/typecheck를 추가 확인하여 성공했다.
+- 전체 test는 첫 실행에서 기본 DB 주소가 적용되어 database suite 연결에 실패했다. 격리 DB URL을 명시한 재실행은 database 8건을 포함해 성공했으나 API HTTP fixture 1건이 새 NEWS 정책에서 발행일 null로 거절됐다. fixture에 현재 발행일을 명시하고 실패한 HTTP 테스트를 재실행하여 통과했다. 나머지 코드는 바꾸지 않았다. 최종 합계 190건 통과이며 99건의 opt-in integration은 전체 실행에서 skip이다. 관련 필수 integration은 위 단계별 명시 환경에서 별도로 실행했다. 전체 명령의 실패 이력은 숨기지 않으며 최종 판정은 성공한 전체 대상 검사와 수정 대상 재검증을 합친 결과다.
+- 빈 `postbot_blank_test`에서 19개 migration 적용 성공. 기존 데이터 복제 `postbot_upgrade_test`에서도 적용 성공: v1 confidenceScore 0.73은 null, evidence.legacyRuleScore=0.730000; 기존 게시 1건은 보존되고 productionSnapshot은 null이다. 초기 검증 SQL의 존재하지 않는 updatedAt 컬럼 오류를 고쳐 다시 수행했다.
+- 병행 검사 중 API DB 테스트 기본 5초 timeout이 발생하여 30초 한도로 재실행했고 실제 검증이 통과했다. 실행 증거는 `.artifacts/stage6-*.log`, `.artifacts/final-*.log`, `.artifacts/migrate-*-final.log`에 보존한다. 렌더 증거는 5단계와 같다.
+- 유료 결과는 자산 연결 소유권 확인/파일 저장보다 먼저 비용 영수증을 남겨 늦은 응답의 비용을 유실하지 않는다. Turbo dev/test 실행에도 새 출력 제한과 LLM 요율 환경 변수가 전달되도록 LLM_*를 허용한다.
+- 기존 web 번들 500kB 경고와 Node 20에 대한 AWS SDK 향후 지원 종료 안내가 남는다. 이번 변경의 실패가 아니며 운영 런타임 업그레이드와 번들 분리는 별도 범위다.

@@ -73,7 +73,7 @@ export class CollectProcessor {
       provider, publishedAt: candidate.publishedAt ? new Date(candidate.publishedAt) : null,
       suitabilityScore: new Prisma.Decimal(candidate.suitabilityScore), freshnessScore: new Prisma.Decimal(candidate.freshnessScore),
       reliabilityScore: new Prisma.Decimal(candidate.reliabilityScore.toFixed(6)), expectedValueScore: new Prisma.Decimal(candidate.expectedValueScore.toFixed(6)),
-      rawSnapshot: { contentScope: candidate.reliabilityMetadata?.contentScope === "FULL_TEXT" ? "FULL_TEXT" : "SUMMARY", body: candidate.body.slice(0, 10_000), eventAt: candidate.eventAt ?? null, reliability: candidate.reliabilityMetadata ? JSON.parse(JSON.stringify(candidate.reliabilityMetadata)) as Prisma.InputJsonObject : null }
+      rawSnapshot: { contentScope: candidate.reliabilityMetadata?.contentScope === "FULL_TEXT" && candidate.body.length <= 10_000 ? "FULL_TEXT" : "SUMMARY", body: candidate.body.slice(0, 10_000), eventAt: candidate.eventAt ?? null, reliability: candidate.reliabilityMetadata ? JSON.parse(JSON.stringify(candidate.reliabilityMetadata)) as Prisma.InputJsonObject : null }
     };
     const existing = await this.prisma.contentIdea.findFirst({ where: { channelId, OR: [{ urlHash: data.urlHash }, { contentHash }] } });
     if (existing) return existing;

@@ -1048,6 +1048,7 @@ model PlatformPost {
   postUrl            String                    @db.Text
   publishedAt        DateTime                  @db.DateTime(3)
   policyVersion      Int
+  productionSnapshot Json?
   createdAt          DateTime                  @default(now()) @db.DateTime(3)
   publishPlan        PublishPlan               @relation(fields: [publishPlanId], references: [id], onDelete: Restrict)
   platformAccount    PlatformAccount           @relation(fields: [platformAccountId], references: [id], onDelete: Restrict)

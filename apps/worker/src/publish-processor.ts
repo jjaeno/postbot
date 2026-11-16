@@ -1,4 +1,4 @@
-import type { PrismaClient } from "@postbot/database";
+import { assertExecutionOwner, jobExecution, type PrismaClient } from "@postbot/database";
 import { assertPlatformEnabled, loadConfig } from "@postbot/config";
 import { FakeStorageProvider, S3StorageProvider, type StorageProvider } from "@postbot/providers";
 import { AmbiguousPublishError, FakeInstagramPublisherProvider, FakeTikTokPublisherProvider, FakeYouTubePublisherProvider, GoogleYouTubePublisherProvider, MetaInstagramPublisherProvider, TikTokPublisherProvider, type VideoPublisher } from "@postbot/publishers";
@@ -36,8 +36,10 @@ export class PublishProcessor {
     if (plan.title !== currentTitle || plan.description !== currentDescription || JSON.stringify(plan.hashtags ?? []) !== JSON.stringify(metadata.hashtags ?? [])) throw new Error("PUBLISH_METADATA_GATE_FAILED");
     if (!script || quality.reviewStatus !== "APPROVED" || latestScene?.id !== plan.sceneVersionId || !policyCheck || policyCheck.checkedAt < script.createdAt || policyCheck.checkedAt < latestScene.createdAt) throw new Error("PUBLISH_VERSION_GATE_FAILED");
     if (plan.status !== "SCHEDULED" || !plan.sceneVersion?.renderManifest || plan.platformAccount.status !== "CONNECTED" || policyCheck?.status !== "PASS" || plan.contentItem.sourceReferences.length === 0 || !rightsVerified) throw new Error("PUBLISH_GATE_FAILED");
+    const publishedScene = plan.sceneVersion;
     const attemptNumber = (plan.attempts[0]?.attemptNumber ?? 0) + 1;
     const claimed = await this.prisma.$transaction(async (tx) => {
+      await assertExecutionOwner(tx);
       await tx.$queryRaw`SELECT id FROM channels WHERE id = ${plan.contentItem.channelId} FOR UPDATE`;
       const currentScript = await tx.scriptVersion.findFirst({ where: { contentItemId: plan.contentItemId, platform: plan.platform }, orderBy: { version: "desc" } });
       const currentScene = await tx.sceneVersion.findFirst({ where: { contentItemId: plan.contentItemId, platform: plan.platform }, orderBy: { version: "desc" } });
@@ -61,20 +63,35 @@ export class PublishProcessor {
             : new FakeTikTokPublisherProvider()
           : config.YOUTUBE_OAUTH_PROVIDER === "google" ? new GoogleYouTubePublisherProvider(config.YOUTUBE_CLIENT_ID, config.YOUTUBE_CLIENT_SECRET, { timeoutMs: config.SOCIAL_PUBLISH_TIMEOUT_MS }) : new FakeYouTubePublisherProvider();
       const accessToken = await resolveOAuthAccessToken(this.prisma, plan.platformAccount);
-      const manifest = plan.sceneVersion.renderManifest as { videoKey?: unknown }; if (typeof manifest.videoKey !== "string") throw new Error("RENDER_FILE_NOT_FOUND");
+      const manifest = publishedScene.renderManifest as { videoKey?: unknown }; if (typeof manifest.videoKey !== "string") throw new Error("RENDER_FILE_NOT_FOUND");
       const tags = Array.isArray(plan.hashtags) ? plan.hashtags.filter((tag): tag is string => typeof tag === "string").map((tag) => `#${tag.replace(/^#+/, "").trim().replace(/\s+/g, "")}`).filter((tag) => tag.length > 1) : [];
       const description = [plan.description ?? "", ...tags.filter((tag) => !(plan.description ?? "").includes(tag))].filter(Boolean).join("\n");
       const planMetadata = plan.metadata && typeof plan.metadata === "object" && !Array.isArray(plan.metadata) ? plan.metadata : {};
       const video = await this.storage.download(manifest.videoKey); const upload = { title: plan.title, description, privacyStatus: publishPrivacy(planMetadata.publicSetting, config.YOUTUBE_UPLOAD_PRIVACY), publishAt: null, video, idempotencyKey: plan.idempotencyKey, externalAccountId: plan.platformAccount.externalAccountId, aiGenerated: true };
       const uploaded = await publisher.upload(upload, accessToken);
       confirmedExternalId = uploaded.externalVideoId;
-      await this.prisma.$transaction([this.prisma.platformPost.create({ data: { publishPlanId: plan.id, platformAccountId: plan.platformAccountId, platform: plan.platform, externalPostId: uploaded.externalVideoId, postUrl: uploaded.url, publishedAt: new Date(), policyVersion: 1 } }), this.prisma.publishAttempt.update({ where: { id: attempt.id }, data: { status: "SUCCEEDED", finishedAt: new Date(), responseSnapshot: uploaded } }), this.prisma.publishPlan.update({ where: { id: plan.id }, data: { status: "PUBLISHED" } }), this.prisma.contentItem.update({ where: { id: plan.contentItemId }, data: { status: "PUBLISHED" } })]);
+      await this.prisma.$transaction(async (tx) => {
+        await assertExecutionOwner(tx);
+        await tx.platformPost.create({ data: { publishPlanId: plan.id, platformAccountId: plan.platformAccountId, platform: plan.platform, externalPostId: uploaded.externalVideoId, postUrl: uploaded.url, publishedAt: new Date(), policyVersion: 1, productionSnapshot: { ...(publishedScene.renderManifest && typeof publishedScene.renderManifest === "object" && !Array.isArray(publishedScene.renderManifest) && publishedScene.renderManifest.productionFeatures && typeof publishedScene.renderManifest.productionFeatures === "object" && !Array.isArray(publishedScene.renderManifest.productionFeatures) ? publishedScene.renderManifest.productionFeatures : { version: "legacy-publication-unknown", sceneVersionId: plan.sceneVersionId, scriptVersionId: publishedScene.scriptVersionId }), platform: plan.platform } } });
+        await tx.publishAttempt.update({ where: { id: attempt.id }, data: { status: "SUCCEEDED", finishedAt: new Date(), responseSnapshot: uploaded } });
+        await tx.publishPlan.update({ where: { id: plan.id }, data: { status: "PUBLISHED" } });
+        await tx.contentItem.update({ where: { id: plan.contentItemId }, data: { status: "PUBLISHED" } });
+      });
       return { externalVideoId: uploaded.externalVideoId, url: uploaded.url };
     } catch (error) {
       const publicationError = confirmedExternalId !== null ? new AmbiguousPublishError("PUBLISH_PERSISTENCE_RECONCILIATION_REQUIRED", confirmedExternalId) : error;
       const message = publicationError instanceof Error ? publicationError.message : "PUBLISH_FAILED";
       const ambiguous = publicationError instanceof AmbiguousPublishError;
-      await this.prisma.$transaction([this.prisma.publishAttempt.update({ where: { id: attempt.id }, data: { status: ambiguous ? "RETRY_WAIT" : "FAILED", finishedAt: new Date(), errorCode: ambiguous ? "AMBIGUOUS_PUBLISH" : "PUBLISH_FAILED", errorMessage: message, responseSnapshot: ambiguous ? { externalOperationId: publicationError.externalOperationId } : undefined } }), this.prisma.publishPlan.update({ where: { id: plan.id }, data: { status: ambiguous ? "HELD" : "FAILED" } })]);
+      await this.prisma.$transaction(async (tx) => {
+        const owner = jobExecution.getStore();
+        if (owner) await tx.$queryRaw`SELECT id FROM production_jobs WHERE id = ${owner.jobId} FOR UPDATE`;
+        const current = owner ? await tx.productionJob.findUnique({ where: { id: owner.jobId } }) : null;
+        const ownsExecution = !owner || (current?.executionToken === owner.token && ["RUNNING", "CANCEL_REQUESTED"].includes(current.status));
+        // Receipts belong to this attempt even if ownership was lost. Never
+        // overwrite a later execution's plan/content state with a late result.
+        await tx.publishAttempt.update({ where: { id: attempt.id }, data: { status: ambiguous ? "RETRY_WAIT" : "FAILED", finishedAt: new Date(), errorCode: ambiguous ? "AMBIGUOUS_PUBLISH" : "PUBLISH_FAILED", errorMessage: message, responseSnapshot: ambiguous ? { externalOperationId: publicationError.externalOperationId } : undefined } });
+        if (ownsExecution) await tx.publishPlan.updateMany({ where: { id: plan.id, status: "PUBLISHING", platformPost: null }, data: { status: ambiguous ? "HELD" : "FAILED" } });
+      });
       throw publicationError;
     }
   }

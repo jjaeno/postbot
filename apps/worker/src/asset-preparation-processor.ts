@@ -1,7 +1,7 @@
 import { scoreStockMatch, AssetPreparationService, AssetRepository, sceneAssetUsageKey } from "@postbot/asset-library";
 import { loadConfig } from "@postbot/config";
 import { AssetPreparationJobPayloadSchema, TtsPreparationJobPayloadSchema } from "@postbot/contracts";
-import type { Prisma, PrismaClient } from "@postbot/database";
+import { assertExecutionOwner, type Prisma, type PrismaClient } from "@postbot/database";
 import { FakeImageProvider, FakeStorageProvider, FakeTtsProvider, GoogleImageProvider, ElevenLabsTtsProvider, S3StorageProvider, resolveTtsVoice } from "@postbot/providers";
 import { SceneDocumentSchema, aiSceneCount } from "@postbot/scene-schema";
 
@@ -26,6 +26,7 @@ export class AssetPreparationProcessor {
 
   private async realMediaCall<Result>(jobId: string, key: string, operation: () => Promise<Result>, canReuse: () => Promise<boolean>): Promise<Result> {
     await this.prisma.$transaction(async (tx) => {
+      await assertExecutionOwner(tx);
       await tx.$queryRaw`SELECT id FROM production_jobs WHERE id = ${jobId} FOR UPDATE`;
       const job = await tx.productionJob.findUniqueOrThrow({ where: { id: jobId } });
       const payload: Prisma.JsonObject = job.payload && typeof job.payload === "object" && !Array.isArray(job.payload) ? job.payload : {};

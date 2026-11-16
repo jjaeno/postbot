@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Prisma } from "@postbot/database";
+export { observationCohortKey, publishedFeatures, durationCompliance } from "./comparability.js";
 
 export const deterministicExperimentArm = (experimentId: string, contentItemId: string): "control" | "variant" =>
   Number.parseInt(createHash("sha256").update(`${experimentId}:${contentItemId}`).digest("hex").slice(0, 8), 16) % 2 === 0 ? "control" : "variant";
@@ -29,15 +30,32 @@ export const assignProductionExperiment = async (tx: Prisma.TransactionClient, c
   const profile = await tx.platformOutputProfile.findFirst({ where: { channelId, platform: platform === "YOUTUBE" || platform === "INSTAGRAM" || platform === "TIKTOK" ? platform : undefined, isActive: true }, orderBy: { version: "desc" } });
   const control = object(allocation.control ?? null);
   if (!profile || strategy.durationSeconds < profile.minDurationSeconds || strategy.durationSeconds > profile.maxDurationSeconds || typeof control.durationSeconds !== "number" || Math.abs(strategy.durationSeconds / control.durationSeconds - 1) > (typeof settings.maxChangeRatio === "number" ? settings.maxChangeRatio : 0.2)) throw new Error("EXPERIMENT_DURATION_OUTSIDE_ALLOWED_RANGE");
-  return { experimentId: experiment.id, arm: assignment.arm, assignmentKey: assignment.assignmentKey, strategy: { durationSeconds: strategy.durationSeconds } };
+  return { experimentId: experiment.id, arm: assignment.arm, assignmentKey: assignment.assignmentKey, durationToleranceSeconds: typeof allocation.durationToleranceSeconds === "number" ? allocation.durationToleranceSeconds : 1, strategy: { durationSeconds: strategy.durationSeconds } };
 };
 
 export const compareExperimentArms = (control: readonly number[], variant: readonly number[], minimumPerArm: number, minRelativeImprovement: number, direction: "higher" | "lower") => {
-  const mean = (values: readonly number[]): number | null => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
-  const controlMean = mean(control); const variantMean = mean(variant);
-  const sufficient = control.length >= minimumPerArm && variant.length >= minimumPerArm;
-  const relativeChange = controlMean !== null && controlMean !== 0 && variantMean !== null ? (variantMean - controlMean) / Math.abs(controlMean) : null;
-  const improvement = relativeChange === null ? null : relativeChange * (direction === "higher" ? 1 : -1);
-  const winner = !sufficient || improvement === null ? "inconclusive" : improvement >= minRelativeImprovement ? "variant" : improvement <= -minRelativeImprovement ? "control" : "inconclusive";
-  return { control: { sampleSize: control.length, mean: controlMean }, variant: { sampleSize: variant.length, mean: variantMean }, minimumPerArm, relativeChange, direction, minRelativeImprovement, winner, sufficient, hypothesisOnly: true, causalClaim: false };
+  const summarize = (input: readonly number[]) => {
+    const values = input.filter(Number.isFinite); const ordered = [...values].sort((a, b) => a - b);
+    const mean = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+    const variance = mean !== null && values.length > 1 ? values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1) : null;
+    const quantile = (fraction: number): number | null => {
+      if (!ordered.length) return null;
+      const position = (ordered.length - 1) * fraction; const low = Math.floor(position); const high = Math.ceil(position);
+      return ordered[low]! + (ordered[high]! - ordered[low]!) * (position - low);
+    };
+    const q1 = quantile(0.25); const q3 = quantile(0.75);
+    const outliers = q1 !== null && q3 !== null ? values.filter((value) => value < q1 - 1.5 * (q3 - q1) || value > q3 + 1.5 * (q3 - q1)).length : 0;
+    return { sampleSize: values.length, mean, variance, standardDeviation: variance === null ? null : Math.sqrt(variance), median: quantile(0.5), outliers, invalidValues: input.length - values.length };
+  };
+  const c = summarize(control); const v = summarize(variant);
+  const sufficient = c.sampleSize >= minimumPerArm && v.sampleSize >= minimumPerArm;
+  const relativeChange = c.mean !== null && c.mean !== 0 && v.mean !== null ? (v.mean - c.mean) / Math.abs(c.mean) : null;
+  const standardError = c.variance !== null && v.variance !== null ? Math.sqrt(c.variance / c.sampleSize + v.variance / v.sampleSize) : null;
+  const difference = c.mean !== null && v.mean !== null ? (v.mean - c.mean) * (direction === "higher" ? 1 : -1) : null;
+  const range = difference !== null && standardError !== null ? [difference - 2 * standardError, difference + 2 * standardError] : null;
+  const balanced = Math.max(c.sampleSize, v.sampleSize) <= Math.max(1, Math.min(c.sampleSize, v.sampleSize)) * 2;
+  const quality = balanced && c.outliers + v.outliers === 0 && c.invalidValues + v.invalidValues === 0;
+  const threshold = c.mean === null ? null : Math.abs(c.mean) * minRelativeImprovement;
+  const winner = !sufficient || !quality || relativeChange === null || !range || threshold === null ? "inconclusive" : range[0]! >= threshold ? "variant" : range[1]! <= -threshold ? "control" : "inconclusive";
+  return { control: c, variant: v, minimumPerArm, relativeChange, direction, minRelativeImprovement, winner, sufficient, balanced, uncertainty: { method: "TWO_STANDARD_ERROR_DESCRIPTIVE", standardError, directionalMeanDifference: difference, range, calibratedConfidenceLevel: null }, decisionLimitations: ["OBSERVATIONAL_ASSOCIATION_NOT_CAUSATION", ...(!balanced ? ["ALLOCATION_IMBALANCE"] : []), ...(c.outliers + v.outliers ? ["OUTLIERS_PRESENT"] : [])], hypothesisOnly: true, causalClaim: false };
 };

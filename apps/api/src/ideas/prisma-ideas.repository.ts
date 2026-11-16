@@ -99,7 +99,7 @@ export class PrismaIdeasRepository implements IdeasRepository {
               url: candidate.url,
               bodyHash: candidate.contentHash,
               body: candidate.body.slice(0, 10_000),
-              contentScope: candidate.reliabilityMetadata?.contentScope === "FULL_TEXT" ? "FULL_TEXT" : "SUMMARY",
+              contentScope: candidate.reliabilityMetadata?.contentScope === "FULL_TEXT" && candidate.body.length <= 10_000 ? "FULL_TEXT" : "SUMMARY",
               eventAt: candidate.eventAt ?? null,
               reliability: candidate.reliabilityMetadata ? JSON.parse(JSON.stringify(candidate.reliabilityMetadata)) as Prisma.InputJsonObject : null
             }

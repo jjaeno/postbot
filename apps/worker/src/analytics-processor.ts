@@ -21,7 +21,10 @@ export class AnalyticsProcessor {
       await this.prisma.analyticsSync.update({ where: { id: syncId }, data: { status: "EXPIRED", nextAttemptAt: null } });
       return { syncId, expired: true };
     }
-    const claim = await this.prisma.analyticsSync.updateMany({ where: { id: syncId, collectionAttempts: sync.collectionAttempts, status: { not: "COLLECTING" } }, data: { status: "COLLECTING", collectionAttempts: { increment: 1 } } });
+    const claim = await this.prisma.$transaction(async (tx) => {
+      await assertExecutionOwner(tx);
+      return tx.analyticsSync.updateMany({ where: { id: syncId, collectionAttempts: sync.collectionAttempts, status: { not: "COLLECTING" } }, data: { status: "COLLECTING", collectionAttempts: { increment: 1 } } });
+    });
     if (claim.count !== 1) return { syncId, duplicate: true };
     const attempt = sync.collectionAttempts + 1;
     const retryAt = (delayHours = 1): Date => new Date(Date.now() + Math.max(delayHours, Math.min(24, 2 ** (attempt - 1))) * 3_600_000);
