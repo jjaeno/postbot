@@ -1,6 +1,7 @@
 import { Queue, Worker, type JobsOptions, type Processor } from "bullmq";
 import { Redis } from "ioredis";
 import { z } from "zod";
+export { DelayedError } from "bullmq";
 
 export const jobQueueNames = ["collect", "script", "asset", "tts", "render", "policy", "publish", "analytics"] as const;
 export const jobTypes = ["COLLECT", "SCRIPT", "ASSET", "TTS", "RENDER", "POLICY", "PUBLISH", "ANALYTICS"] as const;
@@ -36,6 +37,7 @@ export type EnqueueJobInput = {
 export type QueueAdapter = {
   enqueue(input: EnqueueJobInput): Promise<void>;
   cancel(jobId: string, queueName: JobQueueName): Promise<void>;
+  state?(jobId: string, queueName: JobQueueName): Promise<string>;
   close(): Promise<void>;
 };
 
@@ -93,8 +95,27 @@ export class BullMqQueueAdapter implements QueueAdapter {
 
   constructor(private readonly redisUrl: string, private readonly prefix = "bull") {}
 
+  async state(jobId: string, queueName: JobQueueName): Promise<string> {
+    return (await this.getQueue(queueName).getJob(jobId))?.getState() ?? "unknown";
+  }
+
   async enqueue(input: EnqueueJobInput): Promise<void> {
     const queue = this.getQueue(input.queueName);
+    const existing = await queue.getJob(input.id);
+    if (existing) {
+      const state = await existing.getState();
+      if (state === "completed" || state === "failed") {
+        // BullMQ atomically checks the terminal state before moving it to wait.
+        // Concurrent recovery calls cannot remove a newly active job.
+        try { await existing.retry(state); }
+        catch (error) {
+          const current = await existing.getState();
+          if (current === state) throw error;
+        }
+        return;
+      }
+      if (state !== "unknown") return;
+    }
     await queue.add(input.type, input, defaultJobOptions(input));
   }
 
@@ -103,7 +124,9 @@ export class BullMqQueueAdapter implements QueueAdapter {
     if (!job) {
       return;
     }
-    await job.remove();
+    if (await job.isActive()) return; // The worker observes CANCEL_REQUESTED.
+    try { await job.remove(); }
+    catch (error) { if (!(await job.isActive())) throw error; }
   }
 
   async close(): Promise<void> {

@@ -19,6 +19,8 @@ import { reserveAutomationCost } from "./automation-budget.js";
 import { estimateAutomationStageCost, type AutomationCostUsage } from "./automation-cost-estimator.js";
 import { nextZonedSchedule } from "./schedule-time.js";
 import { createScheduledPlan, localPublishDay } from "../publishing/publish-slots.js";
+import { scheduleAnalytics } from "../analytics/schedule-analytics.js";
+import { readAssetUsagePurpose } from "@postbot/asset-library";
 
 export const automationStages = ["COLLECT", "SCRIPT", "ASSET", "TTS", "RENDER", "POLICY", "PUBLISH"] as const satisfies readonly AutomationStage[];
 const platformStages = automationStages.filter((stage): stage is Exclude<AutomationStage, "COLLECT"> => stage !== "COLLECT");
@@ -45,7 +47,11 @@ type RunStep = {
   stage: string;
   platform: Platform | null;
   status: string;
+  updatedAt?: Date;
 };
+
+const canDispatchAutomationStep = (step: RunStep): boolean => step.status === "PENDING"
+  || (["QUEUED", "RUNNING"].includes(step.status) && step.updatedAt !== undefined && isAbandonedAutomationClaim(step.updatedAt));
 
 export type AutomationRunDecision =
   | { status: "RUNNING"; runnable: Array<{ stage: Stage; platform: BranchPlatform }> }
@@ -57,7 +63,7 @@ export const evaluateAutomationBranches = (steps: RunStep[]): AutomationRunDecis
   if (common.status === "FAILED") return { status: "FAILED", runnable: [] };
   if (common.status === "HELD") return { status: "PAUSED", runnable: [] };
   if (!isComplete(common.status)) {
-    return common.status === "PENDING"
+    return canDispatchAutomationStep(common)
       ? { status: "RUNNING", runnable: [{ stage: "COLLECT", platform: null }] }
       : { status: "RUNNING", runnable: [] };
   }
@@ -78,7 +84,7 @@ export const evaluateAutomationBranches = (steps: RunStep[]): AutomationRunDecis
     const step = branch[firstIncomplete]!;
     if (step.status === "FAILED") failed = true;
     else if (step.status === "HELD") held = true;
-    else if (step.status === "PENDING") {
+    else if (canDispatchAutomationStep(step)) {
       runnable.push({ stage: step.stage as Stage, platform });
       active = true;
     } else {
@@ -199,6 +205,12 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     ];
     const reservation = await this.prisma.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM channels WHERE id = ${channel.id} FOR UPDATE`;
+      if (selectedIdea) {
+        const current = await tx.contentIdea.findUniqueOrThrow({ where: { id: selectedIdea.id } });
+        const reservation = asObject(current.rawSnapshot).reservationRunId;
+        if (typeof reservation === "string" && await tx.automationRun.count({ where: { id: reservation, status: { in: ["QUEUED", "RUNNING", "PAUSED", "DRAINING"] } } })) throw new ConflictException("IDEA_ALREADY_IN_PRODUCTION");
+        if (["REJECTED", "EXPIRED"].includes(current.status)) throw new ConflictException("IDEA_NOT_AVAILABLE");
+      }
       const active = !selectedIdea && !input.sample ? await tx.automationRun.findFirst({ where: { channelId: channel.id, status: { in: ["QUEUED", "RUNNING", "PAUSED", "DRAINING"] } }, orderBy: { createdAt: "desc" }, include: { steps: { orderBy: [{ platform: "asc" }, { createdAt: "asc" }] } } }) : null;
       if (active) return { run: active, created: false };
       const created = await tx.automationRun.create({
@@ -221,6 +233,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
       },
       include: { steps: { orderBy: [{ platform: "asc" }, { createdAt: "asc" }] } }
       });
+      if (selectedIdea) await tx.contentIdea.update({ where: { id: selectedIdea.id }, data: { rawSnapshot: { ...asObject(selectedIdea.rawSnapshot), reservationRunId: created.id } } });
       return { run: created, created: true };
     });
     const run = reservation.run;
@@ -380,6 +393,11 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
         && (step.status === "FAILED" || step.status === "HELD")
       );
       if (recoverable.length === 0) throw new ConflictException("NO_RECOVERABLE_AUTOMATION_STEP");
+      for (const step of recoverable) {
+        if (!step.productionJobId) continue;
+        const job = await this.prisma.productionJob.findUnique({ where: { id: step.productionJobId } });
+        if (job && (asObject(job.result).reconciliationRequired === true || job.errorCode?.includes("RECONCILIATION_REQUIRED"))) throw new ConflictException("RECONCILIATION_REQUIRED_CONFIRM_PROVIDER_OUTCOME");
+      }
       await this.prisma.$transaction([
         this.prisma.automationStep.updateMany({
           where: { id: { in: recoverable.map((step) => step.id) } },
@@ -521,9 +539,25 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     if (step.productionJobId) {
       const existingJob = await this.prisma.productionJob.findUnique({
         where: { id: step.productionJobId },
-        select: { status: true }
+        select: { status: true, result: true, errorCode: true, errorMessage: true, finishedAt: true,
+          attempts: { orderBy: { attemptNumber: "desc" }, take: 1, select: { attemptNumber: true } } }
       });
+      // Reconcile a missed worker notification without executing terminal work again.
+      if (existingJob && ["QUEUED", "RUNNING"].includes(step.status)
+        && ["SUCCEEDED", "FAILED", "NEEDS_REVIEW", "CANCELLED"].includes(existingJob.status)) {
+        const status = existingJob.status === "SUCCEEDED" ? "SUCCEEDED" : existingJob.status === "NEEDS_REVIEW" ? "HELD" : "FAILED";
+        await this.prisma.automationStep.updateMany({
+          where: { id: step.id, productionJobId: step.productionJobId, status: { in: ["QUEUED", "RUNNING"] } },
+          data: { status, output: existingJob.result === null ? Prisma.DbNull : existingJob.result,
+            attemptCount: existingJob.attempts[0]?.attemptNumber ?? step.attemptCount,
+            finishedAt: existingJob.finishedAt ?? new Date(),
+            errorCode: status === "SUCCEEDED" ? null : existingJob.errorCode ?? `JOB_${existingJob.status}`,
+            errorMessage: status === "SUCCEEDED" ? null : existingJob.errorMessage }
+        });
+        return;
+      }
       if (existingJob && ["FAILED", "NEEDS_REVIEW", "CANCELLED"].includes(existingJob.status)) {
+        if (isCostStage(stage) && !await this.reserveCost(workspaceId, runId, channelId, stage, platform)) return;
         if (stage === "PUBLISH") {
           const output = asObject(step.output);
           if (typeof output.publishPlanId === "string") {
@@ -545,12 +579,13 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
           })
         ]);
       }
+      if (existingJob && ["QUEUED", "RETRY_WAIT"].includes(existingJob.status)) await this.jobs.recover(workspaceId, step.productionJobId, {});
       return;
     }
     if (step.status === "QUEUED") {
       if (!isAbandonedAutomationClaim(step.updatedAt)) return;
       await this.prisma.automationStep.updateMany({
-        where: { id: step.id, status: "QUEUED", productionJobId: null },
+        where: { id: step.id, status: "QUEUED", productionJobId: null, updatedAt: step.updatedAt },
         data: { status: "PENDING" }
       });
     }
@@ -566,24 +601,25 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     const prepared = await this.prepareStage(workspaceId, runId, channelId, stage, platform);
     if (!prepared) return;
     const platformKey = platform?.toLowerCase() ?? "common";
-    const job = await this.jobs.create(workspaceId, {
+    await this.jobs.create(workspaceId, {
       type: stage,
       channelId,
       contentItemId: prepared.contentItemId,
       idempotencyKey: `automation:${runId}:${platformKey}:${stage.toLowerCase()}`,
       payload: prepared.payload,
       runAfter: prepared.runAfter
+    }, async (job) => {
+      await this.prisma.$transaction([
+        this.prisma.automationStep.updateMany({
+          where: { id: step.id, status: { not: "CANCELLED" } },
+          data: { productionJobId: job.id }
+        }),
+        this.prisma.automationRun.updateMany({
+          where: { id: runId, status: { in: ["QUEUED", "RUNNING"] } },
+          data: { status: "RUNNING", heartbeatAt: new Date(), nextRunAt: null }
+        })
+      ]);
     });
-    await this.prisma.$transaction([
-      this.prisma.automationStep.updateMany({
-        where: { id: step.id, status: { not: "CANCELLED" } },
-        data: { status: "QUEUED", productionJobId: job.id }
-      }),
-      this.prisma.automationRun.updateMany({
-        where: { id: runId, status: { in: ["QUEUED", "RUNNING"] } },
-        data: { status: "RUNNING", heartbeatAt: new Date(), nextRunAt: null }
-      })
-    ]);
   }
 
   private async prepareStage(
@@ -863,7 +899,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  private nextSchedule(rules: Array<{ dayOfWeek: number; timeOfDayUtc: string; timezone?: string }>, after: Date): Date | null {
+  private nextSchedule(rules: Array<{ dayOfWeek: number; timeOfDayUtc: string; timezone?: string; maxPosts?: number }>, after: Date): Date | null {
     return nextZonedSchedule(rules, after);
   }
 
@@ -941,7 +977,14 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
         const scene = await this.prisma.sceneVersion.findFirst({ where: { id: sceneVersionId, contentItemId, platform } });
         const document = asObject(scene?.sceneDocument ?? null);
         const scenes = Array.isArray(document.scenes) ? document.scenes : [];
-        if (stage === "ASSET") usage.imageCount = Math.round(scenes.length * (typeof document.aiStockRatio === "number" ? document.aiStockRatio : 1));
+        if (stage === "ASSET") {
+          const aiCount = Math.round(scenes.length * (typeof document.aiStockRatio === "number" ? document.aiStockRatio : 1));
+          const usages = await this.prisma.assetUsage.findMany({ where: { sceneVersionId }, select: { usageSnapshot: true, purpose: true } });
+          usage.imageCount = scenes.slice(0, aiCount).filter((entry) => {
+            const id = asObject(entry as Prisma.JsonValue).id;
+            return typeof id !== "string" || !usages.some((usage) => readAssetUsagePurpose(usage) === `scene-image:${platform}:${id}`);
+          }).length;
+        }
         else {
           const frames = typeof document.durationInFrames === "number" ? document.durationInFrames : 0;
           const fps = typeof document.fps === "number" ? document.fps : 0;
@@ -949,7 +992,9 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
         }
       } else if (stage === "TTS") {
         const script = await this.prisma.scriptVersion.findFirst({ where: { contentItemId, platform }, orderBy: { version: "desc" } });
-        usage.characters = script ? [script.hook, script.body, script.callToAction].filter(Boolean).join(" ").length : 0;
+        const prepared = await this.prisma.assetUsage.findMany({ where: { sceneVersionId }, select: { usageSnapshot: true, purpose: true } });
+        const reusable = prepared.some((usage) => readAssetUsagePurpose(usage).startsWith("tts-narration"));
+        usage.characters = reusable ? 0 : script ? [script.hook, script.body, script.callToAction].filter(Boolean).join(" ").length : 0;
       }
     }
     const estimate = estimateAutomationStageCost(loadConfig(), stage as "SCRIPT" | "ASSET" | "TTS" | "RENDER", usage);
@@ -1023,6 +1068,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     this.scheduling = true;
     try {
     const now = new Date();
+    await scheduleAnalytics(this.prisma, this.jobs, now);
     const channels = await this.prisma.channel.findMany({
       where: { status: "ACTIVE" },
       select: {
@@ -1073,7 +1119,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     channelId: string;
     status: string;
     channel: { workspaceId: string };
-    steps: Array<{ id: string; stage: string; platform: Platform | null; status: string; errorCode: string | null; errorMessage?: string | null }>;
+    steps: Array<{ id: string; stage: string; platform: Platform | null; status: string; errorCode: string | null; errorMessage?: string | null; updatedAt?: Date }>;
   }): Promise<void> {
     const decision = evaluateAutomationBranches(run.steps);
     if (decision.status !== "RUNNING") {

@@ -2,7 +2,9 @@ import { PrismaClient } from "@postbot/database";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { AutomationService } from "./automation.service.js";
-import type { JobsService } from "../jobs/jobs.service.js";
+import { JobsService } from "../jobs/jobs.service.js";
+import { PrismaJobsRepository } from "../jobs/prisma-jobs.repository.js";
+import type { QueueAdapter } from "@postbot/jobs";
 import type { OperationsService } from "../operations/operations.service.js";
 
 const prisma = new PrismaClient();
@@ -46,5 +48,78 @@ suite("scheduler and manual start concurrency", () => {
     const runs = await Promise.all([service.start(workspace.id, { channelId: channel.id, idempotencyKey: `manual:${key}` }), service.start(workspace.id, { channelId: channel.id, idempotencyKey: `scheduler:${key}` })]);
     expect(runs[0]?.id).toBe(runs[1]?.id);
     expect(await prisma.automationRun.count({ where: { channelId: channel.id } })).toBe(1);
+  });
+  it("links the automation step before a fast worker can finish the queued job", async () => {
+    const key = randomUUID();
+    const user = await prisma.user.create({ data: { email: `${key}@automation-start.test`, displayName: "Start fixture", passwordHash: "fixture" } });
+    const workspace = await prisma.workspace.create({ data: { ownerId: user.id, name: "Start fixture", slug: key } });
+    const channel = await prisma.channel.create({ data: {
+      workspaceId: workspace.id, name: "Start fixture", slug: key,
+      outputProfiles: { create: { platform: "YOUTUBE", minDurationSeconds: 35, maxDurationSeconds: 55 } },
+      collectionRules: { create: { keywords: ["science"], recencyHours: 24, collectionFrequencyMinutes: 1440 } }
+    } });
+    const queue: QueueAdapter = {
+      enqueue: async (input) => {
+        const step = await prisma.automationStep.findUnique({ where: { productionJobId: input.id } });
+        expect(step).not.toBeNull();
+        if (!step) throw new Error("Automation step was not linked before enqueue");
+        await prisma.$transaction([
+          prisma.productionJob.update({ where: { id: input.id }, data: { status: "SUCCEEDED", result: {}, finishedAt: new Date() } }),
+          prisma.automationStep.update({ where: { id: step.id }, data: { status: "SUCCEEDED", output: {}, finishedAt: new Date() } })
+        ]);
+      },
+      cancel: () => Promise.resolve(),
+      close: () => Promise.resolve()
+    };
+    const jobs = new JobsService(new PrismaJobsRepository(prisma), queue);
+    const service = new AutomationService(prisma, jobs, {} as OperationsService);
+    const run = await service.start(workspace.id, { channelId: channel.id, idempotencyKey: key });
+    expect(run.steps.find((step) => step.stage === "COLLECT")?.status).toBe("SUCCEEDED");
+    expect(await prisma.productionJob.count({ where: { channelId: channel.id } })).toBe(1);
+    expect((await service.start(workspace.id, { channelId: channel.id, idempotencyKey: key })).id).toBe(run.id);
+    expect(await prisma.productionJob.count({ where: { channelId: channel.id } })).toBe(1);
+  });
+
+  it.each(["unlinked", "queued", "SUCCEEDED", "FAILED", "NEEDS_REVIEW", "CANCELLED"] as const)("recovers a stale %s step without replaying terminal work", async (mode) => {
+    const key = randomUUID();
+    const user = await prisma.user.create({ data: { email: `${key}@automation-start.test`, displayName: "Recovery fixture", passwordHash: "fixture" } });
+    const workspace = await prisma.workspace.create({ data: { ownerId: user.id, name: "Recovery fixture", slug: key } });
+    const channel = await prisma.channel.create({ data: {
+      workspaceId: workspace.id, name: "Recovery fixture", slug: key,
+      outputProfiles: { create: { platform: "YOUTUBE", minDurationSeconds: 35, maxDurationSeconds: 55 } },
+      collectionRules: { create: { keywords: ["science"], recencyHours: 24, collectionFrequencyMinutes: 1440 } }
+    } });
+    let enqueued = 0;
+    const queue: QueueAdapter = {
+      enqueue: async (input) => {
+        enqueued += 1;
+        if (mode === "queued" && enqueued === 1) throw new Error("QUEUE_UNAVAILABLE");
+        const status = mode === "unlinked" || mode === "queued" ? "SUCCEEDED" : mode;
+        await prisma.productionJob.update({ where: { id: input.id }, data: { status, result: { recovered: true }, finishedAt: new Date() } });
+        // Terminal modes simulate a worker stopping after saving the job but
+        // before notifying the automation step.
+        if (mode === "unlinked" || mode === "queued") {
+          await prisma.automationStep.updateMany({ where: { productionJobId: input.id }, data: { status: "SUCCEEDED", output: { recovered: true } } });
+        }
+      },
+      cancel: () => Promise.resolve(), close: () => Promise.resolve()
+    };
+    const jobs = new JobsService(new PrismaJobsRepository(prisma), queue);
+    if (mode === "unlinked") vi.spyOn(jobs, "create").mockRejectedValueOnce(new Error("CREATE_INTERRUPTED"));
+    const service = new AutomationService(prisma, jobs, {} as OperationsService);
+    const started = service.start(workspace.id, { channelId: channel.id, idempotencyKey: key });
+    if (mode === "unlinked" || mode === "queued") await expect(started).rejects.toThrow();
+    else await started;
+    const run = await prisma.automationRun.findUniqueOrThrow({ where: { idempotencyKey: key } });
+    await prisma.automationStep.updateMany({ where: { automationRunId: run.id, stage: "COLLECT" }, data: { updatedAt: new Date(Date.now() - 120_000) } });
+    const stale = await prisma.automationRun.findUniqueOrThrow({ where: { id: run.id }, include: { channel: { select: { workspaceId: true } }, steps: true } });
+    // Exercise one scheduler pass without starting global background timers.
+    await service["resumeNextStep"](stale);
+    const recovered = (await service.get(workspace.id, run.id)).steps.find((step) => step.stage === "COLLECT");
+    const expected = mode === "NEEDS_REVIEW" ? "HELD" : mode === "FAILED" || mode === "CANCELLED" ? "FAILED" : "SUCCEEDED";
+    expect(recovered?.status).toBe(expected);
+    expect(enqueued).toBe(mode === "queued" ? 2 : 1);
+    expect(await prisma.productionJob.count({ where: { channelId: channel.id } })).toBe(1);
+    if (expected === "SUCCEEDED") expect(recovered?.output).toMatchObject({ recovered: true });
   });
 });

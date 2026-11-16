@@ -1,3 +1,4 @@
+import { FirstChannelWelcome, WorkspaceShell, WorkspaceView, useWorkspacePage } from "./workspace-shell";
 import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -9,7 +10,6 @@ import {
   CirclePlay,
   Lightbulb,
   LogIn,
-  LogOut,
   Pencil,
   Plus,
   RefreshCw,
@@ -286,6 +286,7 @@ type WizardForm = {
   requiresPolicyPass: boolean;
   requiresRightsCheck: boolean;
   blocksSensitiveTopics: boolean;
+  onConsecutiveFailures: "pause_channel" | "notify_only";
   maxDailyPosts: number;
   voiceProfile: string;
   aiStockRatio: number;
@@ -324,6 +325,7 @@ const defaultWizardValues: WizardForm = {
   requiresPolicyPass: true,
   requiresRightsCheck: true,
   blocksSensitiveTopics: true,
+  onConsecutiveFailures: "pause_channel",
   maxDailyPosts: 2,
   voiceProfile: "neutral-ko", aiStockRatio: 1, brandColor: "#0f766e", backgroundColor: "#f8fafc", fontFamily: "Arial", watermark: "", logoAssetId: "", captionColor: "#ffffff", captionBackground: "#0f172a", captionFontSize: 52
 };
@@ -393,9 +395,9 @@ const buildChannelInput = (values: WizardForm): CreateChannelRequest => ({
       minInventoryCount: Number(values.minContentInventory),
       dailyPublishLimit: Number(values.maxDailyPosts),
       errorAction: {
-        onPolicyFailure: values.requiresPolicyPass ? "hold" : "regenerate",
+        onPolicyFailure: "hold",
         onAssetLicenseUnknown: "hold",
-        onConsecutiveFailures: values.blocksSensitiveTopics || values.requiresRightsCheck ? "pause_channel" : "notify_only"
+        onConsecutiveFailures: values.onConsecutiveFailures
       }
     }
   });
@@ -529,6 +531,7 @@ const LegacyField = ({
 );
 
 const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
+  const page = useWorkspacePage();
   const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   const [wizardOpen, setWizardOpen] = useState(() => readWizardDraft() !== null);
@@ -578,51 +581,41 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
   const publishPlans = useQuery({ queryKey: ["publish-plans"], queryFn: fetchPublishPlans, enabled: Boolean(session), refetchInterval: 30_000 });
 
   return (
-    <main className="min-h-screen bg-background px-5 py-6 text-foreground md:px-8">
-      <section className="mx-auto flex w-full max-w-6xl flex-col gap-6">
-        <header className="flex flex-col gap-4 border-b border-border pb-5 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <div className="mb-2 flex items-center gap-2 text-primary">
-              <ShieldCheck aria-hidden="true" className="h-5 w-5" />
-              <span className="text-sm font-semibold">Postbot</span>
-            </div>
-            <h1 className="text-2xl font-semibold">채널 운영 설정</h1>
-            <p className="mt-2 text-sm text-muted-foreground">
-              {session.workspace.name} · {session.user.displayName}
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button className="gap-2" data-testid="create-channel" onClick={() => setWizardOpen(true)}>
-              <Plus aria-hidden="true" className="h-4 w-4" />
-              채널 만들기
-            </Button>
-            <Button className="gap-2 bg-foreground" onClick={() => logout.mutate()} disabled={logout.isPending}>
-              <LogOut aria-hidden="true" className="h-4 w-4" />
-              로그아웃
-            </Button>
-          </div>
-        </header>
-
+    <WorkspaceShell page={page} workspace={session.workspace.name} user={session.user.displayName} logout={() => logout.mutate()} loggingOut={logout.isPending} action={<Button className="gap-2" data-testid="create-channel" onClick={() => setWizardOpen(true)}><Plus aria-hidden="true" className="h-4 w-4" />채널 만들기</Button>}>
         {error ? <p className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</p> : null}
         {oauthResult ? <p role={oauthResult === "connected" ? "status" : "alert"} className="rounded-md border border-border bg-white p-3 text-sm">{oauthResult === "connected" ? "플랫폼 계정 연결이 완료되었습니다. 채널의 연결 상태를 확인해 주세요." : "연결을 완료하지 못했습니다. 권한 거절, 연결 만료 또는 제공자 설정을 확인한 뒤 원래 채널에서 다시 연결해 주세요."}</p> : null}
 
-        <nav aria-label="운영 메뉴" className="flex flex-wrap gap-2 text-sm">{[["home", "홈"], ["channels", "채널"], ["ideas", "아이디어"], ["content", "콘텐츠"], ["calendar", "캘린더"], ["insights", "분석·최적화"], ["settings", "사용량·설정"]].map(([id, label]) => <a className="rounded border border-border bg-white px-3 py-2 hover:border-primary" href={`#${id}`} key={id}>{label}</a>)}</nav>
+
         {[channels, platformAccounts, content, automationRuns, analytics, suggestions, costs, budgets, notifications, publishPlans].some((query) => query.isError) ? <p role="alert" className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">일부 운영 정보를 불러오지 못했습니다. 표시되지 않은 항목은 데이터 없음이나 비용 0을 뜻하지 않습니다. <Button onClick={() => void queryClient.invalidateQueries()}>다시 불러오기</Button></p> : null}
+        <WorkspaceView active={page} page="home">
+        {!channels.isLoading && !channels.isError && channels.data?.length === 0 ? <FirstChannelWelcome onCreate={() => setWizardOpen(true)} /> : null}
         <div id="home"><OperationsOverview channels={channels.data ?? []} content={content.data ?? []} /></div>
-        <HomeActions channels={channels.data ?? []} content={content.data ?? []} plans={publishPlans.data ?? []} accounts={platformAccounts.data ?? []} budgets={budgets.data ?? []} />
+        {channels.data?.length ? <HomeActions channels={channels.data ?? []} content={content.data ?? []} plans={publishPlans.data ?? []} accounts={platformAccounts.data ?? []} budgets={budgets.data ?? []} /> : null}
         <AutomationPanel runs={automationRuns.data ?? []} isLoading={automationRuns.isLoading} />
+        </WorkspaceView>
+        <WorkspaceView active={page} page="insights">
+        <div className="workspace-filterbar">
         <label id="insights" className="max-w-sm text-sm font-medium">분석할 채널<select className="mt-2 h-10 w-full rounded-md border border-border px-3" value={insightChannelId} onChange={(event) => setInsightChannelId(event.target.value)}>{(channels.data ?? []).map((channel) => <option key={channel.id} value={channel.id}>{channel.name}</option>)}</select></label>
-        <AnalyticsPanel report={analytics.data} isLoading={analytics.isLoading} />
         <div className="flex flex-wrap gap-3 text-sm"><label>분석 플랫폼<select className="ml-2 rounded border p-2" value={insightPlatform} onChange={(event) => setInsightPlatform(event.target.value)}><option value="">전체</option>{(["YOUTUBE", "INSTAGRAM", "TIKTOK"] as const).map((platform) => <option key={platform} value={platform}>{platformLabel(platform)}</option>)}</select></label><label>분석 기간<select className="ml-2 rounded border p-2" value={insightDays} onChange={(event) => setInsightDays(Number(event.target.value))}><option value={7}>최근 7일</option><option value={30}>최근 30일</option><option value={90}>최근 90일</option></select></label></div>
+        </div>
+        <AnalyticsPanel report={analytics.data} isLoading={analytics.isLoading} />
+        <div className="workspace-analysis-grid">
         <InsightControls request={request} channelId={insightChannelId} platform={insightPlatform} days={insightDays} owner={session.workspace.role === "OWNER"} />
         <OptimizationPanel suggestions={suggestions.data ?? []} isLoading={suggestions.isLoading} />
+        </div>
+        <details className="workspace-advanced"><summary>실험 및 전략 관리<span>영상 길이 비교 · 적용 이력</span></summary><div className="workspace-advanced-content">
         <ExperimentPanel channelId={insightChannelId || channels.data?.[0]?.id || ""} />
         <StrategyPanel channelId={insightChannelId} />
+        </div></details>
+        </WorkspaceView>
+        <WorkspaceView active={page} page="settings">
         <div aria-label="비용 필터" className="cost-filters flex flex-wrap gap-3 rounded border bg-white p-3 text-sm" data-testid="cost-filters" role="group"><label>비용 채널<select className="ml-2 rounded border p-2" value={costChannel} onChange={(event) => { setCostChannel(event.target.value); setCostContent(""); }}><option value="">전체</option>{channels.data?.map((channel) => <option key={channel.id} value={channel.id}>{channel.name}</option>)}</select></label><label>비용 콘텐츠<select className="ml-2 rounded border p-2" value={costContent} onChange={(event) => setCostContent(event.target.value)}><option value="">전체</option>{content.data?.filter((item) => !costChannel || item.channelId === costChannel).map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label><label>비용 제공자<input className="ml-2 rounded border p-2" placeholder="전체 또는 제공자 이름" value={costProvider} onChange={(event) => setCostProvider(event.target.value)} /></label><label>비용 기간<select className="ml-2 rounded border p-2" value={costDays} onChange={(event) => setCostDays(Number(event.target.value))}>{[7, 30, 90].map((days) => <option key={days} value={days}>최근 {days}일</option>)}</select></label></div>
         <div id="settings"><OperationsPanel costs={costs.data} notifications={notifications.data ?? []} isLoading={costs.isLoading || notifications.isLoading} /></div>
         <ProviderControls request={request} owner={session.workspace.role === "OWNER"} />
         <BudgetPanel budgets={budgets.data ?? []} channels={channels.data ?? []} isLoading={budgets.isLoading} onError={setError} />
 
+        </WorkspaceView>
+        <WorkspaceView active={page} page="channels">
         <div id="channels" className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
           <ChannelList
             accounts={platformAccounts.data ?? []}
@@ -633,13 +626,20 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
           />
           <EditPanel channel={editing} onClose={() => setEditing(null)} onError={setError} />
         </div>
+        </WorkspaceView>
+        <WorkspaceView active={page} page="ideas">
         <div id="ideas"><IdeasPanel channels={channels.data ?? []} onError={setError} /></div>
+        </WorkspaceView>
+        <WorkspaceView active={page} page="content">
         <ContentPanel channels={channels.data ?? []} content={content.data ?? []} isLoading={content.isLoading} onError={setError} selectedId={selectedContentId} onSelect={(id) => { setSelectedContentId(id); const url = new URL(window.location.href); url.searchParams.set("content", id); window.history.replaceState({}, "", url); }} />
-        <div id="calendar"><CalendarPanel channels={channels.data ?? []} plans={publishPlans.data ?? []} onSelect={(id, platform) => { selectReviewPlatform(platform); setSelectedContentId(id); const url = new URL(window.location.href); url.searchParams.set("content", id); window.history.replaceState({}, "", url); }} /></div>
+
         <ReviewPanel owner={session.workspace.role === "OWNER"} channels={channels.data ?? []} platform={selectedReviewPlatform} setPlatform={selectReviewPlatform} accounts={platformAccounts.data ?? []} content={content.data ?? []} contentItemId={selectedContentId} onSelectContent={(id) => { setSelectedContentId(id); const url = new URL(window.location.href); url.searchParams.set("content", id); window.history.replaceState({}, "", url); }} onError={setError} />
-      </section>
+        </WorkspaceView>
+        <WorkspaceView active={page} page="calendar">
+        <div id="calendar"><CalendarPanel channels={channels.data ?? []} plans={publishPlans.data ?? []} onSelect={(id, platform) => { window.location.hash = "content"; selectReviewPlatform(platform); setSelectedContentId(id); const url = new URL(window.location.href); url.searchParams.set("content", id); window.history.replaceState({}, "", url); }} /></div>
+        </WorkspaceView>
       {wizardOpen ? <ChannelWizard onClose={() => setWizardOpen(false)} onError={setError} /> : null}
-    </main>
+    </WorkspaceShell>
   );
 };
 
@@ -652,6 +652,7 @@ const AutomationPanel = ({ runs, isLoading }: { runs: AutomationRunResponse[]; i
   return <section id="automation" className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="automation-panel">
     <div><h2 className="text-lg font-semibold">자동화 운영</h2><p className="mt-1 text-sm text-muted-foreground">실행 상태, 최근 신호, 실패 단계와 운영자 보류 상태를 확인합니다.</p></div>
     {control.error ? <p role="alert" className="mt-3 text-sm text-red-700">{control.error.message}</p> : null}
+    {runs.filter((run) => run.checkpoint?.skipped === true).map((run) => <p className="mt-3 text-sm" key={`empty-${run.id}`}>사용 가능한 새 소재가 없어 유료 제작을 시작하지 않았습니다. 다음 수집: {run.nextRunAt ? new Date(run.nextRunAt).toLocaleString() : "수집 설정 확인 필요"}</p>)}
     {runs.filter((run) => run.createdAt).map((run) => <p className="mt-3 text-sm" key={`elapsed-${run.id}`}>{statusLabel(run.status)} · {run.steps.filter((step) => step.status === "SUCCEEDED").length}/{run.steps.length}단계 완료 · {run.finishedAt ? "총 소요" : "경과"} {Math.max(0, Math.floor((new Date(run.finishedAt ?? Date.now()).getTime() - new Date(run.createdAt ?? Date.now()).getTime()) / 60_000))}분</p>)}
     {runs.map((run) => <div className="mt-3 flex flex-wrap items-center gap-2 text-sm" key={`actions-${run.id}`}><span>{stageLabel(run.steps.find((step) => ["RUNNING", "QUEUED", "HELD", "FAILED"].includes(step.status))?.stage ?? "COLLECT")} · 다음 실행 {run.nextRunAt ? new Date(run.nextRunAt).toLocaleString() : "미정"}</span>{run.steps.filter((step) => ["FAILED", "HELD"].includes(step.status)).map((step) => <div className="rounded border border-border p-2" key={`${step.stage}-${step.platform}`}><p>{platformLabel(step.platform)} {stageLabel(step.stage)}: {step.errorMessage ?? step.errorCode ?? run.pausedReason ?? "확인 필요"}</p><p className="text-xs text-muted-foreground">원인을 해결한 뒤 이 단계만 다시 실행할 수 있습니다. 예산 부족은 사용량·설정, 승인 대기는 콘텐츠 검수에서 해결하세요.</p><Button disabled={control.isPending} onClick={() => control.mutate({ runId: run.id, action: "retry", stage: step.stage, platform: step.platform })}>이 단계 재시도</Button></div>)}{!["SUCCEEDED", "CANCELLED"].includes(run.status) ? <Button className="bg-foreground" disabled={control.isPending} onClick={() => { if (window.confirm("이 제작을 취소할까요? 이미 진행 중인 작업은 중단 요청을 받으며 완료된 결과는 유지됩니다.")) control.mutate({ runId: run.id, action: "kill" }); }}>제작 취소</Button> : null}</div>)}
     {isLoading ? <p className="mt-4 text-sm text-muted-foreground">자동화 실행을 불러오는 중입니다.</p> : runs.length === 0 ? <p className="mt-4 rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">아직 자동화 실행 기록이 없습니다.</p> : <div className="mt-4 grid gap-2">{runs.slice(0, 10).map((run) => <article className="rounded-md border border-border p-3 text-sm" key={run.id}><div className="flex items-center justify-between gap-3"><span className="font-medium">{statusLabel(run.status)}</span><span className="text-xs text-muted-foreground">{run.heartbeatAt ?? "최근 신호 없음"}</span></div><p className="mt-2 text-xs text-muted-foreground">{run.status === "SUCCEEDED" ? "완료됨 (과거 오류는 작업 이력에서 확인)" : run.lastErrorCode ?? run.pausedReason ?? "오류 없음"}</p><div className="mt-2 flex flex-wrap gap-1">{run.steps.map((step) => <span className="rounded bg-muted px-2 py-1 text-xs" key={`${step.stage}-${step.platform ?? "COMMON"}`}>{platformLabel(step.platform)} · {stageLabel(step.stage)}: {statusLabel(step.status)}</span>)}</div>{run.steps.filter((step) => ["FAILED", "HELD"].includes(step.status) && step.stage !== "PUBLISH").map((step) => <div className="mt-2 rounded border p-2" key={`${step.platform}:${step.stage}`}><p>{platformLabel(step.platform)} · {stageLabel(step.stage)}: {step.errorMessage ?? step.errorCode ?? "원인을 확인해 주세요."}</p><p className="text-xs">권리·예산·Provider 차단 원인을 해소한 뒤 재시도하세요. 새로운 비용이 발생할 수 있습니다.</p><Button disabled={control.isPending} onClick={() => { if (window.confirm("원인을 해소했으며 이 단계만 재시도할까요?")) control.mutate({ runId: run.id, action: "retry", stage: step.stage, platform: step.platform }); }}>해당 단계 재시도</Button></div>)}{["RUNNING", "QUEUED"].includes(run.status) ? <Button className="mt-3 h-8" disabled={control.isPending} onClick={() => control.mutate({ runId: run.id, action: "pause" })}>일시 중지</Button> : run.status === "PAUSED" ? <Button className="mt-3 h-8" disabled={control.isPending} onClick={() => control.mutate({ runId: run.id, action: "resume" })}>다시 시작</Button> : null}</article>)}</div>}
@@ -659,8 +660,9 @@ const AutomationPanel = ({ runs, isLoading }: { runs: AutomationRunResponse[]; i
 };
 
 const AnalyticsPanel = ({ report, isLoading }: { report: AnalyticsReportResponse | undefined; isLoading: boolean }): ReactElement => <section className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="analytics-panel">
-  <div><h2 className="text-lg font-semibold">성과 분석</h2><p className="mt-1 text-sm text-muted-foreground">선택한 기간·플랫폼으로 정규화한 성과 지표입니다.</p></div>
-  {isLoading ? <p className="mt-4 text-sm text-muted-foreground">성과 지표를 불러오는 중입니다.</p> : !report || report.metrics.length === 0 ? <p className="mt-4 rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">이 기간에 동기화된 지표가 없습니다.</p> : <><div className="mt-4 grid gap-2 md:grid-cols-2">{report.metrics.map((metric) => <article className="rounded-md border border-border p-3 text-sm" key={`${metric.metric}-${metric.observedAt}`}><p className="font-medium">{metric.metric}</p><p className="mt-1 text-lg">{metric.status === "AVAILABLE" ? `${metric.value ?? 0} ${metric.unit ?? ""}` : "사용할 수 없음"}</p><p className="mt-1 text-xs text-muted-foreground">{metric.unavailableReason ?? `${metric.aggregation ?? "원본"} · ${metric.observedAt}`}</p></article>)}</div><p className="mt-3 text-xs text-muted-foreground">{report.partial ? "일부 데이터 또는 사용할 수 없는 지표가 포함되어 있습니다." : "반환된 모든 지표를 사용할 수 있습니다."} 마지막 동기화: {report.lastSyncedAt ?? "기록 없음"}</p></>}
+  {report?.lastError ? <p role="alert">최근 수집 실패: {report.lastError}</p> : null}
+  <div><h2 className="text-lg font-semibold">성과 분석</h2><p className="mt-1 text-sm text-muted-foreground">영상별 최신·이전 스냅샷입니다. 겹치는 기간의 값은 합산하지 않습니다. average_view_ratio는 평균 시청 비율, reach는 도달 수이며 완주율·노출 수와 다릅니다.</p></div>
+  {isLoading ? <p className="mt-4 text-sm text-muted-foreground">성과 지표를 불러오는 중입니다.</p> : !report || report.metrics.length === 0 ? <p className="mt-4 rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">이 기간에 동기화된 지표가 없습니다.</p> : <><div className="mt-4 grid gap-2 md:grid-cols-2">{report.metrics.map((metric) => <article className="rounded-md border border-border p-3 text-sm" key={metric.id ?? `${metric.platformPostId}-${metric.metric}-${metric.observedAt}-${metric.revision}`}><p className="font-medium">{metric.title ?? "영상"} · {metric.platform ?? ""} · {metric.metric}</p><p className="text-xs">{metric.latest === false ? "이전 스냅샷" : "최신 스냅샷"} · 게시물 {metric.externalPostId ?? "미제공"} · 조회 기간 {metric.periodStart} ~ {metric.periodEnd}</p><p className="mt-1 text-lg">{metric.status === "AVAILABLE" ? `${metric.value ?? 0} ${metric.unit ?? ""}` : "사용할 수 없음"}</p><p className="mt-1 text-xs text-muted-foreground">{metric.unavailableReason ?? `${metric.aggregation ?? "원본"} · ${metric.observedAt}`}</p></article>)}</div><p className="mt-3 text-xs text-muted-foreground">{report.partial ? "일부 데이터 또는 사용할 수 없는 지표가 포함되어 있습니다." : "반환된 모든 지표를 사용할 수 있습니다."} 마지막 동기화: {report.lastSyncedAt ?? "기록 없음"}</p></>}
 </section>;
 
 const OptimizationPanel = ({ suggestions, isLoading }: { suggestions: OptimizationSuggestionResponse[]; isLoading: boolean }): ReactElement => {
@@ -759,7 +761,7 @@ const CalendarPanel = ({ channels, plans, onSelect }: { channels: ChannelRespons
   return <section className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="calendar-panel">
     <h2 className="text-lg font-semibold">게시 캘린더</h2><p className="mt-1 text-sm text-muted-foreground">반복 슬롯과 실제 예약·게시 결과를 구분합니다. 예약 변경은 기존 예약을 취소한 뒤 검수 화면에서 새 시간으로 예약합니다.</p>
     {change.error ? <p role="alert" className="mt-2 text-sm text-red-700">{change.error.message}</p> : null}
-    {plans.length > 0 ? <div className="mt-4 grid gap-2">{plans.map((plan) => <article className="rounded border border-primary/30 bg-primary/5 p-3 text-sm" key={plan.id}><div className="flex items-center justify-between gap-3"><button type="button" className="font-medium underline" onClick={() => { onSelect(plan.contentItemId, plan.platform); document.getElementById("content")?.scrollIntoView({ block: "start" }); }}>{plan.title} · {platformLabel(plan.platform)}</button><span>{statusLabel(plan.status)}</span></div><p className="mt-1 text-xs text-muted-foreground">예약: {new Date(plan.scheduledAt).toLocaleString()} · 게시: {plan.publishedAt ? new Date(plan.publishedAt).toLocaleString() : "아직 게시되지 않음"}</p>{plan.failureReason ? <p role="alert">{plan.failureReason}</p> : null}{plan.postUrl ? <a className="mt-1 block text-primary" href={plan.postUrl} rel="noreferrer" target="_blank">게시물 열기</a> : null}{plan.status === "SCHEDULED" ? <Button className="mt-2" disabled={change.isPending} onClick={() => { if (window.confirm("기존 예약을 취소하고 검수 화면에서 새 시간을 선택할까요? 새 예약을 저장하기 전까지 게시되지 않습니다.")) change.mutate(plan); }}>예약 변경</Button> : null}</article>)}</div> : <p className="mt-4 text-sm text-muted-foreground">아직 실제 예약 게시물이 없습니다.</p>}
+    {plans.length > 0 ? <div className="mt-4 grid gap-2">{plans.map((plan) => <article className="rounded border border-primary/30 bg-primary/5 p-3 text-sm" key={plan.id}><div className="flex items-center justify-between gap-3"><button type="button" className="font-medium underline" onClick={() => { onSelect(plan.contentItemId, plan.platform); document.getElementById("content")?.scrollIntoView({ block: "start" }); }}>{plan.title} · {platformLabel(plan.platform)}</button><span>{statusLabel(plan.status)}</span></div><p className="mt-1 text-xs text-muted-foreground">예약: {new Date(plan.scheduledAt).toLocaleString()} · 게시: {plan.publishedAt ? new Date(plan.publishedAt).toLocaleString() : "아직 게시되지 않음"}</p>{plan.failureReason ? <p role="alert">{plan.failureReason}</p> : null}{plan.postUrl ? <a className="mt-1 block text-primary" href={plan.postUrl} rel="noreferrer" target="_blank">게시물 열기</a> : null}{["SCHEDULED", "HELD", "FAILED"].includes(plan.status) ? <Button className="mt-2" disabled={change.isPending || plan.reconciliationRequired === true} onClick={() => { if (window.confirm("기존 예약을 취소하고 검수 화면에서 새 시간을 선택할까요? 새 예약을 저장하기 전까지 게시되지 않습니다.")) change.mutate(plan); }}>예약 변경</Button> : null}</article>)}</div> : <p className="mt-4 text-sm text-muted-foreground">아직 실제 예약 게시물이 없습니다.</p>}
     <h3 className="mt-5 text-sm font-semibold">반복 게시 슬롯</h3>
     <div className="mt-4 grid gap-3 md:grid-cols-7">{weekdayLabels.map((day, index) => <article className="min-h-32 rounded-md border border-border p-3" key={day}><h3 className="text-sm font-semibold">{day}</h3><div className="mt-3 space-y-2">{channels.flatMap((channel) => channel.scheduleRules.filter((rule) => rule.dayOfWeek === index).map((rule) => ({ channel, rule }))).map(({ channel, rule }) => <div className="rounded bg-muted p-2 text-xs" key={`${channel.id}-${rule.platform}-${rule.timeOfDayLocal}`}><p className="font-medium">{rule.timeOfDayLocal} · {rule.timezone}</p><p className="mt-1">{channel.name}</p><p>{platformLabel(rule.platform)} · 최대 {rule.maxPosts}개</p></div>)}</div></article>)}</div>
   </section>;
@@ -822,6 +824,7 @@ const ReviewPanel = ({ owner, channels, platform, setPlatform, accounts, content
   });
   const license = useMutation({ mutationFn: (status: "VERIFIED" | "REJECTED") => request(`/content/${contentItemId}/review/asset-license`, { method: "POST", body: JSON.stringify({ assetId: licenseAssetId, proofUrl: licenseProof, licenseName, status, commercialUseAllowed: commercialAllowed, derivativeAllowed }) }, ContentReviewResponseSchema), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["content-review", contentItemId] }); void queryClient.invalidateQueries({ queryKey: ["content"] }); void queryClient.invalidateQueries({ queryKey: ["publish-plans"] }); } });
   return <section id="content" className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="review-panel">
+    <p className="text-xs text-muted-foreground">출처 링크와 정책 통과는 사실 확인 완료를 뜻하지 않습니다. 원문이 없는 경우 링크를 열어 직접 확인하세요. 역사 이미지의 인물·복식·시대 고증과 영상 품질은 사람이 별도로 확인해야 합니다.</p>
     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-lg font-semibold">콘텐츠 검토</h2><p className="mt-1 text-sm text-muted-foreground">목록에서 콘텐츠를 선택해 플랫폼별 결과물과 게시 준비 상태를 검토합니다.</p></div><div className="flex gap-2"><label className="sr-only" htmlFor="review-content">검토할 콘텐츠</label><select id="review-content" aria-label="검토할 콘텐츠" className="h-10 min-w-56 rounded-md border border-border px-3 text-sm" onChange={(event) => onSelectContent(event.target.value)} value={contentItemId ?? ""}><option value="">콘텐츠 선택</option>{content.map((item) => <option key={item.id} value={item.id}>{item.title} · {statusLabel(item.status)}</option>)}</select><Button disabled={!contentItemId || policyCheck.isPending || !output?.videoReady} onClick={() => policyCheck.mutate(platform)}>정책 검사</Button></div></div>
     <div className="mt-4 flex gap-2" role="tablist" aria-label="검수 플랫폼">{(["YOUTUBE", "INSTAGRAM", "TIKTOK"] as const).map((candidate) => <Button role="tab" tabIndex={platform === candidate ? 0 : -1} onKeyDown={(event) => { const tabs = ["YOUTUBE", "INSTAGRAM", "TIKTOK"] as const; const index = tabs.indexOf(candidate); const next = event.key === "ArrowRight" ? tabs[(index + 1) % 3] : event.key === "ArrowLeft" ? tabs[(index + 2) % 3] : event.key === "Home" ? tabs[0] : event.key === "End" ? tabs[2] : undefined; if (next) { event.preventDefault(); setPlatform(next); const buttons = event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[role=tab]"); buttons?.[tabs.indexOf(next)]?.focus(); } }} aria-selected={platform === candidate} className={platform === candidate ? "" : "bg-foreground"} key={candidate} onClick={() => setPlatform(candidate)} type="button">{platformLabel(candidate)}</Button>)}</div>
     {data && !canRegenerate ? <p role="status" className="mt-3 text-sm">채널이 중지되어 재생성할 수 없습니다. 채널 운영을 재개하면 재생성할 수 있으며 검수·예약은 계속 가능합니다.</p> : null}
@@ -1617,9 +1620,8 @@ const WizardStep = ({
           </select>
         </label>
         <Field label="일일 최대 게시" type="number" registration={register("maxDailyPosts", { valueAsNumber: true })} />
-        <Toggle registration={register("requiresPolicyPass")} label="정책 검사 통과 필수" />
-        <Toggle registration={register("requiresRightsCheck")} label="권리 검사 통과 필수" />
-        <Toggle registration={register("blocksSensitiveTopics")} label="민감 주제 자동 게시 차단" />
+        <p className="text-sm">정책 검사와 권리 확인은 항상 필수입니다. 정책 실패 시 보류하며 자동 유료 재생성은 지원하지 않습니다. 채널 중지는 신규 제작을 멈추며 기존 예약은 캘린더에서 취소해야 합니다.</p>
+        <label className="block text-sm">연속 실패 처리<select className="mt-1 block w-full rounded border border-border p-2" {...register("onConsecutiveFailures")}><option value="pause_channel">해당 채널 일시 중지</option><option value="notify_only">알림만 보내기</option></select></label>
       </div>
     );
   }
@@ -1640,13 +1642,6 @@ const WizardStep = ({
     </div>
   );
 };
-
-const Toggle = ({ label, registration }: { label: string; registration: UseFormRegisterReturn }): ReactElement => (
-  <label className="flex items-center gap-3 rounded-md border border-border px-4 py-3 text-sm">
-    <input className="h-4 w-4" type="checkbox" {...registration} />
-    {label}
-  </label>
-);
 
 const App = (): ReactElement => {
   const [, setSessionRevision] = useState(0);

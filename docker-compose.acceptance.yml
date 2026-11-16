@@ -102,4 +102,4 @@ services:
     depends_on:
       api: { condition: service_healthy }
       worker: { condition: service_started }
-    command: [pnpm, --filter, '@postbot/api', exec, vitest, run, src/release/fake-journey.e2e.spec.ts]
+    command: [pnpm, --filter, '@postbot/api', exec, vitest, run, src/release/fake-journey.e2e.spec.ts, --bail=1]

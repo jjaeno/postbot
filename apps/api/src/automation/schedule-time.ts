@@ -1,4 +1,4 @@
-export type RecurringSchedule = { dayOfWeek: number; timeOfDayUtc: string; timezone?: string };
+export type RecurringSchedule = { dayOfWeek: number; timeOfDayUtc: string; timezone?: string; maxPosts?: number };
 
 // ScheduleRule stores the user's wall-clock time in its legacy timeOfDayUtc column.
 // Resolve each occurrence using the zone's offset on that date, including DST.
@@ -28,7 +28,12 @@ export const nextZonedSchedule = (rules: readonly RecurringSchedule[], after: Da
       const candidate = new Date(instant);
       const resolved = localParts(candidate);
       // Nonexistent times in spring-forward gaps are not silently moved.
-      if (resolved.hour === hour && resolved.minute === minute && resolved.day === wall.getUTCDate() && candidate.getTime() > after.getTime() + 1_000) candidates.push(candidate);
+      if (resolved.hour === hour && resolved.minute === minute && resolved.day === wall.getUTCDate()) {
+        for (let index = 0; index < (rule.maxPosts ?? 1); index += 1) {
+          const slot = new Date(candidate.getTime() + index * 60_000);
+          if (slot.getTime() > after.getTime() + 1_000) candidates.push(slot);
+        }
+      }
     }
   }
   return candidates.sort((left, right) => left.getTime() - right.getTime())[0] ?? null;

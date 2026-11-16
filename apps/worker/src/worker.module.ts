@@ -1,6 +1,6 @@
 import { Module } from "@nestjs/common";
 import { createPrismaClient } from "@postbot/database";
-import { JobQueueNameSchema, createBullMqWorkers, createMaintenanceWorker } from "@postbot/jobs";
+import { DelayedError, JobQueueNameSchema, createBullMqWorkers, createMaintenanceWorker } from "@postbot/jobs";
 import { loadConfig } from "@postbot/config";
 import { DeterministicJobProcessor } from "./job-processor.js";
 import { runWithLogContext } from "@postbot/logger";
@@ -20,7 +20,12 @@ import { DataLifecycleProcessor } from "./data-lifecycle-processor.js";
         const processor = new DeterministicJobProcessor(prisma);
         const config = loadConfig();
         const queueNames = config.WORKER_QUEUES.split(",").map((value) => JobQueueNameSchema.parse(value.trim()));
-        return createBullMqWorkers(config.REDIS_URL, (job) => {
+        return createBullMqWorkers(config.REDIS_URL, async (job) => {
+          const persisted = await prisma.productionJob.findUnique({ where: { id: job.data.id }, select: { runAfter: true, status: true } });
+          if (persisted?.runAfter && persisted.runAfter.getTime() > Date.now() && ["QUEUED", "RETRY_WAIT"].includes(persisted.status)) {
+            await job.moveToDelayed(persisted.runAfter.getTime(), job.token);
+            throw new DelayedError();
+          }
           const trace = job.data.payload._trace;
           const value = trace && typeof trace === "object" && !Array.isArray(trace) ? trace as Record<string, unknown> : {};
           return runWithLogContext({ correlationId: typeof value.correlationId === "string" ? value.correlationId : undefined, jobId: job.data.id, channelId: typeof value.channelId === "string" ? value.channelId : undefined, contentItemId: typeof value.contentItemId === "string" ? value.contentItemId : undefined }, async () => {

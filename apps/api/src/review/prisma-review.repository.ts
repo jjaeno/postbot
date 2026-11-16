@@ -1,7 +1,7 @@
-import { Inject, Injectable } from "@nestjs/common";
+import { ConflictException, Inject, Injectable } from "@nestjs/common";
 import { Prisma, type PrismaClient } from "@postbot/database";
 import type { ContentReviewResponse, PolicyVerdict, UpdateReviewMetadataRequest, UpdateReviewScriptRequest, ReviewAssetLicenseRequest } from "@postbot/contracts";
-import { SceneDocumentSchema } from "@postbot/scene-schema";
+import { alignSceneNarration, SceneDocumentSchema } from "@postbot/scene-schema";
 import { readAssetUsagePurpose, sceneAssetUsageKey } from "@postbot/asset-library";
 import type { PolicyEvidence, PolicyRuleRecord, ReviewRepository } from "./review.repository.js";
 
@@ -24,6 +24,8 @@ export class PrismaReviewRepository implements ReviewRepository {
     const asset = await this.prisma.asset.findFirst({ where: { id: input.assetId, channel: { workspaceId }, usages: { some: { contentItemId, contentItem: { channel: { workspaceId } } } } } });
     if (!asset) return false;
     await this.prisma.$transaction(async (tx) => {
+      if (asset.channelId) await tx.$queryRaw`SELECT id FROM channels WHERE id = ${asset.channelId} FOR UPDATE`;
+      if (await tx.publishPlan.count({ where: { status: "PUBLISHING", contentItem: { assetUsages: { some: { assetId: asset.id } } } } })) throw new ConflictException("PUBLISH_IN_PROGRESS");
       await tx.assetLicense.create({ data: { assetId: asset.id, status: input.status, licenseName: input.licenseName, proofUrl: input.proofUrl, commercialUseAllowed: input.commercialUseAllowed, derivativeAllowed: input.derivativeAllowed, checkedAt: new Date() } });
       await tx.auditLog.create({ data: { workspaceId, userId, action: "asset.license.review", targetType: "asset", targetId: asset.id, metadata: { status: input.status } } });
       const usages = await tx.assetUsage.findMany({ where: { assetId: asset.id, contentItem: { channel: { workspaceId } } }, include: { sceneVersion: true } });
@@ -61,7 +63,7 @@ export class PrismaReviewRepository implements ReviewRepository {
             const preparation = json(json(job?.payload ?? null)[step.stage === "TTS" ? "ttsPreparation" : "assetPreparation"] as Prisma.JsonValue);
             if (preparation.sceneVersionId !== scene.id || job?.status !== "NEEDS_REVIEW") continue;
             await tx.automationStep.update({ where: { id: step.id }, data: { status: "PENDING", errorCode: null, errorMessage: null, finishedAt: null } });
-            await tx.automationRun.update({ where: { id: step.automationRunId }, data: { status: "QUEUED", pausedReason: null, nextRunAt: now } });
+            await tx.automationRun.updateMany({ where: { id: step.automationRunId, OR: [{ status: { in: ["QUEUED", "RUNNING"] } }, { status: "PAUSED", pausedReason: { in: ["ASSET_LICENSE_REVIEW_REQUIRED", "BRANCH_HELD"] } }] }, data: { status: "QUEUED", pausedReason: null, nextRunAt: now } });
           }
         }
       }
@@ -116,6 +118,7 @@ export class PrismaReviewRepository implements ReviewRepository {
     if (!item || !item.scriptVersions[0]) return null;
     await this.prisma.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM channels WHERE id = ${item.channelId} FOR UPDATE`;
+      if (await tx.publishPlan.count({ where: { contentItemId, platform: input.platform ?? undefined, status: "PUBLISHING" } })) throw new ConflictException("PUBLISH_IN_PROGRESS");
       const script = await tx.scriptVersion.findFirstOrThrow({ where: { contentItemId, platform: input.platform }, orderBy: { version: "desc" } });
       const priorQuality = { ...json(script.qualitySnapshot), reviewStatus: "REVIEW_REQUIRED" };
       const nextVersion = script.version + 1;
@@ -133,12 +136,13 @@ export class PrismaReviewRepository implements ReviewRepository {
     if (!owned) return null;
     await this.prisma.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM channels WHERE id = ${owned.channelId} FOR UPDATE`;
+      if (await tx.publishPlan.count({ where: { contentItemId, platform: input.platform, status: "PUBLISHING" } })) throw new ConflictException("PUBLISH_IN_PROGRESS");
       const script = await tx.scriptVersion.findFirstOrThrow({ where: { contentItemId, platform: input.platform }, orderBy: { version: "desc" } });
       const scene = await tx.sceneVersion.findFirstOrThrow({ where: { contentItemId, platform: input.platform }, orderBy: { version: "desc" } });
       const document = SceneDocumentSchema.parse(scene.sceneDocument);
       const text = [input.hook, input.body, input.callToAction].join(" ");
-      const words = text.split(/\s+/); const chunk = Math.ceil(words.length / document.scenes.length);
-      document.scenes = document.scenes.map((entry, index) => ({ ...entry, narration: { text: words.slice(index * chunk, (index + 1) * chunk).join(" ") || input.callToAction, sourceUrl: input.sourceUrl }, overlays: entry.overlays.map((overlay) => ({ ...overlay, text: (overlay.kind === "title" ? input.hook : overlay.kind === "cta" ? input.callToAction : input.body).slice(0, 120) })) }));
+      const aligned = alignSceneNarration(document, text);
+      document.scenes = aligned.scenes;
       SceneDocumentSchema.parse(document);
       const nextScript = await tx.scriptVersion.create({ data: { contentItemId, platform: input.platform, version: script.version + 1, hook: input.hook, body: input.body, callToAction: input.callToAction, language: script.language, durationSeconds: script.durationSeconds, promptVersion: script.promptVersion, qualitySnapshot: { ...json(script.qualitySnapshot), reviewStatus: "REVIEW_REQUIRED", facts: [{ claim: text, sourceUrl: input.sourceUrl }], factsConfirmedBy: userId, editedBy: "owner-script-review" } } });
       const nextScene = await tx.sceneVersion.create({ data: { contentItemId, scriptVersionId: nextScript.id, platform: input.platform, version: nextScript.version, schemaVersion: scene.schemaVersion, sceneDocument: document, durationSeconds: scene.durationSeconds } });
@@ -176,7 +180,7 @@ export class PrismaReviewRepository implements ReviewRepository {
     if (!item) return null;
     const sourceUrls = new Set(item.sourceReferences.map((source) => source.url));
     const quality = json(item.scriptVersions[0]?.qualitySnapshot ?? null);
-    const facts = typeof quality.factsConfirmedBy === "string" && Array.isArray(quality.facts) ? quality.facts as unknown[] : item.sourceReferences.flatMap((source) => {
+    const facts = Array.isArray(quality.facts) ? quality.facts as unknown[] : item.sourceReferences.flatMap((source) => {
       const snapshot = json(source.normalizedSnapshot);
       return Array.isArray(snapshot.facts) ? snapshot.facts as unknown[] : [];
     });
@@ -258,7 +262,7 @@ export class PrismaReviewRepository implements ReviewRepository {
       if (runIds.length > 0) {
         await this.prisma.$transaction([
           this.prisma.automationStep.updateMany({ where: { automationRunId: { in: runIds }, stage: "PUBLISH", status: "HELD", errorCode: "AWAITING_APPROVAL", ...(platform ? { platform } : {}) }, data: { status: "PENDING", errorCode: null, errorMessage: null, finishedAt: null } }),
-          this.prisma.automationRun.updateMany({ where: { id: { in: runIds }, status: "PAUSED" }, data: { status: "QUEUED", pausedReason: null, nextRunAt: new Date() } })
+          this.prisma.automationRun.updateMany({ where: { id: { in: runIds }, status: "PAUSED", pausedReason: { in: ["AWAITING_APPROVAL", "BRANCH_HELD"] } }, data: { status: "QUEUED", pausedReason: null, nextRunAt: new Date() } })
         ]);
       }
     }

@@ -96,6 +96,7 @@ export class PrismaIdeasRepository implements IdeasRepository {
             rawSnapshot: {
               url: candidate.url,
               bodyHash: candidate.contentHash,
+              body: candidate.body.slice(0, 10_000),
               eventAt: candidate.eventAt ?? null,
               reliability: candidate.reliabilityMetadata ? JSON.parse(JSON.stringify(candidate.reliabilityMetadata)) as Prisma.InputJsonObject : null
             }

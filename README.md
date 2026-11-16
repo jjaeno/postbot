@@ -156,6 +156,8 @@ pnpm baseline:local
 
 The baseline output is `LOCAL_BASELINE`, not a production SLO.
 
+Acceptance stops at the first failure. A queued automation step whose job has been running for over 60 seconds fails with state-only diagnostics (job status, attempts, timestamps and error codes); payloads and results are excluded.
+
 Example focused validation set:
 
 ```bash

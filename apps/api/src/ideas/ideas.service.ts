@@ -9,50 +9,11 @@ import {
   type UpdateIdeaStatusRequest
 } from "@postbot/contracts";
 import type { TopicSourceCandidate, TopicSourceProvider } from "@postbot/providers";
-import { createHash } from "node:crypto";
+import { canonicalizeTopicUrl, scoreTopicCandidate } from "@postbot/providers";
 import { IDEAS_REPOSITORY, type ChannelCollectionSettings, type IdeasRepository, type ScoredIdeaCandidate } from "./ideas.repository.js";
 import { TopicSourceProviderFactory } from "./topic-source-provider.factory.js";
 
-const blockedTopicTerms = ["politics", "medical advice", "financial advice", "legal advice"];
-
-const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
-
-const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
-
-export const canonicalizeUrl = (rawUrl: string): string => {
-  const url = new URL(rawUrl);
-  url.hash = "";
-  for (const key of [...url.searchParams.keys()]) {
-    if (key.toLowerCase().startsWith("utm_") || key.toLowerCase() === "fbclid" || key.toLowerCase() === "gclid") {
-      url.searchParams.delete(key);
-    }
-  }
-  url.searchParams.sort();
-  url.hostname = url.hostname.toLowerCase();
-  if (url.pathname !== "/" && url.pathname.endsWith("/")) {
-    url.pathname = url.pathname.slice(0, -1);
-  }
-  return url.toString();
-};
-
-const textContainsAny = (text: string, terms: readonly string[]): string | null => {
-  const lowerText = text.toLowerCase();
-  return terms.find((term) => lowerText.includes(term.toLowerCase())) ?? null;
-};
-
-const freshnessScore = (publishedAt: string | null, recencyHours: number): number => {
-  if (!publishedAt) {
-    return 0.5;
-  }
-  const ageHours = Math.max(0, (Date.now() - new Date(publishedAt).getTime()) / 3_600_000);
-  return clamp01(1 - ageHours / recencyHours);
-};
-
-const keywordScore = (candidate: TopicSourceCandidate, settings: ChannelCollectionSettings): number => {
-  const text = `${candidate.title} ${candidate.summary} ${candidate.body}`.toLowerCase();
-  const matches = settings.keywords.filter((keyword) => text.includes(keyword.toLowerCase())).length;
-  return settings.keywords.length === 0 ? 0.5 : clamp01(matches / settings.keywords.length);
-};
+export const canonicalizeUrl = canonicalizeTopicUrl;
 
 @Injectable()
 export class IdeasService {
@@ -63,15 +24,11 @@ export class IdeasService {
 
   async collect(workspaceId: string, rawInput: unknown): Promise<CollectIdeasResponse> {
     const input = this.parseCollectInput(rawInput);
-    const existing = await this.repository.findCollectionByIdempotencyKey(input.idempotencyKey);
-    if (existing) {
-      return existing;
-    }
-
     const settings = await this.repository.getChannelSettings(workspaceId, input.channelId);
-    if (!settings) {
-      throw new ForbiddenException({ code: "CHANNEL_NOT_FOUND", message: "Channel was not found in this workspace." });
-    }
+    if (!settings) throw new ForbiddenException({ code: "CHANNEL_NOT_FOUND", message: "Channel was not found in this workspace." });
+    const scopedKey = `${workspaceId}:${input.channelId}:${input.idempotencyKey}`;
+    const existing = await this.repository.findCollectionByIdempotencyKey(scopedKey);
+    if (existing) return existing;
 
     const providerResult =
       input.source === "manual"
@@ -87,7 +44,7 @@ export class IdeasService {
       channelId: settings.channelId,
       ...saved
     };
-    await this.repository.saveCollectionResult(input.idempotencyKey, response);
+    await this.repository.saveCollectionResult(scopedKey, response);
     return response;
   }
 
@@ -126,23 +83,7 @@ export class IdeasService {
   }
 
   private scoreCandidate(candidate: TopicSourceCandidate, settings: ChannelCollectionSettings): ScoredIdeaCandidate {
-    const text = `${candidate.title} ${candidate.summary} ${candidate.body}`;
-    const blockedTerm = textContainsAny(text, [...blockedTopicTerms, ...settings.excludedTopics, ...settings.excludedKeywords]);
-    const canonicalUrl = canonicalizeUrl(candidate.url);
-    const freshness = freshnessScore(candidate.publishedAt, settings.recencyHours);
-    const suitability = keywordScore(candidate, settings);
-    const expectedValue = clamp01(suitability * 0.4 + freshness * 0.25 + candidate.reliabilityScore * 0.25 + 0.1);
-    return {
-      ...candidate,
-      canonicalUrl,
-      urlHash: sha256(canonicalUrl),
-      contentHash: sha256(`${candidate.title}\n${candidate.summary}\n${candidate.body}`.toLowerCase().trim()),
-      suitabilityScore: suitability,
-      freshnessScore: freshness,
-      reliabilityScore: clamp01(candidate.reliabilityScore),
-      expectedValueScore: expectedValue,
-      rejectionReason: blockedTerm ? `Blocked term: ${blockedTerm}` : null
-    };
+    return scoreTopicCandidate(candidate, settings);
   }
 
   private parseCollectInput(rawInput: unknown): CollectIdeasRequest {

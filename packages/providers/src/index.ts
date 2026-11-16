@@ -1,10 +1,12 @@
+export { canonicalizeTopicUrl, scoreTopicCandidate } from "./topic-scoring.js";
+
 export interface ProviderResult {
   readonly provider: string;
   readonly idempotencyKey: string;
   readonly createdAt: string;
 }
 
-export type AnalyticsMetric = "views" | "impressions" | "average_watch_seconds" | "completion_rate" | "engagement_rate";
+export type AnalyticsMetric = "views" | "impressions" | "reach" | "average_view_ratio" | "average_watch_seconds" | "completion_rate" | "engagement_rate";
 export type AnalyticsMetricValue = { metric: AnalyticsMetric; value: number | null; unit: "count" | "seconds" | "ratio" | null; aggregation: "sum" | "average" | "ratio" | null; unavailableReason: string | null };
 export type AnalyticsPostResult = { externalPostId: string; observedAt: string; raw: Record<string, unknown>; metrics: readonly AnalyticsMetricValue[] };
 export type AnalyticsPage = { posts: readonly AnalyticsPostResult[]; nextPageToken: string | null; dataDelayHours: number | null };
@@ -12,12 +14,12 @@ export interface AnalyticsProvider { fetchPage(input: { platform: "YOUTUBE" | "I
 
 export class FakeAnalyticsProvider implements AnalyticsProvider {
   fetchPage(input: { platform: "YOUTUBE" | "INSTAGRAM" | "TIKTOK"; postIds: readonly string[]; periodStart: string; periodEnd: string; pageToken: string | null }): Promise<AnalyticsPage> {
-    const posts = input.postIds.slice(input.pageToken ? 1 : 0, input.pageToken ? 2 : 1).map((externalPostId, index) => ({ externalPostId, observedAt: input.periodEnd, raw: { platform: input.platform, periodStart: input.periodStart, page: input.pageToken ?? "first" }, metrics: [
+    const posts = input.postIds.slice(Number(input.pageToken ?? 0), Number(input.pageToken ?? 0) + 1).map((externalPostId, index) => ({ externalPostId, observedAt: input.periodEnd, raw: { platform: input.platform, periodStart: input.periodStart, page: input.pageToken ?? "first" }, metrics: [
       { metric: "views" as const, value: 100 + index, unit: "count" as const, aggregation: "sum" as const, unavailableReason: null },
       { metric: "average_watch_seconds" as const, value: 12.5, unit: "seconds" as const, aggregation: "average" as const, unavailableReason: null },
       { metric: "completion_rate" as const, value: null, unit: null, aggregation: null, unavailableReason: "NOT_PROVIDED_BY_PLATFORM" }
     ] }));
-    return Promise.resolve({ posts, nextPageToken: input.pageToken || input.postIds.length < 2 ? null : "next", dataDelayHours: 24 });
+    return Promise.resolve({ posts, nextPageToken: Number(input.pageToken ?? 0) + 1 >= input.postIds.length ? null : String(Number(input.pageToken ?? 0) + 1), dataDelayHours: 24 });
   }
 }
 
@@ -63,8 +65,8 @@ export class YouTubeAnalyticsProvider implements AnalyticsProvider {
       return { externalPostId, observedAt, raw: { headers, row: row ?? null }, metrics: [
         views === null ? unavailableMetric("views", "NOT_RETURNED_BY_YOUTUBE") : { metric: "views", value: views, unit: "count", aggregation: "sum", unavailableReason: null },
         averageSeconds === null ? unavailableMetric("average_watch_seconds", "NOT_RETURNED_BY_YOUTUBE") : { metric: "average_watch_seconds", value: averageSeconds, unit: "seconds", aggregation: "average", unavailableReason: null },
-        completion === null ? unavailableMetric("completion_rate", "NOT_RETURNED_BY_YOUTUBE") : { metric: "completion_rate", value: completion / 100, unit: "ratio", aggregation: "ratio", unavailableReason: null },
-        unavailableMetric("impressions", "REQUIRES_SEPARATE_YOUTUBE_REPORT"), unavailableMetric("engagement_rate", "PLATFORM_METRIC_NOT_EQUIVALENT")
+        completion === null ? unavailableMetric("average_view_ratio", "NOT_RETURNED_BY_YOUTUBE") : { metric: "average_view_ratio", value: completion / 100, unit: "ratio", aggregation: "ratio", unavailableReason: null },
+        unavailableMetric("completion_rate", "NOT_PROVIDED_BY_YOUTUBE"), unavailableMetric("impressions", "REQUIRES_SEPARATE_YOUTUBE_REPORT"), unavailableMetric("engagement_rate", "PLATFORM_METRIC_NOT_EQUIVALENT")
       ] };
     });
     return { posts, nextPageToken: null, dataDelayHours: 48 };
@@ -85,7 +87,8 @@ export class InstagramAnalyticsProvider implements AnalyticsProvider {
       const views = metric("views"); const reach = metric("reach"); const interactions = metric("total_interactions"); const watchMs = metric("ig_reels_avg_watch_time");
       return { externalPostId, observedAt: input.periodEnd, raw, metrics: [
         views === null ? unavailableMetric("views", "NOT_RETURNED_BY_INSTAGRAM") : { metric: "views", value: views, unit: "count", aggregation: "sum", unavailableReason: null },
-        reach === null ? unavailableMetric("impressions", "NOT_RETURNED_BY_INSTAGRAM") : { metric: "impressions", value: reach, unit: "count", aggregation: "sum", unavailableReason: null },
+        unavailableMetric("impressions", "NOT_PROVIDED_BY_INSTAGRAM"),
+        reach === null ? unavailableMetric("reach", "NOT_RETURNED_BY_INSTAGRAM") : { metric: "reach", value: reach, unit: "count", aggregation: "sum", unavailableReason: null },
         watchMs === null ? unavailableMetric("average_watch_seconds", "NOT_RETURNED_BY_INSTAGRAM") : { metric: "average_watch_seconds", value: watchMs / 1_000, unit: "seconds", aggregation: "average", unavailableReason: null },
         reach && interactions !== null ? { metric: "engagement_rate", value: interactions / reach, unit: "ratio", aggregation: "ratio", unavailableReason: null } : unavailableMetric("engagement_rate", "REACH_OR_INTERACTIONS_UNAVAILABLE"),
         unavailableMetric("completion_rate", "NOT_PROVIDED_BY_INSTAGRAM")

@@ -36,8 +36,8 @@ Current v1 endpoint summary (the generated Swagger document is authoritative for
 | GET | `/platform-accounts/tiktok/callback` | OAuth state | Complete TikTok OAuth and scope validation |
 | POST | `/platform-accounts/:platformAccountId/disconnect` | Access cookie + CSRF | Revoke provider tokens when possible and disconnect the account |
 | POST | `/ideas/collect` | Access cookie + CSRF | Collect and deduplicate manual, fixture, or configured RSS ideas |
-| POST | `/generation/script-scene` | Access cookie + CSRF | Validate an owned idea and enqueue a `SCRIPT` generation job; returns the job immediately |
-| POST | `/jobs` | Access cookie + CSRF | Enqueue a validated production stage job |
+| POST | `/generation/script-scene` | Access cookie + CSRF | 403 `DOMAIN_WORKFLOW_REQUIRED`; start budgeted production through `/automation/runs` with `ideaId` |
+| POST | `/jobs` | Access cookie + CSRF | 403 `DOMAIN_WORKFLOW_REQUIRED`; production stage creation is internal |
 | GET | `/jobs/:jobId` | Access cookie | Read current generation job state and result |
 | GET | `/jobs/:jobId/events` | Access cookie | Subscribe to generation progress via SSE |
 | GET | `/content/:contentItemId/review` | Access cookie | Read a workspace-scoped content preview, sources, asset rights, and latest policy result |
@@ -127,7 +127,7 @@ Owner-only `POST /channels/:channelId/stock-assets` accepts PNG/JPEG bodyBase64 
 
 ## Generation Contract
 
-`POST /generation/script-scene` accepts `ideaId`, optional `platform`, `idempotencyKey`, and `partial` (`full`, `hook`, `body`, `metadata`, or `scene`). It verifies CSRF, workspace ownership, and idea ownership, then creates or returns the idempotent `SCRIPT` job. The API does not call an LLM in this request; completion is available through the job REST and SSE endpoints.
+As of remediation 19.8, `POST /generation/script-scene`, `POST /jobs`, and `POST /jobs/:jobId/recover` reject direct external execution with `DOMAIN_WORKFLOW_REQUIRED`. Use `/automation/runs` with `channelId`, `ideaId`, optional `platforms`, `idempotencyKey`, and `partial` to enforce production budgets, ownership, platform and cancellation gates. Job REST and SSE remain available for workspace-owned progress. See [the recovery contract](image-motion-mvp-2026-10-21.md).
 
 ## 19.4 UX remediation API (2026-10-06)
 

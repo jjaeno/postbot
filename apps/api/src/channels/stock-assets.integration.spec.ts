@@ -16,7 +16,7 @@ suite("owned stock registration", () => {
     const workspace = await prisma.workspace.create({ data: { ownerId: user.id, name: "Fixture", slug: key } });
     const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Fixture", slug: key, status: "PAUSED" } });
     const req = { auth: { userId: user.id, workspaceId: workspace.id, workspace: { role: "OWNER" } } } as unknown as AuthenticatedRequest;
-    const run = await prisma.automationRun.create({ data: { channelId: channel.id, status: "PAUSED", idempotencyKey: key, steps: { create: { stage: "ASSET", platform: "YOUTUBE", branchKey: "YOUTUBE", status: "HELD", errorCode: "STOCK_ASSET_REQUIRED" } } } });
+    const run = await prisma.automationRun.create({ data: { channelId: channel.id, status: "PAUSED", pausedReason: "STOCK_ASSET_REQUIRED", idempotencyKey: key, steps: { create: { stage: "ASSET", platform: "YOUTUBE", branchKey: "YOUTUBE", status: "HELD", errorCode: "STOCK_ASSET_REQUIRED" } } } });
     const png = { bytes: Buffer.concat([Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j4f8AAAAASUVORK5CYII=", "base64"), Buffer.from(key)]) };
     const input = { bodyBase64: Buffer.from(png.bytes).toString("base64"), mimeType: "image/png", licenseName: "Fixture license", proofUrl: "https://example.com/license", commercialUseAllowed: true, derivativeAllowed: true };
     const controller = new StockAssetsController(prisma);

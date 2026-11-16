@@ -269,6 +269,22 @@ describe("JobsService", () => {
     process.env.REDIS_URL = "redis://localhost:6379";
   });
 
+  it("persists dependent records before enqueue and does not enqueue when that fails", async () => {
+    const { queue, service } = createHarness();
+    const input = createJobInput();
+    await expect(service.create("workspace-1", input, () => {
+      expect(queue.enqueued).toHaveLength(0);
+      return Promise.reject(new Error("DEPENDENT_RECORD_FAILED"));
+    })).rejects.toThrow("DEPENDENT_RECORD_FAILED");
+    expect(queue.enqueued).toHaveLength(0);
+    await service.create("workspace-1", input, (job) => {
+      expect(job.id).toBe("job-1");
+      expect(queue.enqueued).toHaveLength(0);
+      return Promise.resolve();
+    });
+    expect(queue.enqueued).toHaveLength(1);
+  });
+
   it("returns a job id immediately and completes successful deterministic work", async () => {
     const { queue, repository, service } = createHarness();
     const created = await service.create("workspace-1", createJobInput());
@@ -312,7 +328,8 @@ describe("JobsService", () => {
 
     expect(second.id).toBe(first.id);
     expect(second.duplicate).toBe(true);
-    expect(queue.enqueued).toHaveLength(1);
+    // A duplicate request also repairs an interrupted DB-to-Redis handoff.
+    expect(queue.enqueued.map((job) => job.id)).toEqual([first.id, first.id]);
   });
 
   it("cancels queued work", async () => {

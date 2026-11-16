@@ -49,6 +49,7 @@ const EnvSchema = z.object({
   PROVIDER_HTTP_TIMEOUT_MS: z.coerce.number().int().positive().max(300_000).default(30_000),
   PROVIDER_MAX_RETRIES: z.coerce.number().int().min(0).max(5).default(2),
   AUTOMATION_POLL_INTERVAL_MS: z.coerce.number().int().min(1_000).max(60_000).default(5_000),
+  ANALYTICS_COLLECTION_HOURS: z.string().default("24,72,168").refine((value) => value.split(",").every((part) => Number.isInteger(Number(part)) && Number(part) > 0 && Number(part) <= 8760), "Use positive collection hours up to one year"),
   WORKER_QUEUES: z.string().default("collect,script,asset,tts,render,policy,publish,analytics"),
   MAINTENANCE_WORKER_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
   QUEUE_RECOVERY_STALE_AFTER_MS: z.coerce.number().int().min(60_000).max(86_400_000).default(900_000),

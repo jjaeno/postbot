@@ -46,6 +46,13 @@ export const SceneDocumentSchema = z.object({
   aiStockRatio: z.number().min(0).max(1).optional(),
   scenes: z.array(SceneSchema).min(1).max(12)
 }).superRefine((value, ctx) => {
+  const ids = new Set<string>();
+  let frame = 0;
+  for (const scene of value.scenes) {
+    if (ids.has(scene.id) || scene.startFrame !== frame) ctx.addIssue({ code: "custom", path: ["scenes"], message: "Scenes require unique IDs and contiguous ordered timing." });
+    ids.add(scene.id); frame = scene.startFrame + scene.durationInFrames;
+  }
+  if (frame !== value.durationInFrames) ctx.addIssue({ code: "custom", path: ["scenes"], message: "Scenes must cover the entire document." });
   const lastFrame = Math.max(...value.scenes.map((scene) => scene.startFrame + scene.durationInFrames));
   if (lastFrame > value.durationInFrames) {
     ctx.addIssue({
@@ -78,3 +85,46 @@ export const SceneDocumentJsonSchema = {
 
 export type SceneDocument = z.infer<typeof SceneDocumentSchema>;
 export type Scene = z.infer<typeof SceneSchema>;
+
+export type NarrationTiming = { text: string; startSeconds: number; endSeconds: number };
+const spoken = (text: string): string => text.replace(/\s+/gu, "");
+
+export function retimeNarration(document: SceneDocument, timings: readonly NarrationTiming[], durationSeconds: number, bounds: { min: number; max: number }): SceneDocument {
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0 || durationSeconds > bounds.max) throw new Error("NARRATION_DURATION_EXCEEDED_SHORTEN_SCRIPT_AND_REGENERATE_VOICE");
+  let last = 0;
+  for (const timing of timings) {
+    if (!spoken(timing.text) || !Number.isFinite(timing.startSeconds) || !Number.isFinite(timing.endSeconds) || timing.startSeconds < last || timing.endSeconds <= timing.startSeconds || timing.endSeconds > durationSeconds + 0.1) throw new Error("NARRATION_TIMING_INVALID");
+    last = timing.endSeconds;
+  }
+  if (!timings.length || spoken(timings.map((entry) => entry.text).join("")) !== spoken(document.scenes.map((scene) => scene.narration.text).join(""))) throw new Error("NARRATION_TEXT_MISMATCH_REGENERATE_VOICE");
+  const durationInFrames = Math.ceil(Math.max(bounds.min, durationSeconds) * document.fps);
+  let character = 0; let frame = 0;
+  const boundary = (offset: number): number => {
+    let count = 0;
+    for (const timing of timings) {
+      const length = spoken(timing.text).length;
+      if (offset <= count + length) return timing.startSeconds + (timing.endSeconds - timing.startSeconds) * (offset - count) / length;
+      count += length;
+    }
+    return durationSeconds;
+  };
+  return SceneDocumentSchema.parse({ ...document, durationInFrames, scenes: document.scenes.map((scene, index) => {
+    character += spoken(scene.narration.text).length;
+    const end = index === document.scenes.length - 1 ? durationInFrames : Math.round(boundary(character) * document.fps);
+    const result = { ...scene, startFrame: frame, durationInFrames: end - frame }; frame = end; return result;
+  }) });
+}
+
+// Use the script's actual spoken text rather than an independently generated paraphrase.
+export function alignSceneNarration(document: SceneDocument, text: string): SceneDocument {
+  const words = text.trim().split(/\s+/u);
+  const scenes = document.scenes.slice(0, Math.min(words.length, document.scenes.length));
+  let start = 0;
+  return SceneDocumentSchema.parse({ ...document, scenes: scenes.map((scene, index) => {
+    const end = Math.round((index + 1) * words.length / scenes.length);
+    const startFrame = Math.round(index * document.durationInFrames / scenes.length);
+    const endFrame = Math.round((index + 1) * document.durationInFrames / scenes.length);
+    const narration = { ...scene.narration, text: words.slice(start, end).join(" ") }; start = end;
+    return { ...scene, narration, startFrame, durationInFrames: endFrame - startFrame };
+  }) });
+}

@@ -38,11 +38,13 @@ export class ChannelsService {
 
   create(workspaceId: string, rawInput: unknown): Promise<ChannelResponse> {
     const input: CreateChannelRequest = parseBody(CreateChannelRequestSchema, rawInput);
+    if (input.automation.errorAction.onPolicyFailure === "regenerate") throw new BadRequestException("POLICY_AUTO_REGENERATION_UNSUPPORTED_USE_HOLD");
     return this.repository.create(workspaceId, input);
   }
 
   async update(workspaceId: string, channelId: string, rawInput: unknown): Promise<ChannelResponse> {
     const input: UpdateChannelRequest = parseBody(UpdateChannelRequestSchema, rawInput);
+    if (input.automation?.errorAction.onPolicyFailure === "regenerate") throw new BadRequestException("POLICY_AUTO_REGENERATION_UNSUPPORTED_USE_HOLD");
     const channel = await this.repository.update(workspaceId, channelId, input);
     if (!channel) {
       throw new NotFoundException("채널을 찾을 수 없습니다.");

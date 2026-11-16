@@ -43,6 +43,7 @@ export const estimateAutomationStageCost = (
   }
   if (stage === "TTS") {
     const characters = usage.characters ?? 0;
+    if (usage.characters === 0) return { stage, provider: "local-reuse", model: "existing-voice", amountUsd: 0, usage: { characters: 0 }, pricing: {} };
     const rate = config.TTS_PROVIDER === "fake" ? 0.01 : config.TTS_USD_PER_THOUSAND_CHARACTERS;
     if (characters <= 0 || rate <= 0) return null;
     return { stage, provider: config.TTS_PROVIDER, model: config.TTS_MODEL, amountUsd: rounded(characters / 1_000 * rate), usage: { characters }, pricing: { usdPerThousandCharacters: rate } };

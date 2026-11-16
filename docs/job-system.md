@@ -19,11 +19,13 @@
 
 ## API
 
-- `POST /jobs`: 작업을 생성하고 즉시 `ProductionJobResponse`를 반환한다.
+- `POST /jobs`: 외부 생성은 403. 도메인 workflow API가 내부 JobsService를 호출한다 (19.8 보완).
 - `GET /jobs/:jobId`: MySQL에 저장된 현재 작업 상태와 시도 목록을 반환한다.
 - `GET /jobs/:jobId/events`: Server-Sent Events로 현재 진행 상태를 반복 전송한다. 재연결 시에도 MySQL 상태에서 최신 이벤트를 재구성한다.
 - `POST /jobs/:jobId/cancel`: queue에서 제거 가능한 작업은 제거하고, 영속 상태를 `CANCELLED`로 전이한다.
-- `POST /jobs/:jobId/recover`: `FAILED`, `CANCELLED`, `NEEDS_REVIEW` 작업을 다시 `QUEUED`로 되돌리고 queue에 재등록한다.
+- `POST /jobs/:jobId/recover`: 외부 직접 복구는 403. 권리·예산·승인 gate를 확인하는 제작 workflow에서 재개한다. 불명확 호출은 일반 복구를 차단한다.
+
+현재 DB/BullMQ 상태별 복구·취소·대사 계약은 [이미지 모션 MVP 운영 보완](image-motion-mvp-2026-10-21.md)을 따른다.
 
 모든 API는 workspace 인증 상태를 사용한다. 작업 생성과 조회는 요청 workspace에 속한 채널의 job에만 허용된다.
 
@@ -39,6 +41,12 @@
 - 수동 복구: `FAILED`/`CANCELLED`/`NEEDS_REVIEW`에서 `QUEUED`
 
 각 attempt는 `JobAttempt.attemptNumber`로 순서를 가진다. 작업 idempotency는 `ProductionJob.idempotencyKey` UNIQUE 제약으로 보장하고, 중복 생성 요청은 기존 job을 반환한다.
+
+worker의 시작 claim은 `ProductionJob`, `JobAttempt`, 연결된 자동화 단계·실행 상태를 같은 트랜잭션에서 갱신한다. 자동화 상태 쓰기가 실패하면 claim과 attempt도 롤백되어 큐 재전달로 안전하게 다시 시작하며, 실제 Provider 작업은 이 트랜잭션이 완료된 뒤 실행한다.
+
+자동화 단계의 `productionJobId` 연결은 BullMQ enqueue 전에 DB에 저장한다. 빠른 worker가 먼저 완료해 단계 상태 갱신이 누락되는 경합을 방지하며, enqueue 이후 API가 단계 상태를 다시 `QUEUED`로 덮어쓰지 않는다. 연결 저장에 실패하면 큐 전송도 수행하지 않는다.
+
+스케줄러는 60초 이상 갱신되지 않은 `QUEUED`/`RUNNING` 단계도 재확인한다. 작업 연결 전 중단된 claim은 갱신 시각을 비교해 회수하고, DB에 대기 중인 작업은 같은 job ID로 큐 등록을 복구한다. 이미 끝난 작업은 저장된 결과만 단계에 반영하며 재실행하지 않는다. `NEEDS_REVIEW`는 `HELD`, 실패·취소는 `FAILED`로 반영해 자동 유료 재호출이나 재게시를 막는다. 실제 실행 중인 작업은 그대로 둔다.
 
 ## Worker
 
