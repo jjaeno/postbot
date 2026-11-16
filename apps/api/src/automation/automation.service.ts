@@ -1,3 +1,4 @@
+import { estimateLlmInputTokens } from "@postbot/providers";
 import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import {
   AutomationBudgetRequestSchema,
@@ -964,6 +965,15 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     const partial = asObject(run.checkpoint).partial;
     if (["voice", "subtitle"].includes(String(partial)) && (stage === "SCRIPT" || stage === "ASSET" || (stage === "TTS" && partial === "subtitle"))) return { stage, provider: "local-reuse", model: "version-reuse", amountUsd: 0, usage: {}, pricing: {} };
     const usage: AutomationCostUsage = {};
+    if (stage === "SCRIPT") {
+      const step = await this.prisma.automationStep.findFirst({ where: { automationRunId: runId, stage: "COLLECT" }, select: { output: true } });
+      const idea = asObject(asObject(step?.output ?? null).idea as Prisma.JsonValue ?? null);
+      const source = typeof idea.id === "string" ? await this.prisma.contentIdea.findUnique({ where: { id: idea.id } }) : null;
+      const channel = await this.prisma.channel.findUniqueOrThrow({ where: { id: channelId }, include: { templates: { where: { isActive: true } }, outputProfiles: { where: { platform, isActive: true } }, strategyVersions: { where: { appliedAt: { not: null } }, orderBy: { version: "desc" }, take: 1 } } });
+      // Duplicate text fields cover the actual title/summary/source prompt copies.
+      usage.inputTokens = estimateLlmInputTokens({ idea, source, channel, copies: [idea, source, channel] });
+      usage.outputTokens = loadConfig().LLM_MAX_OUTPUT_TOKENS;
+    }
     if (stage !== "SCRIPT") {
       const scriptStep = await this.prisma.automationStep.findFirst({
         where: { automationRunId: runId, stage: "SCRIPT", branchKey: platform },

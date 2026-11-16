@@ -60,6 +60,7 @@ const EnvSchema = z.object({
   OPENAI_BASE_URL: z.string().url().default("https://api.openai.com/v1"),
   LLM_TIMEOUT_MS: z.coerce.number().int().positive().max(300_000).default(60_000),
   LLM_MAX_RETRIES: z.coerce.number().int().min(0).max(5).default(1),
+  LLM_MAX_OUTPUT_TOKENS: z.coerce.number().int().min(256).max(32768).default(4096),
   LLM_INPUT_USD_PER_MILLION_TOKENS: z.coerce.number().nonnegative().default(0),
   LLM_OUTPUT_USD_PER_MILLION_TOKENS: z.coerce.number().nonnegative().default(0),
   AUTOMATION_EXPECTED_INPUT_TOKENS: z.coerce.number().int().positive().default(2_000),

@@ -8,7 +8,7 @@ import {
   type ScriptGenerationJobPayload
 } from "@postbot/contracts";
 import { Prisma, type PrismaClient } from "@postbot/database";
-import { FakeLlmProvider, FakeStorageProvider, OpenAiLlmProvider, type LlmGenerationRequest, type LlmGenerationResult, type LlmProvider } from "@postbot/providers";
+import { estimateLlmInputTokens, FakeLlmProvider, FakeStorageProvider, OpenAiLlmProvider, type LlmGenerationRequest, type LlmGenerationResult, type LlmProvider } from "@postbot/providers";
 import { alignSceneNarration, AudioStyleSchema, SceneDocumentSchema, VideoStyleSchema, type SceneDocument } from "@postbot/scene-schema";
 import { createHash } from "node:crypto";
 import { z } from "zod";
@@ -89,7 +89,21 @@ export class ScriptGenerationProcessor {
       const snapshot = LlmSnapshotSchema.safeParse(previous.response);
       if (snapshot.success) return snapshot.data;
       if (previous.state === "STARTED") throw new Error("AMBIGUOUS_LLM_CALL_RECONCILIATION_REQUIRED");
-      await tx.productionJob.update({ where: { id: jobId }, data: { payload: { ...payload, _llmAttempts: { ...attempts, [key]: { state: "STARTED" } } } } });
+      const automation = jsonObject(payload.automation ?? null);
+      if (typeof automation.runId !== "string" || typeof automation.platform !== "string") throw new Error("BUDGET_WORKFLOW_REQUIRED");
+      const reservationKey = `automation:${automation.runId}:script:${automation.platform.toLowerCase()}:cost`;
+      const reservation = await tx.automationCostReservation.findUnique({ where: { idempotencyKey: reservationKey } });
+      if (!reservation || reservation.releasedAt || reservation.settledAt) throw new Error("BUDGET_RESERVATION_EXHAUSTED");
+      await tx.$queryRaw`SELECT id FROM automation_cost_reservations WHERE id = ${reservation.id} FOR UPDATE`;
+      const currentReservation = await tx.automationCostReservation.findUniqueOrThrow({ where: { id: reservation.id } });
+      if (currentReservation.releasedAt || currentReservation.settledAt) throw new Error("BUDGET_RESERVATION_EXHAUSTED");
+      const related = await tx.productionJob.findMany({ where: { type: "SCRIPT", AND: [{ payload: { path: "$.automation.runId", equals: automation.runId } }, { payload: { path: "$.automation.platform", equals: automation.platform } }] }, select: { id: true, payload: true } });
+      if (related.some((item) => item.id !== jobId && Object.values(jsonObject(jsonObject(item.payload)._llmAttempts ?? null)).some((value) => jsonObject(value ?? null).state === "STARTED"))) throw new Error("AMBIGUOUS_LLM_CALL_RECONCILIATION_REQUIRED");
+      const spent = await tx.providerUsage.aggregate({ where: { productionJobId: { in: related.map((item) => item.id) } }, _sum: { estimatedCost: true } });
+      const config = loadConfig();
+      const upperCost = new Prisma.Decimal(estimateLlmInputTokens(request)).mul(config.LLM_INPUT_USD_PER_MILLION_TOKENS).plus(new Prisma.Decimal(request.maxOutputTokens ?? config.LLM_MAX_OUTPUT_TOKENS).mul(config.LLM_OUTPUT_USD_PER_MILLION_TOKENS)).div(1_000_000);
+      if (upperCost.plus(spent._sum.estimatedCost ?? 0).gt(currentReservation.amount)) throw new Error("BUDGET_RESERVATION_EXHAUSTED");
+      await tx.productionJob.update({ where: { id: jobId }, data: { payload: { ...payload, _llmAttempts: { ...attempts, [key]: { state: "STARTED", upperCostUsd: upperCost.toFixed(6), estimatedInputTokens: estimateLlmInputTokens(request), maxOutputTokens: request.maxOutputTokens ?? config.LLM_MAX_OUTPUT_TOKENS } } } } });
       return null;
     });
     if (cached) return cached;
@@ -162,7 +176,7 @@ export class ScriptGenerationProcessor {
         const sourceIdea = await this.prisma.contentIdea.findUnique({ where: { id: input.idea.id }, select: { rawSnapshot: true } });
         const sourceBody = jsonObject(sourceIdea?.rawSnapshot ?? null).body;
         const request: LlmGenerationRequest = {
-          model: config.LLM_MODEL, promptVersion, idempotencyKey: `${input.request.idempotencyKey}:attempt:${attempt}`,
+          model: config.LLM_MODEL, maxOutputTokens: config.LLM_MAX_OUTPUT_TOKENS, promptVersion, idempotencyKey: `${input.request.idempotencyKey}:attempt:${attempt}`,
           title: input.idea.title, summary: input.idea.summary, topic: input.idea.topic, platform: input.request.platform,
           partial: input.request.partial, sources: [{ title: input.idea.title, summary: [input.idea.summary, typeof sourceBody === "string" ? sourceBody : "Original source text was not collected; verify claims manually."].join("\n"), url: input.idea.canonicalUrl }],
           channelContext: generationContext
@@ -181,7 +195,7 @@ export class ScriptGenerationProcessor {
         return { ...structured, model: response.model, usage: config.LLM_PROVIDER === "openai" ? knownUsage : response.usage, estimatedCostUsd: config.LLM_PROVIDER === "openai" ? knownCost.toFixed(6) : response.estimatedCostUsd, generationContext, strategyVersion: channel?.strategyVersions[0]?.version ?? null };
       } catch (error) {
         lastError = error;
-        if (error instanceof Error && error.message === "AMBIGUOUS_LLM_CALL_RECONCILIATION_REQUIRED") break;
+        if (error instanceof Error && ["AMBIGUOUS_LLM_CALL_RECONCILIATION_REQUIRED", "BUDGET_RESERVATION_EXHAUSTED", "BUDGET_WORKFLOW_REQUIRED"].includes(error.message)) break;
       }
     }
     await this.prisma.contentItem.updateMany({ where: { channelId: input.idea.channelId, topicKey: `idea:${input.idea.id}`, status: "GENERATING", scriptVersions: { none: {} } }, data: { status: lastError instanceof Error && lastError.message === "AMBIGUOUS_LLM_CALL_RECONCILIATION_REQUIRED" ? "REVIEW_REQUIRED" : "FAILED" } });
@@ -219,7 +233,7 @@ export class ScriptGenerationProcessor {
           await tx.sourceReference.upsert({
             where: { contentItemId_urlHash: { contentItemId: contentItem.id, urlHash: sha256(idea.canonicalUrl) } },
             update: {},
-            create: { contentItemId: contentItem.id, kind: idea.sourceKind, title: idea.title, url: idea.canonicalUrl, urlHash: sha256(idea.canonicalUrl), sourceName: idea.sourceName, publishedAt: idea.publishedAt ? new Date(idea.publishedAt) : null, reliabilityScore: originalIdea.reliabilityScore, isPrimary: true, normalizedSnapshot: { facts: generated.facts, body: typeof originalBody === "string" ? originalBody : null } }
+            create: { contentItemId: contentItem.id, kind: idea.sourceKind, title: idea.title, url: idea.canonicalUrl, urlHash: sha256(idea.canonicalUrl), sourceName: idea.sourceName, publishedAt: idea.publishedAt ? new Date(idea.publishedAt) : null, reliabilityScore: originalIdea.reliabilityScore, isPrimary: true, normalizedSnapshot: { facts: generated.facts, body: typeof originalBody === "string" ? originalBody : null, contentScope: jsonObject(originalIdea.rawSnapshot).contentScope ?? "UNKNOWN" } }
           });
           const latestScript = await tx.scriptVersion.findFirst({ where: { contentItemId: contentItem.id, platform: request.platform }, orderBy: { version: "desc" } });
           const latestScene = await tx.sceneVersion.findFirst({ where: { contentItemId: contentItem.id, platform: request.platform }, orderBy: { version: "desc" } });

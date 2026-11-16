@@ -141,8 +141,8 @@ export class DeterministicJobProcessor {
     const config = loadConfig();
     const realPaid = (input.type === "SCRIPT" && config.LLM_PROVIDER === "openai") || (input.type === "ASSET" && config.IMAGE_PROVIDER === "google") || (input.type === "TTS" && config.TTS_PROVIDER === "elevenlabs");
     if (realPaid) {
-      const reservation = runId ? await this.prisma.automationCostReservation.findFirst({ where: { automationRunId: runId, stage: input.type as "SCRIPT" | "ASSET" | "TTS", releasedAt: null } }) : null;
-      if (!reservation) { await this.needsReview(input.id, attemptNumber, { reason: "Start a budgeted production workflow." }, "BUDGET_WORKFLOW_REQUIRED"); return; }
+      const reservation = runId ? await this.prisma.automationCostReservation.findUnique({ where: { idempotencyKey: `automation:${runId}:${input.type.toLowerCase()}:${automationPlatform(input.payload)?.toLowerCase()}:cost` } }) : null;
+      if (!reservation || reservation.releasedAt || reservation.settledAt) { await this.needsReview(input.id, attemptNumber, { reason: "Start a budgeted production workflow." }, "BUDGET_WORKFLOW_REQUIRED"); return; }
     }
 
     // The scheduler currently emits only { automation: { runId, stage } }.
@@ -429,7 +429,15 @@ export class DeterministicJobProcessor {
     const key = `automation:${runId}:${type.toLowerCase()}:${platform.toLowerCase()}:cost`;
     const reservation = await this.prisma.automationCostReservation.findUnique({ where: { idempotencyKey: key } });
     if (!reservation || reservation.releasedAt || reservation.settledAt) return;
-    const usage = release ? null : await this.prisma.providerUsage.aggregate({ where: { productionJobId: jobId }, _sum: { actualCost: true } });
+    const record = await this.prisma.productionJob.findUniqueOrThrow({ where: { id: jobId } });
+    const calls = record.payload && typeof record.payload === "object" && !Array.isArray(record.payload) ? record.payload : {};
+    if (JSON.stringify(calls._llmAttempts ?? {}).includes('"STARTED"') || JSON.stringify(calls._mediaCalls ?? {}).includes('"STARTED"')) return;
+    const usage = await this.prisma.providerUsage.aggregate({ where: { productionJobId: jobId }, _sum: { actualCost: true, estimatedCost: true } });
+    // Configured-rate usage estimates are not reconciled invoice charges. Keep
+    // paid reservations until actual costs are recorded; failure is not a refund.
+    const paid = (type === "SCRIPT" && loadConfig().LLM_PROVIDER === "openai") || (type === "ASSET" && loadConfig().IMAGE_PROVIDER === "google") || (type === "TTS" && loadConfig().TTS_PROVIDER === "elevenlabs");
+    if (paid && usage._sum.estimatedCost?.gt(0) && usage._sum.actualCost === null) return;
+    if (release && paid && usage._sum.actualCost?.gt(0)) return;
     const actual = usage?._sum.actualCost;
     const now = new Date();
     await this.prisma.$transaction(async (tx) => {

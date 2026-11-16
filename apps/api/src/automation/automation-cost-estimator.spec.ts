@@ -2,8 +2,15 @@ import { randomBytes } from "node:crypto";
 import { loadConfig } from "@postbot/config";
 import { describe, expect, it } from "vitest";
 import { estimateAutomationStageCost } from "./automation-cost-estimator.js";
+import { estimateLlmInputTokens } from "@postbot/providers";
 
 describe("automation cost estimator", () => {
+  it("reserves the configured output cap and all schema regeneration attempts for actual long input", () => {
+    const config = loadConfig({ APP_ENV: "test", LLM_PROVIDER: "openai", LLM_INPUT_USD_PER_MILLION_TOKENS: "1", LLM_OUTPUT_USD_PER_MILLION_TOKENS: "2", LLM_MAX_RETRIES: "2", LLM_MAX_OUTPUT_TOKENS: "4096" });
+    const inputTokens = estimateLlmInputTokens({ source: "한글 source ".repeat(5000) });
+    expect(inputTokens).toBeGreaterThan(5000);
+    expect(estimateAutomationStageCost(config, "SCRIPT", { inputTokens, outputTokens: 1 })).toMatchObject({ amountUsd: Number(((inputTokens + 8192) / 1_000_000 * 3).toFixed(6)), usage: { outputTokens: 4096 }, pricing: { maximumAttempts: 3 } });
+  });
   it("estimates fake stages without request-supplied prices", () => {
     const config = loadConfig({ APP_ENV: "test", LLM_PROVIDER: "fake", IMAGE_PROVIDER: "fake", TTS_PROVIDER: "fake" });
     expect(estimateAutomationStageCost(config, "SCRIPT", {})?.amountUsd).toBeGreaterThan(0);

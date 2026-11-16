@@ -27,7 +27,7 @@ export const estimateAutomationStageCost = (
 ): AutomationCostEstimate | null => {
   if (stage === "SCRIPT") {
     const inputTokens = usage.inputTokens ?? config.AUTOMATION_EXPECTED_INPUT_TOKENS;
-    const outputTokens = usage.outputTokens ?? config.AUTOMATION_EXPECTED_OUTPUT_TOKENS;
+    const outputTokens = Math.max(usage.outputTokens ?? 0, config.LLM_MAX_OUTPUT_TOKENS);
     const inputRate = config.LLM_PROVIDER === "fake" ? 1 : config.LLM_INPUT_USD_PER_MILLION_TOKENS;
     const outputRate = config.LLM_PROVIDER === "fake" ? 1 : config.LLM_OUTPUT_USD_PER_MILLION_TOKENS;
     if (inputRate <= 0 || outputRate <= 0) return null;

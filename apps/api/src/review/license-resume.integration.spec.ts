@@ -51,6 +51,8 @@ suite("rights proof recovery and platform isolation", () => {
     expect((await repository.getEvidence(fixture.workspace.id, fixture.content.id, "YOUTUBE", ["Verified hook"], 0))?.sensitiveTopic).toBe(true);
     expect(await prisma.assetUsage.count({ where: { sceneVersionId: fixture.scenes[0]!.id } })).toBe(1);
     expect(await prisma.publishPlan.findUniqueOrThrow({ where: { id: fixture.plans[0]!.id } })).toMatchObject({ status: "HELD" });
+    await prisma.scriptVersion.updateMany({ where: { contentItemId: fixture.content.id, platform: "YOUTUBE", version: 2 }, data: { body: "A newly added unsupported claim about 999 km." } });
+    expect((await repository.getEvidence(fixture.workspace.id, fixture.content.id, "YOUTUBE", [], 0))?.factsHaveSources).toBe(false);
   });
   it("keeps a metadata edit isolated from sibling titles, approvals and reservations", async () => {
     const fixture = await seed();

@@ -469,7 +469,9 @@ export const ScriptGenerationJobPayloadSchema = z.object({
 
 export const FactSourceLinkSchema = z.object({
   claim: z.string().min(1).max(1000),
-  sourceUrl: z.string().url()
+  sourceUrl: z.string().url(),
+  kind: z.enum(["FACT", "ASSUMPTION", "INFERENCE"]).optional(),
+  evidenceQuote: z.string().min(1).max(2000).optional()
 });
 
 export const GeneratedMetadataSchema = z.object({

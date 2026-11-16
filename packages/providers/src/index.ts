@@ -175,7 +175,8 @@ const fixtureCandidates: readonly TopicSourceCandidate[] = [
     sourceName: "Example Science",
     sourceKind: "RSS",
     publishedAt: "2026-08-30T00:00:00.000Z",
-    body: "Reusable rocket test reaches new altitude with verified public telemetry and recovery footage.",
+    body: "Reusable rocket test reaches new altitude with verified public telemetry and recovery footage. A public aerospace test reported improved reusable booster recovery performance.",
+    reliabilityMetadata: { contentScope: "FULL_TEXT", fixture: true },
     reliabilityScore: 0.82
   },
   {
@@ -185,7 +186,8 @@ const fixtureCandidates: readonly TopicSourceCandidate[] = [
     sourceName: "Public Research Data",
     sourceKind: "PUBLIC_DATA",
     publishedAt: "2026-08-29T00:00:00.000Z",
-    body: "Ocean sensor network publishes open climate data with methodology notes and public license metadata.",
+    body: "Ocean sensor network publishes open climate data with methodology notes and public license metadata. A research group released public ocean sensor data for short-form explainers.",
+    reliabilityMetadata: { contentScope: "FULL_TEXT", fixture: true },
     reliabilityScore: 0.88
   },
   {
@@ -347,7 +349,7 @@ export class RssTopicSourceProvider implements TopicSourceProvider {
         eventAt: published?.toISOString() ?? null,
         reliabilityScore: request.allowedSources.length > 0 ? 0.9 : 0.75,
         contentHash: await sha256Text(`${title}\n${summary}\n${body}`.toLowerCase().trim()),
-        reliabilityMetadata: { transport: "https", feedUrl, allowlisted: request.allowedSources.length > 0 }
+        reliabilityMetadata: { transport: "https", contentScope: "SUMMARY", feedUrl, allowlisted: request.allowedSources.length > 0 }
       };
       if (sourceAllowed(candidate, request.allowedSources, request.excludedSources)) results.push(candidate);
     }
@@ -362,6 +364,7 @@ export type LlmGenerationSource = {
 };
 
 export type LlmGenerationRequest = {
+  readonly maxOutputTokens?: number;
   readonly model: string;
   readonly promptVersion: string;
   readonly idempotencyKey: string;
@@ -565,8 +568,8 @@ const scriptSceneJsonSchema = {
     facts: {
       type: "array",
       items: {
-        type: "object", additionalProperties: false, required: ["claim", "sourceUrl"],
-        properties: { claim: { type: "string" }, sourceUrl: { type: "string" } }
+        type: "object", additionalProperties: false, required: ["claim", "sourceUrl", "kind", "evidenceQuote"],
+        properties: { claim: { type: "string" }, sourceUrl: { type: "string" }, kind: { type: "string", enum: ["FACT", "ASSUMPTION", "INFERENCE"] }, evidenceQuote: { type: "string" } }
       }
     },
     sceneDocument: {
@@ -602,6 +605,10 @@ const scriptSceneJsonSchema = {
   }
 } as const;
 
+// A byte-based upper estimate deliberately includes schema/instruction overhead.
+// It is a reservation policy, not a prediction of provider tokenization or billing.
+export const estimateLlmInputTokens = (input: unknown): number => Buffer.byteLength(JSON.stringify(input), "utf8") + Buffer.byteLength(JSON.stringify(scriptSceneJsonSchema), "utf8") + 1024;
+
 const readResponseText = (response: OpenAiResponse): string => {
   if (response.status && response.status !== "completed") throw new Error("OPENAI_RESPONSE_INCOMPLETE");
   const parts = response.output?.filter((item) => item.type === "message").flatMap((item) => item.content ?? []) ?? [];
@@ -621,6 +628,8 @@ export class OpenAiLlmProvider implements LlmProvider {
       throw new Error("OPENAI_API_KEY is required when LLM_PROVIDER=openai.");
     }
     if (!(this.options.inputUsdPerMillionTokens && this.options.inputUsdPerMillionTokens > 0 && this.options.outputUsdPerMillionTokens && this.options.outputUsdPerMillionTokens > 0)) throw new Error("LLM_PRICING_REQUIRED");
+    const outputLimit = request.maxOutputTokens ?? 4096;
+    if (!Number.isSafeInteger(outputLimit) || outputLimit < 256 || outputLimit > 32768) throw new Error("LLM_OUTPUT_LIMIT_INVALID");
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
@@ -635,8 +644,9 @@ export class OpenAiLlmProvider implements LlmProvider {
         body: JSON.stringify({
           model: request.model,
           store: false,
+          max_output_tokens: outputLimit,
           instructions:
-            "Generate a factual short-form script and scene document. Return only data that conforms to the supplied JSON Schema and cite only the supplied source URLs.",
+            "Generate a factual short-form script and scene document. Return only data that conforms to the supplied JSON Schema and cite only the supplied source URLs. For each claim provide its FACT, ASSUMPTION or INFERENCE kind and an exact evidenceQuote from the supplied text. Never treat a URL alone as evidence.",
           input: JSON.stringify({
             title: request.title,
             summary: request.summary,
@@ -665,6 +675,7 @@ export class OpenAiLlmProvider implements LlmProvider {
       const promptTokens = usage?.input_tokens;
       const completionTokens = usage?.output_tokens;
       if (promptTokens === undefined || completionTokens === undefined || !Number.isSafeInteger(promptTokens) || !Number.isSafeInteger(completionTokens) || promptTokens < 0 || completionTokens < 0) throw new Error("OPENAI_USAGE_MISSING_OR_INVALID");
+      if (completionTokens > outputLimit) throw new Error("OPENAI_OUTPUT_LIMIT_EXCEEDED");
       return {
         provider: "openai",
         idempotencyKey: request.idempotencyKey,

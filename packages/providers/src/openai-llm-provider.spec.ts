@@ -31,7 +31,7 @@ describe("OpenAiLlmProvider", () => {
     expect(new Headers(capturedInit?.headers).get("Idempotency-Key")).toBe("job-1");
     expect(typeof capturedInit?.body).toBe("string");
     const requestBody: unknown = JSON.parse(capturedInit?.body as string);
-    expect(requestBody).toMatchObject({ text: { format: { type: "json_schema", strict: true } } });
+    expect(requestBody).toMatchObject({ max_output_tokens: 4096, text: { format: { type: "json_schema", strict: true } } });
     expect(result.usage).toEqual({ promptTokens: 12, completionTokens: 34, totalTokens: 46 });
   });
 
