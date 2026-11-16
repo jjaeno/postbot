@@ -4,7 +4,7 @@ import { readAssetUsagePurpose, AssetRepository, assetNeedsReview } from "@postb
 import { RenderJobPayloadSchema } from "@postbot/contracts";
 import type { Prisma, PrismaClient } from "@postbot/database";
 import { FakeStorageProvider, S3StorageProvider, type StorageProvider } from "@postbot/providers";
-import { FfmpegPostProcessor, RemotionVideoRenderer, type FfprobeResult, type VideoRenderer } from "@postbot/renderer";
+import { inspectTechnicalQuality, splitDisplayCaptions, RenderQualityReviewError, FfmpegPostProcessor, RemotionVideoRenderer, type FfprobeResult, type VideoRenderer } from "@postbot/renderer";
 import { readFile, rm, writeFile, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -62,6 +62,7 @@ export class RenderProcessor {
       return previous;
     }
     let sceneDocument = SceneDocumentSchema.parse(sceneVersion.sceneDocument);
+    sceneDocument = { ...sceneDocument, platform: sceneVersion.platform ?? sceneDocument.platform, scenes: sceneDocument.scenes.map((scene) => ({ ...scene, visualMode: scene.visualMode ?? "IMAGE" })) };
     let brandLogo: string | undefined;
     if (sceneDocument.style?.logoAssetId) {
       const logo = await this.prisma.asset.findFirst({ where: { id: sceneDocument.style.logoAssetId, channelId: input.channelId, kind: "GRAPHIC" } });
@@ -102,7 +103,6 @@ export class RenderProcessor {
         sceneDocument = retimeNarration(sceneDocument, captions, audio.durationSeconds, { min: profile?.minDurationSeconds ?? 0, max: profile?.maxDurationSeconds ?? 180 });
         expectedDuration = sceneDocument.durationInFrames / sceneDocument.fps;
       }
-      if (captions.some((caption) => caption.text.length > 160)) throw new Error("SUBTITLE_SAFE_AREA_OR_TIMING_INVALID");
       if (background && backgroundPath) await writeFile(backgroundPath, await this.storage.download(background.asset.storageKey));
       if (effects && effectsPath) await writeFile(effectsPath, await this.storage.download(effects.asset.storageKey));
       const sceneAssets: Record<string, string> = {};
@@ -112,7 +112,10 @@ export class RenderProcessor {
         const bytes = await this.storage.download(usage.asset.storageKey);
         sceneAssets[sceneId] = `data:${usage.asset.mimeType};base64,${Buffer.from(bytes).toString("base64")}`;
       }
-      await this.withTimeout(this.renderer.render({ sceneDocument, captions, sceneAssets, brandLogo, outputLocation: draftPath }));
+      const displayCaptions = splitDisplayCaptions(captions);
+      const technicalQuality = inspectTechnicalQuality(sceneDocument, displayCaptions, sceneAssets);
+      if (!technicalQuality.pass) throw new RenderQualityReviewError(technicalQuality.findings);
+      const rendered = await this.withTimeout(this.renderer.render({ sceneDocument, captions: displayCaptions, sceneAssets, brandLogo, outputLocation: draftPath }));
       await this.withTimeout(this.postProcessor.postprocess({ videoInput: draftPath, output: outputPath, narrationInput: narrationPath, backgroundInput: backgroundPath, effectsInput: effectsPath, backgroundVolume: sceneDocument.audio?.bgmVolume ?? 0.2, effectsVolume: sceneDocument.audio?.sfxVolume ?? 0.2 }));
       await this.withTimeout(this.postProcessor.thumbnail(outputPath, thumbnailPath));
       const qa = await this.withTimeout(this.postProcessor.probe(outputPath));
@@ -123,11 +126,12 @@ export class RenderProcessor {
       await this.storage.upload({ key: thumbnailKey, body: await readFile(thumbnailPath), mimeType: "image/jpeg" });
       const manifest = {
         idempotencyKey: input.idempotencyKey,
-        rendererVersion: "1.1.0",
+        rendererVersion: rendered.rendererVersion,
+        technicalQuality,
         schemaVersion: sceneDocument.schemaVersion,
         videoKey,
         thumbnailKey,
-        captions: captions.length,
+        captions: displayCaptions.length,
         sceneAssets: Object.keys(sceneAssets),
         style: sceneDocument.style ?? null,
         qa

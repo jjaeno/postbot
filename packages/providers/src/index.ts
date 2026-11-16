@@ -451,6 +451,7 @@ const fakeStructuredOutput = (request: LlmGenerationRequest): Record<string, unk
       scenes: [
         {
           id: "scene-1",
+          role: "HOOK",
           startFrame: 0,
           durationInFrames: durationSeconds * 30,
           visualPrompt: `Vertical short explainer about ${request.title}`,
@@ -461,7 +462,7 @@ const fakeStructuredOutput = (request: LlmGenerationRequest): Record<string, unk
           overlays: [
             {
               kind: "title",
-              text: request.title.slice(0, 120)
+              text: request.title
             },
             {
               kind: "fact",
@@ -583,9 +584,9 @@ const scriptSceneJsonSchema = {
           type: "array",
           items: {
             type: "object", additionalProperties: false,
-            required: ["id", "startFrame", "durationInFrames", "visualPrompt", "narration", "overlays"],
+            required: ["id", "role", "startFrame", "durationInFrames", "visualPrompt", "narration", "overlays"],
             properties: {
-              id: { type: "string" }, startFrame: { type: "integer" }, durationInFrames: { type: "integer" }, visualPrompt: { type: "string" },
+              role: { type: "string", enum: ["HOOK", "COMPARISON", "PROCESS", "METRIC", "REVEAL"] }, id: { type: "string" }, startFrame: { type: "integer" }, durationInFrames: { type: "integer" }, visualPrompt: { type: "string" },
               narration: {
                 type: "object", additionalProperties: false, required: ["text", "sourceUrl"],
                 properties: { text: { type: "string" }, sourceUrl: { type: "string" } }

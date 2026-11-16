@@ -1,4 +1,4 @@
-import type { Scene, SceneDocument } from "@postbot/scene-schema";
+import { SceneDocumentSchema, type Scene, type SceneDocument } from "@postbot/scene-schema";
 
 export const SHORTS_WIDTH = 1080;
 export const SHORTS_HEIGHT = 1920;
@@ -34,6 +34,7 @@ export const sceneAtFrame = (document: SceneDocument, frame: number): Scene | nu
   document.scenes.find((scene) => frame >= scene.startFrame && frame < sceneEndFrame(scene)) ?? null;
 
 export const assertRenderableDocument = (document: SceneDocument): void => {
+  SceneDocumentSchema.parse(document);
   if (document.width !== SHORTS_WIDTH || document.height !== SHORTS_HEIGHT) {
     throw new Error("Only 1080x1920 SceneDocuments are renderable.");
   }

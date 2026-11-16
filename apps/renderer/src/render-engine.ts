@@ -7,8 +7,9 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { CaptionTiming } from "./scene-math.js";
 import { assertRenderableDocument } from "./scene-math.js";
+import { inspectTechnicalQuality, RenderQualityReviewError } from "./technical-quality.js";
 
-export const RENDERER_VERSION = "1.1.0";
+export const RENDERER_VERSION = "1.2.0";
 
 export type RenderInput = {
   readonly sceneDocument: SceneDocument;
@@ -31,10 +32,13 @@ export class RemotionVideoRenderer implements VideoRenderer {
   constructor(private readonly concurrency = 2) {}
   async render(input: RenderInput): Promise<RenderedMedia> {
     assertRenderableDocument(input.sceneDocument);
+    const quality = inspectTechnicalQuality(input.sceneDocument, input.captions, input.sceneAssets ?? {});
+    if (!quality.pass) throw new RenderQualityReviewError(quality.findings);
     await mkdir(dirname(input.outputLocation), { recursive: true });
     const entryPoint = fileURLToPath(new URL("./remotion-entry.js", import.meta.url));
     const serveUrl = await bundle({ entryPoint });
     const inputProps = { sceneDocument: input.sceneDocument, captions: input.captions, sceneAssets: input.sceneAssets ?? {}, brandLogo: input.brandLogo };
+    try {
     const composition = await selectComposition({ serveUrl, id: "PostbotShort", inputProps });
     await renderMedia({
       composition,
@@ -43,7 +47,10 @@ export class RemotionVideoRenderer implements VideoRenderer {
       concurrency: this.concurrency,
       outputLocation: input.outputLocation,
       inputProps
-    });
+    }); } catch (error) {
+      if (error instanceof Error && error.message.includes("RENDER_TEXT_OVERFLOW_REVIEW_REQUIRED")) throw new RenderQualityReviewError([{ code: "MEASURED_TEXT_OVERFLOW", message: "Browser-measured text overflow or overlap requires layout review." }]);
+      throw error;
+    }
     return { outputLocation: input.outputLocation, rendererVersion: RENDERER_VERSION };
   }
 }

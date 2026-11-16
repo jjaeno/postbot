@@ -50,3 +50,13 @@
 - 스톡: 권리·기간·채널 검사를 통과한 후보만 설명/태그와 visualPrompt를 비교한다. 최근 30일 사용 및 같은 영상 내 반복을 감점한다. 기준(0.25) 미달이면 `STOCK_MATCH_REQUIRED`와 장면 ID/메타데이터 부족 여부로 보류하며 무관한 이미지를 강제 배정하지 않는다. 모든 스톡 장면의 매칭을 유료 이미지 생성 전에 확인한다.
 - 기존 자산 메타데이터 보완: 소유자가 업로드 화면에서 이미지 설명을 입력해 같은 파일을 다시 등록하거나 `PATCH /channels/:channelId/stock-assets/:assetId/metadata`에 `{description,tags}`를 보낸다. 기존 권리 증빙은 덮어쓰지 않는다. metadata PATCH 후 기존 보류 실행을 재시도한다. 재등록은 기존 보류 재개 흐름을 사용한다. AssetSource JSON 이력을 사용하므로 자산 테이블 migration은 없다.
 - 검증: worker 선정/소재 3건, API 아이디어/스톡 권한/채널/자동화 23건, topic scoring 3건, asset-library 7건, web 10건(총 46건) 통과. 변경 app/package lint·typecheck 통과. 기존 데이터 DB에 selectionPolicy migration 성공. 테스트는 과거 점수 역전, 현재 rule 재조회, 유효한 다른 실행 예약 유지, 취소 예약 해제, 다른 기사 제목의 사건 중복, 메타데이터 없음/무관함에서 유료 작업 0건, 보완 후 재시도와 권리·채널 격리를 확인한다.
+
+## 5단계: 장면 템플릿·기술 품질
+
+- 확인: 제목이 전체 영상에 고정되고 첫 30프레임 fade-in, 첫 overlay만 표시, 제목/overlay의 overflow hidden, 자막 길이 단순 거부가 있었다.
+- schema 1.0.0을 유지하며 선택적 role/visualMode/platform을 추가했다. Hook/두 대상 비교/번호 있는 과정/동일 단위 수치 막대/결론·CTA의 역할을 분리한다. Hook은 frame 0부터 제목을 표시하고 2.5초 뒤 제거한다. 지원하는 모든 overlay를 렌더하며 알 수 없는 overlay는 schema 오류다. overlay 최대 500자로 입력을 보존하고 수용 불가 길이는 검토로 보낸다. Fake 생성의 title.slice도 제거했다.
+- CJK/Latin 폭 기반 폰트 조정·줄바꿈, 플랫폼별 보수적 안전 영역, TTS 전체 문자와 구간을 보존하는 긴 자막 분할을 사용한다. 실제 브라우저 bounds와 겹침을 추가 검사한다. Remotion metadata 단계의 zero-size offscreen tree는 실제 프레임 검사가 아니므로 제외한다. 유효 프레임에서는 텍스트를 자르지 않는다.
+- missing image, 텍스트 넘침·총 배치 밀도, 자막 밀도/타이밍, 긴 정적 GRAPHIC 구간, 잘못된 비교 구조/수치 단위는 기술 QA 사유다. worker는 NEEDS_REVIEW로 보내고 이전 manifest와 오디오 길이를 덮어쓰지 않는다. renderer version 1.2와 technicalQuality를 manifest에 저장한다. 기술 QA를 조회수 예측으로 표시하지 않는다.
+- 검증: renderer 7건, scene-schema 14건, worker 렌더/생성/journal 9건, Provider 5건 통과. 변경 renderer/worker/providers/scene-schema lint·typecheck 성공. 실제 Chromium 대표 프레임 9개를 직접 시각 확인했고 첫 frame, 전환, 20:100 동일 단위 막대 비율, CTA, 긴 한국어·영어 제목/자막 및 제목이 사라진 6초 프레임을 확인했다.
+- 실제 2초 smoke 결과: 1080×1920, 출력 2.09초, audio 있음, 평균 -21.3 dB, black-frame 비율 0. 증거 `.artifacts/templates-2026-11-17/result.json`, PNG 9개, `templates-smoke.mp4`. Windows Remotion 내장 FFmpeg에는 volumedetect/blackdetect가 없어 해당 검사만 기존 renderer image의 full FFmpeg로 실행했다. 최종 `template-smoke.mjs` 전체 실행은 `TEMPLATE_SMOKE_QA_IMAGE=postbot-internal-renderer:20261020`으로 통과했고 기존 frame 재사용은 false다. 환경이 full FFmpeg이면 이 변수 없이 실행한다. 대표 frame만 재검사할 때 이미 검증된 출력은 `TEMPLATE_SMOKE_RESUME=1`로 재사용할 수 있다.
+- DB migration 없음. 기존 JSON은 읽을 수 있고 기존 성공 manifest는 유지한다. 이미지 제작 문서에 이미지가 없으면 명시적인 GRAPHIC 전환이나 소재 준비가 필요하다. 문서의 sidechain ducking 표현과 실제 볼륨+amix 구현의 불일치를 발견해 실제 동작에 맞게 정정했다.

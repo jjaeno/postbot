@@ -1,3 +1,4 @@
+import { RenderQualityReviewError } from "@postbot/renderer";
 import { randomUUID } from "node:crypto";
 import { AmbiguousPublishError } from "@postbot/publishers";
 import { assertExecutionOwner, jobExecution, assertJobScope, type Prisma, type PrismaClient } from "@postbot/database";
@@ -254,6 +255,7 @@ export class DeterministicJobProcessor {
         await this.succeed(input.id, attemptNumber, await this.render.process(input.payload, input.id));
         return;
       } catch (error) {
+        if (error instanceof RenderQualityReviewError) { await this.needsReview(input.id, attemptNumber, { findings: [...error.findings], reason: "Adjust the scene layout or narration timing before rendering." }, "RENDER_TECHNICAL_REVIEW_REQUIRED"); return; }
         const message = error instanceof Error ? error.message : "RENDER_FAILED";
         await this.fail(input.id, attemptNumber, "RENDER_FAILED", message);
         throw error;
@@ -457,18 +459,19 @@ export class DeterministicJobProcessor {
 
   private async needsReview(jobId: string, attemptNumber: number, result: Record<string, unknown>, errorCode = "ASSET_LICENSE_REVIEW_REQUIRED"): Promise<void> {
     const stockMessage = "장면에 맞는 스톡 이미지가 없습니다. 이미지 설명·태그를 보완하거나 관련 소재를 등록한 뒤 재시도하세요.";
+    const layoutMessage = "장면의 글자 배치·소재·자막 타이밍을 확인하고 검토 사유를 보완한 뒤 재시도하세요.";
     await this.finish(jobId, attemptNumber, "NEEDS_REVIEW", {
       status: "NEEDS_REVIEW",
       result: result as Prisma.InputJsonObject,
       finishedAt: new Date(),
       errorCode,
-      errorMessage: errorCode === "STOCK_MATCH_REQUIRED" ? stockMessage : errorCode === "AMBIGUOUS_PUBLISH_RECONCILIATION_REQUIRED" ? "Publication outcome requires reconciliation before retry; no automatic re-upload." : result.reconciliationRequired === true ? "Provider call outcome and billing require reconciliation before retry; no automatic paid retry." : errorCode === "POLICY_REVIEW_REQUIRED" ? "Policy findings require manual review." : "Asset license requires manual review."
+      errorMessage: errorCode === "STOCK_MATCH_REQUIRED" ? stockMessage : errorCode === "RENDER_TECHNICAL_REVIEW_REQUIRED" ? layoutMessage : errorCode === "AMBIGUOUS_PUBLISH_RECONCILIATION_REQUIRED" ? "Publication outcome requires reconciliation before retry; no automatic re-upload." : result.reconciliationRequired === true ? "Provider call outcome and billing require reconciliation before retry; no automatic paid retry." : errorCode === "POLICY_REVIEW_REQUIRED" ? "Policy findings require manual review." : "Asset license requires manual review."
     });
     const job = await this.prisma.productionJob.findUnique({ where: { id: jobId }, select: { payload: true, type: true } });
     const runId = job ? automationRunId(job.payload as Record<string, unknown>) : null;
     if (runId && job && result.reconciliationRequired !== true) await this.settleReservation(runId, jobId, job.type, false);
     if (runId) await this.prisma.$transaction([
-      this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "HELD", attemptCount: attemptNumber, output: result as Prisma.InputJsonObject, errorCode, errorMessage: errorCode === "STOCK_MATCH_REQUIRED" ? stockMessage : "Manual review is required.", finishedAt: new Date() } }),
+      this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "HELD", attemptCount: attemptNumber, output: result as Prisma.InputJsonObject, errorCode, errorMessage: errorCode === "STOCK_MATCH_REQUIRED" ? stockMessage : errorCode === "RENDER_TECHNICAL_REVIEW_REQUIRED" ? layoutMessage : "Manual review is required.", finishedAt: new Date() } }),
       this.prisma.automationRun.updateMany({ where: { id: runId, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "RUNNING", pausedReason: null, heartbeatAt: new Date(), nextRunAt: new Date() } })
     ]);
   }

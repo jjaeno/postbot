@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { copyFile, writeFile } from "node:fs/promises";
 import { afterAll, describe, expect, it } from "vitest";
 import { RenderProcessor, sceneIdFromImagePurpose, type MediaPostProcessor } from "./render-processor.js";
+import { DeterministicJobProcessor } from "./job-processor.js";
 
 const enabled = process.env.RUN_DB_INTEGRATION === "1" ? describe : describe.skip;
 const prisma = new PrismaClient();
@@ -47,6 +48,12 @@ enabled("render processor integration", () => {
     expect(first).toMatchObject({ rendererVersion: "1.1.0", schemaVersion: "1.0.0", qa: { width: 1080, height: 1920 } });
     await expect(storage.download(String(first.videoKey))).resolves.toEqual(new Uint8Array([0, 1, 2, 3]));
     await expect(prisma.sceneVersion.findUniqueOrThrow({ where: { id: version.id } })).resolves.toMatchObject({ renderManifest: first });
+    const missing = await prisma.sceneVersion.create({ data: { contentItemId: content.id, version: 2, schemaVersion: "1.0.0", sceneDocument: scene("Missing scene image") } });
+    const missingPayload = { render: { ...payload.render, sceneVersionId: missing.id, idempotencyKey: `${suffix}:missing` } };
+    const missingJob = await prisma.productionJob.create({ data: { channelId: channel.id, contentItemId: content.id, type: "RENDER", queueName: "render", idempotencyKey: `${suffix}:missing`, payload: missingPayload } });
+    await new DeterministicJobProcessor(prisma).process({ id: missingJob.id, type: "RENDER", queueName: "render", runAfter: null, payload: missingPayload });
+    expect(await prisma.productionJob.findUniqueOrThrow({ where: { id: missingJob.id } })).toMatchObject({ status: "NEEDS_REVIEW", errorCode: "RENDER_TECHNICAL_REVIEW_REQUIRED", result: { findings: [{ code: "SCENE_ASSET_MISSING" }] } });
+    expect((await prisma.sceneVersion.findUniqueOrThrow({ where: { id: missing.id } })).renderManifest).toBeNull();
   });
 });
 

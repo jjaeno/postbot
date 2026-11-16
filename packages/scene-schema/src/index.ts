@@ -6,11 +6,13 @@ export const SceneNarrationSchema = z.object({
 });
 
 export const SceneOverlaySchema = z.object({
-  text: z.string().min(1).max(120),
+  text: z.string().min(1).max(500),
   kind: z.enum(["title", "fact", "cta"])
-});
+}).strict();
 
 export const SceneSchema = z.object({
+  role: z.enum(["HOOK", "COMPARISON", "PROCESS", "METRIC", "REVEAL"]).optional(),
+  visualMode: z.enum(["IMAGE", "GRAPHIC"]).optional(),
   id: z.string().min(1).max(80),
   startFrame: z.number().int().nonnegative(),
   durationInFrames: z.number().int().positive(),
@@ -36,6 +38,7 @@ export const aiSceneCount = (sceneCount: number, aiStockRatio: number): number =
 
 export const SceneDocumentSchema = z.object({
   schemaVersion: z.literal("1.0.0"),
+  platform: z.enum(["YOUTUBE", "INSTAGRAM", "TIKTOK"]).optional(),
   title: z.string().min(1),
   width: z.literal(1080),
   height: z.literal(1920),
