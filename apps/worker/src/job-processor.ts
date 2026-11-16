@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { AmbiguousPublishError } from "@postbot/publishers";
-import { assertJobScope, type Prisma, type PrismaClient } from "@postbot/database";
+import { assertExecutionOwner, jobExecution, assertJobScope, type Prisma, type PrismaClient } from "@postbot/database";
 import type { EnqueueJobInput } from "@postbot/jobs";
 import { AssetPreparationJobPayloadSchema, CollectAutomationJobPayloadSchema, PolicyAutomationJobPayloadSchema, RenderJobPayloadSchema, ScriptGenerationJobPayloadSchema, TtsPreparationJobPayloadSchema } from "@postbot/contracts";
 import { ScriptGenerationProcessor } from "./script-generation-processor.js";
@@ -102,6 +103,17 @@ export class DeterministicJobProcessor {
   }
 
   async process(input: EnqueueJobInput): Promise<void> {
+    const owner = { jobId: input.id, token: randomUUID() };
+    await jobExecution.run(owner, async () => {
+      const heartbeat = setInterval(() => {
+        void this.prisma.productionJob.updateMany({ where: { id: owner.jobId, executionToken: owner.token, status: { in: ["RUNNING", "CANCEL_REQUESTED"] } }, data: { heartbeatAt: new Date() } }).catch(() => undefined);
+      }, 5_000);
+      try { await this.execute(input); }
+      finally { clearInterval(heartbeat); }
+    });
+  }
+
+  private async execute(input: EnqueueJobInput): Promise<void> {
     const persisted = await this.prisma.productionJob.findUnique({ where: { id: input.id } });
     if (!persisted) throw new Error("JOB_NOT_FOUND");
     if (persisted?.status === "SUCCEEDED" || persisted?.status === "CANCELLED") return;
@@ -312,6 +324,8 @@ export class DeterministicJobProcessor {
         data: {
           status: "RUNNING",
           startedAt: new Date(),
+          executionToken: jobExecution.getStore()?.token ?? null,
+          heartbeatAt: new Date(),
           errorCode: null,
           errorMessage: null
         }
@@ -485,25 +499,10 @@ export class DeterministicJobProcessor {
     attemptStatus: ProductionJobStatus,
     jobData: Prisma.ProductionJobUpdateInput
   ): Promise<void> {
-    await this.prisma.$transaction([
-      this.prisma.jobAttempt.update({
-        where: {
-          productionJobId_attemptNumber: {
-            productionJobId: jobId,
-            attemptNumber
-          }
-        },
-        data: {
-          status: attemptStatus,
-          finishedAt: new Date(),
-          errorCode: typeof jobData.errorCode === "string" ? jobData.errorCode : null,
-          errorMessage: typeof jobData.errorMessage === "string" ? jobData.errorMessage : null
-        }
-      }),
-      this.prisma.productionJob.update({
-        where: { id: jobId },
-        data: jobData
-      })
-    ]);
+    await this.prisma.$transaction(async (tx) => {
+      await assertExecutionOwner(tx);
+      await tx.jobAttempt.update({ where: { productionJobId_attemptNumber: { productionJobId: jobId, attemptNumber } }, data: { status: attemptStatus, finishedAt: new Date(), errorCode: typeof jobData.errorCode === "string" ? jobData.errorCode : null, errorMessage: typeof jobData.errorMessage === "string" ? jobData.errorMessage : null } });
+      await tx.productionJob.update({ where: { id: jobId }, data: { ...jobData, executionToken: null, heartbeatAt: null } });
+    });
   }
 }

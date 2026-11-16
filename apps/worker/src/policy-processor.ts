@@ -1,5 +1,5 @@
 import { PolicyAutomationJobPayloadSchema } from "@postbot/contracts";
-import type { Prisma, PrismaClient } from "@postbot/database";
+import { assertExecutionOwner, type Prisma, type PrismaClient } from "@postbot/database";
 import { evaluatePolicy, type PolicyRule } from "@postbot/policy-engine";
 
 const object = (value: Prisma.JsonValue): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -52,6 +52,7 @@ export class PolicyProcessor {
     const dbStatus = evaluation.status === "pass" ? "PASS" : evaluation.status === "warning" || evaluation.status === "review" ? "WARNING" : "FAIL";
     const now = new Date();
     await this.prisma.$transaction(async (tx) => {
+      await assertExecutionOwner(tx);
       const check = await tx.policyCheck.create({ data: { contentItemId: item.id, policyRuleId: ruleRecord.id, platform: input.platform, status: dbStatus, reasons: evaluation.findings } });
       const snapshot = JSON.parse(JSON.stringify({ policy: rule, status: evaluation.status, findings: evaluation.findings })) as Prisma.InputJsonObject;
       await tx.policySnapshot.create({ data: { channelId: item.channelId, policyRuleId: ruleRecord.id, policyCheckId: check.id, checkedAt: now, snapshot } });

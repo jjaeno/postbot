@@ -1,6 +1,6 @@
 import { loadConfig } from "@postbot/config";
 import { CollectAutomationJobPayloadSchema } from "@postbot/contracts";
-import { Prisma, type PrismaClient } from "@postbot/database";
+import { assertExecutionOwner, Prisma, type PrismaClient } from "@postbot/database";
 import { FixtureTopicSourceProvider, RssTopicSourceProvider, scoreTopicCandidate, type TopicSourceCandidate, type TopicSourceProvider } from "@postbot/providers";
 import { createHash } from "node:crypto";
 
@@ -27,6 +27,7 @@ export class CollectProcessor {
       .sort((left, right) => right.expectedValueScore - left.expectedValueScore);
     for (const candidate of eligible) await this.save(input.channelId, candidate, result.provider);
     const idea = await this.prisma.$transaction(async (tx) => {
+      await assertExecutionOwner(tx);
       await tx.$queryRaw`SELECT id FROM channels WHERE id = ${input.channelId} FOR UPDATE`;
       const candidates = await tx.contentIdea.findMany({ where: { channelId: input.channelId, status: { in: ["CANDIDATE", "SHORTLISTED"] }, usedContentItemId: null }, orderBy: [{ expectedValueScore: "desc" }, { collectedAt: "desc" }] });
       for (const candidate of candidates) {

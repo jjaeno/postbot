@@ -31,6 +31,18 @@ enabled("publish processor integration", () => {
     const processor = new PublishProcessor(prisma, storage);
     return { processor, plan };
   };
+  it("rolls back PUBLISHING when durable attempt creation fails", async () => {
+    const { processor, plan } = await fixture();
+    // The stale read selects attempt 2, then a competing insert wins that key.
+    const original = prisma.$transaction.bind(prisma);
+    vi.spyOn(prisma, "$transaction").mockImplementationOnce(async (operation, options) => {
+      await prisma.publishAttempt.create({ data: { publishPlanId: plan.id, attemptNumber: 1, status: "FAILED", idempotencyKey: randomUUID() } });
+      return original(operation, options);
+    });
+    await expect(processor.process({ publish: { publishPlanId: plan.id } })).rejects.toThrow();
+    expect((await prisma.publishPlan.findUniqueOrThrow({ where: { id: plan.id } })).status).toBe("SCHEDULED");
+    expect(await prisma.platformPost.count({ where: { publishPlanId: plan.id } })).toBe(0);
+  });
   it("publishes a scheduled fake YouTube plan once and persists its attempt", async () => {
     const { processor, plan } = await fixture();
     const first = await processor.process({ publish: { publishPlanId: plan.id } }); const second = await processor.process({ publish: { publishPlanId: plan.id } });

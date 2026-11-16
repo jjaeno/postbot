@@ -43,10 +43,11 @@ export class PublishProcessor {
       const currentScene = await tx.sceneVersion.findFirst({ where: { contentItemId: plan.contentItemId, platform: plan.platform }, orderBy: { version: "desc" } });
       const currentCheck = await tx.policyCheck.findFirst({ where: { contentItemId: plan.contentItemId, platform: plan.platform }, orderBy: { checkedAt: "desc" } });
       if (currentScript?.id !== script.id || currentScene?.id !== latestScene.id || currentCheck?.id !== policyCheck.id || JSON.stringify(currentScript.qualitySnapshot) !== JSON.stringify(script.qualitySnapshot)) throw new Error("PUBLISH_VERSION_GATE_FAILED");
-      return tx.publishPlan.updateMany({ where: { id: plan.id, status: "SCHEDULED", updatedAt: plan.updatedAt }, data: { status: "PUBLISHING" } });
+      const claimed = await tx.publishPlan.updateMany({ where: { id: plan.id, status: "SCHEDULED", updatedAt: plan.updatedAt }, data: { status: "PUBLISHING" } });
+      if (claimed.count !== 1) throw new Error("PUBLISH_PLAN_ALREADY_CLAIMED_OR_CANCELLED");
+      return tx.publishAttempt.create({ data: { publishPlanId: plan.id, attemptNumber, status: "RUNNING", idempotencyKey: `${plan.idempotencyKey}:attempt:${attemptNumber}`, startedAt: new Date() } });
     });
-    if (claimed.count !== 1) throw new Error("PUBLISH_PLAN_ALREADY_CLAIMED_OR_CANCELLED");
-    const attempt = await this.prisma.publishAttempt.create({ data: { publishPlanId: plan.id, attemptNumber, status: "RUNNING", idempotencyKey: `${plan.idempotencyKey}:attempt:${attemptNumber}`, startedAt: new Date() } });
+    const attempt = claimed;
     let confirmedExternalId: string | null = null;
     try {
       const config = loadConfig();

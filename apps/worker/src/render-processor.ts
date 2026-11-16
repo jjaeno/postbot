@@ -1,3 +1,4 @@
+import { assertExecutionOwner } from "@postbot/database";
 import { loadConfig } from "@postbot/config";
 import { readAssetUsagePurpose, AssetRepository, assetNeedsReview } from "@postbot/asset-library";
 import { RenderJobPayloadSchema } from "@postbot/contracts";
@@ -134,8 +135,11 @@ export class RenderProcessor {
       const config = loadConfig();
       const rate = config.RENDER_COST_MODE === "free" ? 0 : config.APP_ENV === "local" || config.APP_ENV === "test" ? 0.01 : config.RENDER_USD_PER_MINUTE;
       await audioAssets.recordProviderCost({ contentItemId: input.contentItemId, productionJobId: jobId, provider: "renderer", model: "remotion-ffmpeg", operation: "video-render", quantity: qa.durationSeconds / 60, unit: "minute", category: "render", estimatedCostUsd: (qa.durationSeconds / 60 * rate).toFixed(6), idempotencyKey: `render:${input.idempotencyKey}` });
-      await this.prisma.sceneVersion.update({ where: { id: sceneVersion.id }, data: { renderManifest: manifest, sceneDocument, durationSeconds: expectedDuration } });
-      if (sceneVersion.scriptVersionId) await this.prisma.scriptVersion.update({ where: { id: sceneVersion.scriptVersionId }, data: { durationSeconds: expectedDuration } });
+      await this.prisma.$transaction(async (tx) => {
+      await assertExecutionOwner(tx);
+      await tx.sceneVersion.update({ where: { id: sceneVersion.id }, data: { renderManifest: manifest, sceneDocument, durationSeconds: expectedDuration } });
+      if (sceneVersion.scriptVersionId) await tx.scriptVersion.update({ where: { id: sceneVersion.scriptVersionId }, data: { durationSeconds: expectedDuration } });
+      });
       return manifest;
     } finally {
       await rm(directory, { recursive: true, force: true });
