@@ -406,6 +406,7 @@ model CollectionRule {
   allowedSources             Json?
   excludedSources            Json?
   recencyHours               Int
+  selectionPolicy            Json?
   collectionFrequencyMinutes Int
   isActive                   Boolean  @default(true)
   createdAt                  DateTime @default(now()) @db.DateTime(3)

@@ -2,6 +2,7 @@ import { estimateLlmInputTokens } from "@postbot/providers";
 import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import {
   AutomationBudgetRequestSchema,
+  TopicSelectionPolicySchema,
   AutomationControlRequestSchema,
   AutomationRunRequestSchema,
   AutomationRunResponseSchema,
@@ -681,6 +682,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
             excludedKeywords: list(rule.excludedKeywords),
             excludedTopics: list(channel.excludedTopics),
             recencyHours: rule.recencyHours,
+            selectionPolicy: TopicSelectionPolicySchema.parse(rule.selectionPolicy ?? {}),
             idempotencyKey: `automation:${runId}:collect`
           }
         }

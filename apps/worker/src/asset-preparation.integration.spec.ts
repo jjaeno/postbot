@@ -52,6 +52,11 @@ enabled("asset and TTS worker integration", () => {
     expect(await prisma.providerUsage.count({ where: { productionJobId: job.id } })).toBe(0);
     const assets = new AssetRepository(prisma, new FakeStorageProvider());
     const stock = await assets.store({ channelId: fixture.channel.id, kind: "IMAGE", origin: "STOCK_FREE", key: `stock-${fixture.suffix}`, body: new TextEncoder().encode(`stock-${fixture.suffix}`), mimeType: "image/png", source: { provider: "fixture" }, license: { status: "verified", commercialUseAllowed: true, derivativeAllowed: true, attributionRequired: false, attributionText: null, proofUrl: "https://example.com/license" } });
+    expect(await processor.processAsset(payload, job.id)).toMatchObject({ needsReview: true, reviewCode: "STOCK_MATCH_REQUIRED", metadataMissing: true });
+    await prisma.assetSource.create({ data: { assetId: stock.assetId, provider: "owner-metadata", providerResponse: { description: "Unrelated ocean wildlife", tags: ["ocean"] } } });
+    expect(await processor.processAsset(payload, job.id)).toMatchObject({ needsReview: true, reviewCode: "STOCK_MATCH_REQUIRED" });
+    expect(await prisma.providerUsage.count({ where: { productionJobId: job.id } })).toBe(0);
+    await prisma.assetSource.create({ data: { assetId: stock.assetId, provider: "owner-metadata", providerResponse: { description: fixture.suffix, tags: [] } } });
     const result = await processor.processAsset(payload, job.id);
     expect(result.needsReview).toBe(false);
     const usages = await prisma.assetUsage.findMany({ where: { sceneVersionId: fixture.sceneVersion.id }, include: { asset: true } });

@@ -12,6 +12,8 @@ describe("shared manual/automatic topic scoring", () => {
     expect(fresh.freshnessScore).toBe(1); expect(old.freshnessScore).toBe(0);
     expect(fresh.eventAt).toBe("1789-01-01T00:00:00Z");
     expect(fresh.expectedValueScore).toBeGreaterThan(old.expectedValueScore);
+    expect(old.rejectionReason).toBe("OUTSIDE_FRESHNESS_POLICY");
+    expect(scoreTopicCandidate({ ...candidate, publishedAt: "2026-10-01T00:00:00Z" }, { ...settings, selectionPolicy: { freshness: "EVERGREEN" } }, now).rejectionReason).toBeNull();
   });
   it("normalizes tracking URLs and honors URL-prefix source allowlists", () => {
     const first = scoreTopicCandidate(candidate, settings, now);
@@ -23,5 +25,7 @@ describe("shared manual/automatic topic scoring", () => {
     expect(scoreTopicCandidate(candidate, { ...settings, excludedKeywords: ["HISTORY"] }, now).rejectionReason).toContain("Blocked term");
     expect(scoreTopicCandidate(candidate, settings, now).suitabilityScore).toBe(1);
     expect(scoreTopicCandidate(candidate, { ...settings, keywords: ["ocean"] }, now).suitabilityScore).toBe(0);
+    expect(scoreTopicCandidate(candidate, { ...settings, keywords: ["ocean"] }, now).rejectionReason).toBe("KEYWORD_MISMATCH");
+    expect(scoreTopicCandidate(candidate, { ...settings, keywords: ["ocean"], selectionPolicy: { keywordMatch: "PREFER" } }, now).rejectionReason).toBeNull();
   });
 });

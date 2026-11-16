@@ -4,11 +4,12 @@ import type {
   IdeaStatus,
   UpdateIdeaStatusRequest
 } from "@postbot/contracts";
-import type { TopicSourceCandidate } from "@postbot/providers";
+import type { TopicSourceCandidate, TopicSelectionPolicy } from "@postbot/providers";
 
 export const IDEAS_REPOSITORY = Symbol("IDEAS_REPOSITORY");
 
 export type ChannelCollectionSettings = {
+  selectionPolicy?: TopicSelectionPolicy;
   channelId: string;
   topic: string;
   excludedTopics: readonly string[];

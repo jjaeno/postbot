@@ -456,18 +456,19 @@ export class DeterministicJobProcessor {
   }
 
   private async needsReview(jobId: string, attemptNumber: number, result: Record<string, unknown>, errorCode = "ASSET_LICENSE_REVIEW_REQUIRED"): Promise<void> {
+    const stockMessage = "장면에 맞는 스톡 이미지가 없습니다. 이미지 설명·태그를 보완하거나 관련 소재를 등록한 뒤 재시도하세요.";
     await this.finish(jobId, attemptNumber, "NEEDS_REVIEW", {
       status: "NEEDS_REVIEW",
       result: result as Prisma.InputJsonObject,
       finishedAt: new Date(),
       errorCode,
-      errorMessage: errorCode === "AMBIGUOUS_PUBLISH_RECONCILIATION_REQUIRED" ? "Publication outcome requires reconciliation before retry; no automatic re-upload." : result.reconciliationRequired === true ? "Provider call outcome and billing require reconciliation before retry; no automatic paid retry." : errorCode === "POLICY_REVIEW_REQUIRED" ? "Policy findings require manual review." : "Asset license requires manual review."
+      errorMessage: errorCode === "STOCK_MATCH_REQUIRED" ? stockMessage : errorCode === "AMBIGUOUS_PUBLISH_RECONCILIATION_REQUIRED" ? "Publication outcome requires reconciliation before retry; no automatic re-upload." : result.reconciliationRequired === true ? "Provider call outcome and billing require reconciliation before retry; no automatic paid retry." : errorCode === "POLICY_REVIEW_REQUIRED" ? "Policy findings require manual review." : "Asset license requires manual review."
     });
     const job = await this.prisma.productionJob.findUnique({ where: { id: jobId }, select: { payload: true, type: true } });
     const runId = job ? automationRunId(job.payload as Record<string, unknown>) : null;
     if (runId && job && result.reconciliationRequired !== true) await this.settleReservation(runId, jobId, job.type, false);
     if (runId) await this.prisma.$transaction([
-      this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "HELD", attemptCount: attemptNumber, output: result as Prisma.InputJsonObject, errorCode, errorMessage: "Manual review is required.", finishedAt: new Date() } }),
+      this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "HELD", attemptCount: attemptNumber, output: result as Prisma.InputJsonObject, errorCode, errorMessage: errorCode === "STOCK_MATCH_REQUIRED" ? stockMessage : "Manual review is required.", finishedAt: new Date() } }),
       this.prisma.automationRun.updateMany({ where: { id: runId, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "RUNNING", pausedReason: null, heartbeatAt: new Date(), nextRunAt: new Date() } })
     ]);
   }

@@ -39,3 +39,14 @@
 - DB 구조 추가 없음: 기존 JSON snapshot의 증거 메타데이터를 확장했다. 이전 원문/확인을 추정 backfill하지 않는다. 롤백하면 기존 코드의 약한 URL 판정이 다시 가능하므로 자동 운영을 재개하기 전에 주의가 필요하다.
 - 공식 [Responses API max_output_tokens](https://developers.openai.com/api/reference/resources/responses/methods/create) 확인일 2026-11-17. OpenAI Docs 스킬 사용. 네트워크는 Mock이며 실제 유료 호출 없음.
 - 검증: 관련 worker 17건, API 15건(동시 예산 예약 포함), policy-engine 9건, OpenAI Mock 5건, config 10건 통과. 긴 원문/최대 출력 예약, 스키마 오류 뒤 예약 축소 시 재호출 차단, 발생 비용 보존, 오래된 수동 확인 무효화를 포함한다. 변경 app/package lint·typecheck 성공. 기존 media fixture의 비정상 reservation key/누락 플랫폼은 실제 운영 계약에 맞게 수정하고 기존 불명확 호출 차단 테스트를 재검증했다.
+
+## 4단계: 후보·스톡 선정
+
+- 부분적으로 이미 해결: 저장된 후보에도 제외어·출처 필터를 적용했다. 확인: 과거 저장 점수 순서대로 선택했고 최신성은 감점만 했으며 예약 취소 해제와 사건 단위 비교가 없었다. 스톡은 등록 순서 순환 배정이었다.
+- `collectionRule.selectionPolicy`: freshness=NEWS(기본)/EVERGREEN, keywordMatch=REQUIRED(기본)/PREFER, semanticDuplicateThreshold=0.65(0.2~1), recentTopicDays=30(1~365). 채널 생성/설정 API에서 지정 가능하다. NEWS는 publication date가 없거나 recencyHours 밖이면 제외하며 historical eventAt과 혼동하지 않는다. EVERGREEN은 발행 나이로 탈락시키지 않는다. 필수 키워드 비일치는 제외, PREFER는 낮은 적합도 점수로 남긴다.
+- 선택 DB 트랜잭션 안에서 현재 active CollectionRule과 채널 제외 조건을 다시 읽고 저장 후보 모두를 재평가·재정렬한다. 활성 실행의 예약과 사용 완료 후보는 가져오지 않는다. 실패/취소/완료 실행의 미사용 예약은 불명확 SCRIPT가 없는 경우만 해제한다. 같은 실행의 유효한 예약은 재시도 멱등성을 위해 유지한다.
+- 채널 적합도·최신성·출처 신뢰·설명 가치·영상화 적합도·본문량 기반 비용 proxy·최근 주제 중복 점수와 선택 사유를 저장한다. 실제 비용 예측이나 성공 확률로 표시하지 않는다. 비교 가능한 과거 성과가 없으면 null로 남긴다. Jaccard 텍스트 유사도의 임계값과 기간을 조정할 수 있고 공통 함수로 향후 matcher 확장이 가능하다. 다른 URL의 같은 사건을 줄이는 규칙이며 동의어·다국어 의미 전체를 판별하는 모델이라고 주장하지 않는다. 추가 API 호출 비용은 0이다.
+- migration `202611170003_selection_policy`: nullable JSON. 기존 null은 위 기본 정책으로 해석하고 오래된 점수를 신뢰하지 않는다. 기존 후보의 evaluation은 다음 선택 시 다시 저장한다. 컬럼 제거 rollback은 사용자 정책을 잃으며 이전 느슨한 선정으로 돌아간다.
+- 스톡: 권리·기간·채널 검사를 통과한 후보만 설명/태그와 visualPrompt를 비교한다. 최근 30일 사용 및 같은 영상 내 반복을 감점한다. 기준(0.25) 미달이면 `STOCK_MATCH_REQUIRED`와 장면 ID/메타데이터 부족 여부로 보류하며 무관한 이미지를 강제 배정하지 않는다. 모든 스톡 장면의 매칭을 유료 이미지 생성 전에 확인한다.
+- 기존 자산 메타데이터 보완: 소유자가 업로드 화면에서 이미지 설명을 입력해 같은 파일을 다시 등록하거나 `PATCH /channels/:channelId/stock-assets/:assetId/metadata`에 `{description,tags}`를 보낸다. 기존 권리 증빙은 덮어쓰지 않는다. metadata PATCH 후 기존 보류 실행을 재시도한다. 재등록은 기존 보류 재개 흐름을 사용한다. AssetSource JSON 이력을 사용하므로 자산 테이블 migration은 없다.
+- 검증: worker 선정/소재 3건, API 아이디어/스톡 권한/채널/자동화 23건, topic scoring 3건, asset-library 7건, web 10건(총 46건) 통과. 변경 app/package lint·typecheck 통과. 기존 데이터 DB에 selectionPolicy migration 성공. 테스트는 과거 점수 역전, 현재 rule 재조회, 유효한 다른 실행 예약 유지, 취소 예약 해제, 다른 기사 제목의 사건 중복, 메타데이터 없음/무관함에서 유료 작업 0건, 보완 후 재시도와 권리·채널 격리를 확인한다.

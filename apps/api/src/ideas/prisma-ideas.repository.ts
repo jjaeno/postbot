@@ -1,3 +1,4 @@
+import { TopicSelectionPolicySchema } from "@postbot/contracts";
 import { Inject, Injectable } from "@nestjs/common";
 import type { CollectIdeasResponse, ContentIdea, IdeaStatus, UpdateIdeaStatusRequest } from "@postbot/contracts";
 import { Prisma, type PrismaClient } from "@postbot/database";
@@ -60,6 +61,7 @@ export class PrismaIdeasRepository implements IdeasRepository {
       excludedKeywords: jsonArray(collectionRule?.excludedKeywords),
       allowedSources: jsonArray(collectionRule?.allowedSources),
       excludedSources: jsonArray(collectionRule?.excludedSources),
+      selectionPolicy: TopicSelectionPolicySchema.parse(collectionRule?.selectionPolicy ?? {}),
       recencyHours: collectionRule?.recencyHours ?? 72
     };
   }
@@ -97,6 +99,7 @@ export class PrismaIdeasRepository implements IdeasRepository {
               url: candidate.url,
               bodyHash: candidate.contentHash,
               body: candidate.body.slice(0, 10_000),
+              contentScope: candidate.reliabilityMetadata?.contentScope === "FULL_TEXT" ? "FULL_TEXT" : "SUMMARY",
               eventAt: candidate.eventAt ?? null,
               reliability: candidate.reliabilityMetadata ? JSON.parse(JSON.stringify(candidate.reliabilityMetadata)) as Prisma.InputJsonObject : null
             }

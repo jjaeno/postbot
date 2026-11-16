@@ -24,6 +24,9 @@ suite("owned stock registration", () => {
     await expect(controller.upload(req, channel.id, { ...input, proofUrl: "http://example.com/license" })).rejects.toThrow("STOCK_IMAGE_AND_LICENSE_REQUIRED");
     const asset = await controller.upload(req, channel.id, input);
     expect(await controller.list(req, channel.id)).toEqual({ assets: [{ id: asset.id }] });
+    await expect(controller.metadata({ ...req, auth: { ...req.auth, workspace: { ...req.auth.workspace, role: "MEMBER" } } }, channel.id, asset.id, { description: "Rocket recovery", tags: ["rocket"] })).rejects.toThrow("OWNER_ROLE_REQUIRED");
+    await expect(controller.metadata(req, channel.id, "foreign-asset", { description: "Rocket", tags: [] })).rejects.toThrow("STOCK_ASSET_NOT_FOUND");
+    await expect(controller.metadata(req, channel.id, asset.id, { description: "Rocket recovery", tags: ["rocket", "booster"] })).resolves.toEqual({ id: asset.id });
     expect((await prisma.automationRun.findUniqueOrThrow({ where: { id: run.id } })).status).toBe("QUEUED");
     expect((await prisma.automationStep.findFirstOrThrow({ where: { automationRunId: run.id } })).status).toBe("PENDING");
     const proofs = await prisma.assetLicense.count({ where: { assetId: asset.id } });

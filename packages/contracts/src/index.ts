@@ -76,7 +76,9 @@ export const ConnectionStatusSchema = z.enum(["PLANNED", "CONNECTED", "EXPIRED",
 
 export const JsonObjectSchema = z.record(z.string(), z.unknown());
 
+export const TopicSelectionPolicySchema = z.object({ freshness: z.enum(["NEWS", "EVERGREEN"]).optional(), keywordMatch: z.enum(["REQUIRED", "PREFER"]).optional(), semanticDuplicateThreshold: z.number().min(0.2).max(1).optional(), recentTopicDays: z.number().int().min(1).max(365).optional() });
 export const CollectionRuleSchema = z.object({
+  selectionPolicy: TopicSelectionPolicySchema.optional(),
   keywords: z.array(z.string().min(1).max(80)).min(1).max(20),
   excludedKeywords: z.array(z.string().min(1).max(80)).max(20).default([]),
   allowedSources: z.array(z.string().url()).max(20).default([]),
@@ -549,6 +551,7 @@ export const AutomationJobContextSchema = z.object({
 
 export const CollectAutomationJobPayloadSchema = AutomationJobContextSchema.extend({
   collect: z.object({
+    selectionPolicy: TopicSelectionPolicySchema.optional(),
     channelId: z.string().min(1),
     topic: z.string().min(1),
     language: z.string().min(2).max(16),

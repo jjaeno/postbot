@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, ForbiddenException, Get, Inject, NotFoundException, Param, Post, Req, UseGuards } from "@nestjs/common";
+import { BadRequestException, Body, Controller, ForbiddenException, Get, Inject, NotFoundException, Param, Patch, Post, Req, UseGuards } from "@nestjs/common";
 import type { PrismaClient } from "@postbot/database";
 import { loadConfig } from "@postbot/config";
 import { AssetRepository, checksumSha256, assetNeedsReview } from "@postbot/asset-library";
@@ -9,6 +9,8 @@ import { AccessTokenGuard } from "../auth/access-token.guard.js";
 import type { AuthenticatedRequest } from "../auth/request-types.js";
 
 const StockInput = z.object({
+  description: z.string().max(2000).optional(),
+  tags: z.array(z.string().min(1).max(80)).max(30).optional(),
   bodyBase64: z.string().min(1).max(1_400_000).regex(/^[A-Za-z0-9+/]+={0,2}$/),
   mimeType: z.enum(["image/png", "image/jpeg"]),
   licenseName: z.string().min(1).max(120),
@@ -42,6 +44,18 @@ export class StockAssetsController {
     return { assets: (await repository.selectLicensedStock(channelId)).map((asset) => ({ id: asset.assetId })) };
   }
 
+  @Patch(":assetId/metadata")
+  async metadata(@Req() req: AuthenticatedRequest, @Param("channelId") channelId: string, @Param("assetId") assetId: string, @Body() raw: unknown) {
+    if (req.auth.workspace.role !== "OWNER") throw new ForbiddenException("OWNER_ROLE_REQUIRED");
+    await this.repository(req.auth.workspaceId, channelId);
+    const input = z.object({ description: z.string().max(2000), tags: z.array(z.string().min(1).max(80)).max(30) }).strict().safeParse(raw);
+    if (!input.success) throw new BadRequestException("INVALID_STOCK_METADATA");
+    if (!await this.prisma.asset.findFirst({ where: { id: assetId, channelId, kind: "IMAGE", origin: { not: "AI_GENERATED" } } })) throw new NotFoundException("STOCK_ASSET_NOT_FOUND");
+    await this.prisma.assetSource.create({ data: { assetId, provider: "owner-metadata", providerResponse: input.data } });
+    await this.prisma.auditLog.create({ data: { workspaceId: req.auth.workspaceId, userId: req.auth.userId, action: "stock.asset.metadata", targetType: "asset", targetId: assetId } });
+    return { id: assetId };
+  }
+
   @Post()
   async upload(@Req() req: AuthenticatedRequest, @Param("channelId") channelId: string, @Body() raw: unknown) {
     if (req.auth.workspace.role !== "OWNER") throw new ForbiddenException("OWNER_ROLE_REQUIRED");
@@ -62,11 +76,12 @@ export class StockAssetsController {
     // Re-upload cannot silently replace proof and bypass output invalidation.
     if (!result.duplicate) await this.prisma.assetLicense.create({ data: { assetId: result.assetId, status: "VERIFIED", licenseName: input.licenseName, commercialUseAllowed: true, derivativeAllowed: true, proofUrl: input.proofUrl, checkedAt: new Date() } });
     await this.prisma.auditLog.create({ data: { workspaceId: req.auth.workspaceId, userId: req.auth.userId, action: "stock.asset.register", targetType: "asset", targetId: result.assetId } });
+    if (input.description !== undefined || input.tags !== undefined) await this.prisma.assetSource.create({ data: { assetId: result.assetId, provider: "owner-metadata", providerResponse: { description: input.description ?? "", tags: input.tags ?? [] } } });
     // Held stock jobs retry through their existing scene/job idempotency keys.
-    const held = await this.prisma.automationStep.findMany({ where: { stage: "ASSET", status: "HELD", errorCode: "STOCK_ASSET_REQUIRED", automationRun: { channelId, status: { in: ["PAUSED", "RUNNING"] } } } });
+    const held = await this.prisma.automationStep.findMany({ where: { stage: "ASSET", status: "HELD", errorCode: { in: ["STOCK_ASSET_REQUIRED", "STOCK_MATCH_REQUIRED"] }, automationRun: { channelId, status: { in: ["PAUSED", "RUNNING"] } } } });
     for (const step of held) await this.prisma.$transaction([
       this.prisma.automationStep.update({ where: { id: step.id }, data: { status: "PENDING", errorCode: null, errorMessage: null, finishedAt: null } }),
-      this.prisma.automationRun.updateMany({ where: { id: step.automationRunId, OR: [{ status: { in: ["QUEUED", "RUNNING"] } }, { status: "PAUSED", pausedReason: { in: ["STOCK_ASSET_REQUIRED", "BRANCH_HELD"] } }] }, data: { status: "QUEUED", pausedReason: null, nextRunAt: new Date() } })
+      this.prisma.automationRun.updateMany({ where: { id: step.automationRunId, OR: [{ status: { in: ["QUEUED", "RUNNING"] } }, { status: "PAUSED", pausedReason: { in: ["STOCK_ASSET_REQUIRED", "STOCK_MATCH_REQUIRED", "BRANCH_HELD"] } }] }, data: { status: "QUEUED", pausedReason: null, nextRunAt: new Date() } })
     ]);
     return { id: result.assetId };
   }

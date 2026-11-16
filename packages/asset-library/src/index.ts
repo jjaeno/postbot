@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { Prisma, type PrismaClient } from "@postbot/database";
 import type { ImageProvider, StorageProvider, TtsProvider } from "@postbot/providers";
+export { scoreStockMatch, type StockCandidate } from "./stock-matching.js";
+import type { StockCandidate } from "./stock-matching.js";
 
 export type AssetLicenseStatus = "verified" | "unknown" | "rejected" | "expired";
 
@@ -87,10 +89,14 @@ export class AssetRepository {
     return this.findAllowedFallback("AUDIO");
   }
 
-  async selectLicensedStock(channelId: string): Promise<Array<{ assetId: string; storageKey: string }>> {
-    const candidates = await this.prisma.asset.findMany({ where: { channelId, kind: "IMAGE", origin: { in: ["STOCK_FREE", "STOCK_PAID", "PUBLIC_DOMAIN", "INTERNAL"] } }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
-    const allowed = [];
-    for (const candidate of candidates) if (!assetNeedsReview(await this.getLicense(candidate.id))) allowed.push({ assetId: candidate.id, storageKey: candidate.storageKey });
+  async selectLicensedStock(channelId: string): Promise<StockCandidate[]> {
+    const candidates = await this.prisma.asset.findMany({ where: { channelId, kind: "IMAGE", origin: { in: ["STOCK_FREE", "STOCK_PAID", "PUBLIC_DOMAIN", "INTERNAL"] } }, include: { sources: { orderBy: [{ createdAt: "desc" }, { id: "desc" }] }, _count: { select: { usages: { where: { createdAt: { gte: new Date(Date.now() - 30 * 86_400_000) } } } } } }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
+    const allowed: StockCandidate[] = [];
+    for (const candidate of candidates) if (!assetNeedsReview(await this.getLicense(candidate.id))) {
+      const source = candidate.sources.find((source) => source.providerResponse && typeof source.providerResponse === "object" && !Array.isArray(source.providerResponse) && ("description" in source.providerResponse || "tags" in source.providerResponse));
+      const metadata = source?.providerResponse && typeof source.providerResponse === "object" && !Array.isArray(source.providerResponse) ? source.providerResponse : {};
+      allowed.push({ assetId: candidate.id, storageKey: candidate.storageKey, description: typeof metadata.description === "string" ? metadata.description : "", tags: Array.isArray(metadata.tags) ? metadata.tags.filter((tag): tag is string => typeof tag === "string") : [], recentUseCount: candidate._count.usages });
+    }
     return allowed;
   }
 

@@ -1,4 +1,4 @@
-export { canonicalizeTopicUrl, scoreTopicCandidate } from "./topic-scoring.js";
+export { canonicalizeTopicUrl, scoreTopicCandidate, topicSimilarity, topicTokens, type TopicSelectionPolicy } from "./topic-scoring.js";
 
 export interface ProviderResult {
   readonly provider: string;
@@ -215,14 +215,14 @@ const sourceAllowed = (
 };
 
 export class FixtureTopicSourceProvider implements TopicSourceProvider {
-  constructor(private readonly candidates: readonly TopicSourceCandidate[] = fixtureCandidates) {}
+  constructor(private readonly candidates?: readonly TopicSourceCandidate[]) {}
 
   collect(request: TopicSourceRequest): Promise<TopicSourceResult> {
     if (request.keywords.includes("fixture-source-failure")) {
       return Promise.reject(new Error("Fixture source failure."));
     }
     const lowerTerms = [request.topic, ...request.keywords].map((term) => term.toLowerCase());
-    const candidates = this.candidates.filter((candidate) => {
+    const candidates = (this.candidates ?? fixtureCandidates.map((candidate) => ({ ...candidate, publishedAt: new Date().toISOString() }))).filter((candidate) => {
       const haystack = `${candidate.title} ${candidate.summary} ${candidate.body}`.toLowerCase();
       return lowerTerms.some((term) => haystack.includes(term)) && sourceAllowed(candidate, request.allowedSources, request.excludedSources);
     });
