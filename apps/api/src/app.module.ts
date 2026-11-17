@@ -17,6 +17,7 @@ import { AutomationModule } from "./automation/automation.module.js";
 import { AnalyticsModule } from "./analytics/analytics.module.js";
 import { OptimizationModule } from "./optimization/optimization.module.js";
 import { OperationsModule } from "./operations/operations.module.js";
+import { ProductionModule } from "./production/production.module.js";
 
 @Module({
   imports: [
@@ -39,7 +40,8 @@ import { OperationsModule } from "./operations/operations.module.js";
     AutomationModule,
     AnalyticsModule,
     OptimizationModule,
-    OperationsModule
+    OperationsModule,
+    ProductionModule
   ],
   controllers: [AppController],
   providers: [
