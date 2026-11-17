@@ -69,7 +69,7 @@ export class ProductionService {
           // Return billing fields, never raw provider responses or journals.
           usage: content.providerUsages.map((usage) => ({ id: usage.id, productionJobId: usage.productionJobId, provider: usage.provider, model: usage.model,
             operation: usage.operation, quantity: usage.quantity.toString(), unit: usage.unit, currency: usage.currency,
-            estimatedCost: usage.estimatedCost?.toString() ?? null, actualCost: usage.actualCost?.toString() ?? null })),
+            estimatedCost: usage.estimatedCost?.toString() ?? null, actualCost: usage.actualCost?.toString() ?? null, billingState: usage.billingState, billingRevision: usage.billingRevision })),
           reviewReasons: reasons, observedAt: new Date().toISOString()
         };
       });

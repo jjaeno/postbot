@@ -10,6 +10,7 @@ import {
 } from "@postbot/contracts";
 import { assertExecutionOwner, Prisma, type PrismaClient } from "@postbot/database";
 import { estimateLlmInputTokens, FakeLlmProvider, FakeStorageProvider, OpenAiLlmProvider, type LlmGenerationRequest, type LlmGenerationResult, type LlmProvider } from "@postbot/providers";
+import { ProviderCallError } from "@postbot/providers";
 import { alignSceneNarration, AudioStyleSchema, sceneReuseDecision, SceneDocumentSchema, VideoStyleSchema, type SceneDocument } from "@postbot/scene-schema";
 import { createHash } from "node:crypto";
 import { z } from "zod";
@@ -101,6 +102,8 @@ export class ScriptGenerationProcessor {
       await tx.$queryRaw`SELECT id FROM automation_cost_reservations WHERE id = ${reservation.id} FOR UPDATE`;
       const currentReservation = await tx.automationCostReservation.findUniqueOrThrow({ where: { id: reservation.id } });
       if (currentReservation.releasedAt || currentReservation.settledAt) throw new Error("BUDGET_RESERVATION_EXHAUSTED");
+      const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
+      if (currentReservation.createdAt < dayStart) throw new Error("BUDGET_WINDOW_REAUTHORIZATION_REQUIRED");
       const related = await tx.productionJob.findMany({ where: { type: "SCRIPT", AND: [{ payload: { path: "$.automation.runId", equals: automation.runId } }, { payload: { path: "$.automation.platform", equals: automation.platform } }] }, select: { id: true, payload: true } });
       if (related.some((item) => item.id !== jobId && Object.values(jsonObject(jsonObject(item.payload)._llmAttempts ?? null)).some((value) => jsonObject(value ?? null).state === "STARTED"))) throw new Error("AMBIGUOUS_LLM_CALL_RECONCILIATION_REQUIRED");
       const spent = await tx.providerUsage.aggregate({ where: { productionJobId: { in: related.map((item) => item.id) } }, _sum: { estimatedCost: true } });
@@ -119,7 +122,7 @@ export class ScriptGenerationProcessor {
       // A definite 4xx rejection may be retried according to provider policy.
       // A timeout, incomplete response or interrupted DB write can have incurred
       // a charge: retain STARTED and require reconciliation before another call.
-      if (error instanceof Error && /status 4\d\d\./.test(error.message)) { await this.updateLlmJournal(jobId, key, { state: "REJECTED" }); throw error; }
+      if (error instanceof ProviderCallError && error.rejected) { await this.updateLlmJournal(jobId, key, { state: "REJECTED" }); throw error; }
       throw new Error("AMBIGUOUS_LLM_CALL_RECONCILIATION_REQUIRED");
     }
   }
@@ -214,7 +217,8 @@ export class ScriptGenerationProcessor {
         return { ...structured, model: response.model, usage: config.LLM_PROVIDER === "openai" ? knownUsage : response.usage, estimatedCostUsd: config.LLM_PROVIDER === "openai" ? knownCost.toFixed(6) : response.estimatedCostUsd, generationContext: { ...generationContext, editorialQuality }, strategyVersion: channel?.strategyVersions[0]?.version ?? null };
       } catch (error) {
         lastError = error;
-        if (error instanceof Error && ["AMBIGUOUS_LLM_CALL_RECONCILIATION_REQUIRED", "BUDGET_RESERVATION_EXHAUSTED", "BUDGET_WORKFLOW_REQUIRED", "CHANNEL_GENERATION_COST_LIMIT"].includes(error.message)) break;
+        if (error instanceof ProviderCallError) break;
+        if (error instanceof Error && ["AMBIGUOUS_LLM_CALL_RECONCILIATION_REQUIRED", "BUDGET_RESERVATION_EXHAUSTED", "BUDGET_WINDOW_REAUTHORIZATION_REQUIRED", "BUDGET_WORKFLOW_REQUIRED", "CHANNEL_GENERATION_COST_LIMIT"].includes(error.message)) break;
       }
     }
     await this.prisma.$transaction(async (tx) => {

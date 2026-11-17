@@ -4,6 +4,7 @@ import { AssetPreparationJobPayloadSchema, TtsPreparationJobPayloadSchema } from
 import { assertExecutionOwner, type Prisma, type PrismaClient } from "@postbot/database";
 import { FakeImageProvider, FakeStorageProvider, FakeTtsProvider, GoogleImageProvider, ElevenLabsTtsProvider, S3StorageProvider, resolveTtsVoice } from "@postbot/providers";
 import type { StorageProvider } from "@postbot/providers";
+import { ProviderCallError } from "@postbot/providers";
 import { SceneDocumentSchema, aiSceneCount, normalizeNarration } from "@postbot/scene-schema";
 import { createHash } from "node:crypto";
 
@@ -35,6 +36,10 @@ export class AssetPreparationProcessor {
       await tx.$queryRaw`SELECT id FROM production_jobs WHERE id = ${jobId} FOR UPDATE`;
       const job = await tx.productionJob.findUniqueOrThrow({ where: { id: jobId } });
       const payload: Prisma.JsonObject = job.payload && typeof job.payload === "object" && !Array.isArray(job.payload) ? job.payload : {};
+      const automation = payload.automation && typeof payload.automation === "object" && !Array.isArray(payload.automation) ? payload.automation : {};
+      const reservation = typeof automation.runId === "string" && typeof automation.platform === "string" ? await tx.automationCostReservation.findUnique({ where: { idempotencyKey: `automation:${automation.runId}:${job.type.toLowerCase()}:${automation.platform.toLowerCase()}:cost` } }) : null;
+      const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
+      if (!reservation || reservation.settledAt || reservation.releasedAt || reservation.createdAt < dayStart) throw new ProviderCallError("BUDGET", true, false);
       const journal: Prisma.JsonObject = payload._mediaCalls && typeof payload._mediaCalls === "object" && !Array.isArray(payload._mediaCalls) ? payload._mediaCalls : {};
       if (journal[key] === "COMPLETED" && !(await canReuse())) throw new Error("AMBIGUOUS_MEDIA_CALL_RECONCILIATION_REQUIRED");
       if (journal[key] === "STARTED") throw new Error("AMBIGUOUS_MEDIA_CALL_RECONCILIATION_REQUIRED");
@@ -50,7 +55,19 @@ export class AssetPreparationProcessor {
         await tx.productionJob.update({ where: { id: jobId }, data: { payload: { ...payload, _mediaCalls: { ...journal, [key]: "COMPLETED" } } } });
       });
       return result;
-    } catch { throw new Error("AMBIGUOUS_MEDIA_CALL_RECONCILIATION_REQUIRED"); }
+    } catch (error) {
+      if (error instanceof ProviderCallError && error.rejected) {
+        await this.prisma.$transaction(async (tx) => {
+          await tx.$queryRaw`SELECT id FROM production_jobs WHERE id = ${jobId} FOR UPDATE`;
+          const job = await tx.productionJob.findUniqueOrThrow({ where: { id: jobId } });
+          const payload: Prisma.JsonObject = job.payload && typeof job.payload === "object" && !Array.isArray(job.payload) ? job.payload : {};
+          const journal = payload._mediaCalls && typeof payload._mediaCalls === "object" && !Array.isArray(payload._mediaCalls) ? payload._mediaCalls : {};
+          await tx.productionJob.update({ where: { id: jobId }, data: { payload: { ...payload, _mediaCalls: { ...journal, [key]: "REJECTED" } } } });
+        });
+        throw error;
+      }
+      throw new Error("AMBIGUOUS_MEDIA_CALL_RECONCILIATION_REQUIRED");
+    }
   }
 
   async processAsset(payload: Record<string, unknown>, jobId: string): Promise<Record<string, unknown>> {

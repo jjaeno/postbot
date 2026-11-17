@@ -2,6 +2,7 @@ import { Prisma, PrismaClient } from "@prisma/client";
 
 export { Prisma, PrismaClient };
 export { assertJobScope } from "./job-scope.js";
+export { settleJobReservation } from "./cost-settlement.js";
 export { assertExecutionOwner, jobExecution } from "./job-execution.js";
 
 export type DatabaseClient = PrismaClient;

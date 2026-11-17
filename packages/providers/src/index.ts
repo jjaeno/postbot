@@ -2,6 +2,8 @@ export { canonicalizeTopicUrl, scoreTopicCandidate, topicSimilarity, topicTokens
 export { SafeExternalReader, isPublicAddress, type ExternalDocument } from "./safe-external-reader.js";
 export { OfficialTopicSourceProvider, type DiscoveryRead } from "./official-topic-source.js";
 import { SafeExternalReader } from "./safe-external-reader.js";
+import { httpProviderError } from "./provider-error.js";
+export { ProviderCallError, httpProviderError, type ProviderFailureKind } from "./provider-error.js";
 
 export interface ProviderResult {
   readonly provider: string;
@@ -682,7 +684,7 @@ export class OpenAiLlmProvider implements LlmProvider {
         signal: controller.signal
       });
       if (!response.ok) {
-        throw new Error(`OpenAI Responses API failed with status ${response.status}.`);
+        throw httpProviderError(response);
       }
       const payload = (await response.json()) as OpenAiResponse;
       const usage = payload.usage;
@@ -768,7 +770,7 @@ export class GoogleImageProvider implements ImageProvider {
       const aspectRatio = ratios.find((ratio) => { const [w, h] = ratio.split(":").map(Number); return w && h && Math.abs(request.width / request.height - w / h) < 0.001; });
       if (!aspectRatio) throw new Error("GOOGLE_IMAGE_ASPECT_RATIO_UNSUPPORTED");
       const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(request.model)}:generateContent`, { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": this.options.apiKey }, body: JSON.stringify({ contents: [{ parts: [{ text: request.prompt }] }], generationConfig: { responseModalities: ["TEXT", "IMAGE"], imageConfig: { aspectRatio } } }), signal: controller.signal });
-      if (!response.ok) throw new Error(`Google image API failed with status ${response.status}.`);
+      if (!response.ok) throw httpProviderError(response);
       const payload = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ inlineData?: { mimeType?: string; data?: string } }> } }> };
       const image = payload.candidates?.flatMap((candidate) => candidate.content?.parts ?? []).find((part) => part.inlineData?.data)?.inlineData;
       if (!image?.data || !image.mimeType) throw new Error("Google image API did not return inline image data.");
@@ -833,7 +835,7 @@ export class ElevenLabsTtsProvider implements TtsProvider {
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
     try {
       const response = await (this.options.fetchImplementation ?? fetch)(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(request.voice)}/with-timestamps`, { method: "POST", headers: { "xi-api-key": this.options.apiKey, "Content-Type": "application/json" }, body: JSON.stringify({ text: request.text, model_id: request.model }), signal: controller.signal });
-      if (!response.ok) throw new Error(`ElevenLabs TTS API failed with status ${response.status}.`);
+      if (!response.ok) throw httpProviderError(response);
       const body = await response.json() as { audio_base64?: string; alignment?: CharacterAlignment | null; normalized_alignment?: CharacterAlignment | null };
       if (!body.audio_base64) throw new Error("ElevenLabs TTS response did not include audio.");
       const compact = (text: string) => text.replace(/\s/gu, "");

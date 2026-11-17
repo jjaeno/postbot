@@ -43,7 +43,7 @@ export type StoreAssetInput = { channelId: string | null; kind: "IMAGE" | "VIDEO
 
 export class AssetRepository {
   constructor(private readonly prisma: PrismaClient, private readonly storage: StorageProvider) {}
-  cachedGeneration(input: { channelId: string; inputKey: string; ownerKey: string }, create: (providerKey: string) => Promise<GenerationReceipt>) { return cachedGeneration(this.prisma, this.storage, input, create); }
+  cachedGeneration(input: { channelId: string; inputKey: string; ownerKey: string; callKey?: string }, create: (providerKey: string) => Promise<GenerationReceipt>) { return cachedGeneration(this.prisma, this.storage, input, create); }
   async generationLicense(input: { channelId: string; provider: string; model: string; accountRef: string; contractVersion: string }): Promise<AssetLicenseSnapshot> {
     const now = new Date();
     const policy = input.accountRef && input.contractVersion ? await this.prisma.providerRightsPolicy.findFirst({ where: { ...input, validFrom: { lte: now } }, orderBy: { version: "desc" } }) : null;
@@ -153,7 +153,7 @@ export class AssetPreparationService {
     if (this.options && !input.skipSharedCache) {
       const inputKey = generationInputKey({ kind: "IMAGE", provider: this.options.imageProvider, model: input.model, accountRef: this.options.imageAccountRef, contractVersion: this.options.imageContractVersion,
         prompt: input.prompt, width: 1080, height: 1920, inputVersions: input.inputVersions ?? {} });
-      const receipt = await this.assets.cachedGeneration({ channelId: input.channelId, inputKey, ownerKey: input.productionJobId ?? input.idempotencyKey }, async (providerKey) => {
+      const receipt = await this.assets.cachedGeneration({ channelId: input.channelId, inputKey, ownerKey: input.productionJobId ?? input.idempotencyKey, callKey: input.purpose?.startsWith("scene-image:") ? `image:${input.purpose.split(":").slice(2).join(":")}` : "image" }, async (providerKey) => {
         const result = await this.prepareImage({ ...input, idempotencyKey: providerKey, skipSharedCache: true });
         return { assetId: result.assetId, snapshot: { inputKey, prompt: input.prompt, model: input.model, provider: this.options!.imageProvider, fallback: result.fallback, inputVersions: input.inputVersions ?? {} } };
       });
@@ -186,7 +186,7 @@ export class AssetPreparationService {
     if (this.options && !input.skipSharedCache) {
       const inputKey = generationInputKey({ kind: "TTS", provider: this.options.ttsProvider, model: input.model, voice: input.voice, text: input.text,
         accountRef: this.options.ttsAccountRef, contractVersion: this.options.ttsContractVersion, normalization: input.normalization ?? null, inputVersions: input.inputVersions ?? {} });
-      const receipt = await this.assets.cachedGeneration({ channelId: input.channelId, inputKey, ownerKey: input.productionJobId ?? input.idempotencyKey }, async (providerKey) => {
+      const receipt = await this.assets.cachedGeneration({ channelId: input.channelId, inputKey, ownerKey: input.productionJobId ?? input.idempotencyKey, callKey: "tts" }, async (providerKey) => {
         const result = await this.prepareTts({ ...input, idempotencyKey: providerKey, skipSharedCache: true });
         return { assetId: result.assetId, snapshot: { inputKey, voice: input.voice, text: input.text, normalization: input.normalization ?? null, model: input.model, provider: this.options!.ttsProvider, timings: result.timings, durationSeconds: result.timings.at(-1)?.endSeconds ?? 0 } };
       });

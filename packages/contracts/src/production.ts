@@ -25,7 +25,7 @@ export const ProductionResultSchema = z.object({
     actualDurationSeconds: z.number().positive().nullable() }).nullable(),
   quality: z.object({ technical: z.json().nullable(), policy: z.json().nullable() }),
   usage: z.array(z.object({ id: z.string(), productionJobId: z.string().nullable(), provider: z.string(), model: z.string().nullable(),
-    operation: z.string(), quantity: z.string(), unit: z.string(), currency: z.string(), estimatedCost: z.string().nullable(), actualCost: z.string().nullable() })),
+    operation: z.string(), quantity: z.string(), unit: z.string(), currency: z.string(), estimatedCost: z.string().nullable(), actualCost: z.string().nullable(), billingState: z.string().optional(), billingRevision: z.number().int().nonnegative().optional() })),
   reviewReasons: z.array(z.object({ code: z.string(), message: z.string(), scriptVersionId: z.string().nullable(), sceneVersionId: z.string().nullable() })),
   observedAt: z.string().datetime()
 }).strict().superRefine((value, ctx) => {

@@ -1,4 +1,5 @@
 import { estimateLlmInputTokens } from "@postbot/providers";
+import { normalizeNarration } from "@postbot/scene-schema";
 import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import {
   AutomationBudgetRequestSchema,
@@ -13,7 +14,7 @@ import {
   type AutomationStage,
   type Platform
 } from "@postbot/contracts";
-import { Prisma, type PrismaClient } from "@postbot/database";
+import { Prisma, settleJobReservation, type PrismaClient } from "@postbot/database";
 import { assertPlatformEnabled, loadConfig } from "@postbot/config";
 import { JobsService } from "../jobs/jobs.service.js";
 import { OperationsService } from "../operations/operations.service.js";
@@ -104,6 +105,7 @@ export const evaluateAutomationBranches = (steps: RunStep[]): AutomationRunDecis
 export class AutomationService implements OnModuleInit, OnModuleDestroy {
   private scheduler: NodeJS.Timeout | null = null;
   private scheduling = false;
+  private settlementCursor: string | null = null;
 
   constructor(
     @Inject("PRISMA_CLIENT") private readonly prisma: PrismaClient,
@@ -929,6 +931,17 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     if (!platform || !isCostStage(stage)) return true;
     const estimateDetails = await this.estimateCost(runId, channelId, stage, platform);
     const estimate = estimateDetails?.amountUsd ?? null;
+    const rule = await this.prisma.collectionRule.findFirst({ where: { channelId, isActive: true }, orderBy: { version: "desc" } });
+    const profile = rule?.profile ? ChannelCollectionProfileSchema.parse(rule.profile) : null;
+    if (profile && estimate !== null) {
+      const usage = await this.prisma.providerUsage.findMany({ where: { productionJob: { automationSteps: { some: { automationRunId: runId, platform } } } }, select: { actualCost: true, estimatedCost: true, productionJob: { select: { type: true } } } });
+      const spent = usage.reduce((total, item) => total.plus(item.actualCost ?? item.estimatedCost ?? 0), new Prisma.Decimal(0));
+      const stageSpent = usage.filter((item) => item.productionJob?.type === stage).reduce((total, item) => total.plus(item.actualCost ?? item.estimatedCost ?? 0), new Prisma.Decimal(0));
+      const projected = stage === "SCRIPT" ? spent.minus(stageSpent).plus(Prisma.Decimal.max(stageSpent, estimate)) : spent.plus(estimate);
+      if (projected.gt(profile.production.maxEstimatedCostUsd)) {
+        await this.holdStep(runId, stage, platform, "CHANNEL_PRODUCTION_COST_LIMIT"); return false;
+      }
+    }
     const budget = await this.prisma.automationBudget.findFirst({
       where: { workspaceId, OR: [{ channelId }, { channelId: null }] },
       orderBy: { channelId: "desc" }
@@ -1003,9 +1016,10 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
         const document = asObject(scene?.sceneDocument ?? null);
         const scenes = Array.isArray(document.scenes) ? document.scenes : [];
         if (stage === "ASSET") {
-          const aiCount = Math.round(scenes.length * (typeof document.aiStockRatio === "number" ? document.aiStockRatio : 1));
+          const imageScenes = scenes.filter((entry) => asObject(entry as Prisma.JsonValue).visualMode !== "GRAPHIC");
+          const aiCount = Math.round(imageScenes.length * (typeof document.aiStockRatio === "number" ? document.aiStockRatio : 1));
           const usages = await this.prisma.assetUsage.findMany({ where: { sceneVersionId }, select: { usageSnapshot: true, purpose: true } });
-          usage.imageCount = scenes.slice(0, aiCount).filter((entry) => {
+          usage.imageCount = imageScenes.slice(0, aiCount).filter((entry) => {
             const id = asObject(entry as Prisma.JsonValue).id;
             return typeof id !== "string" || !usages.some((usage) => readAssetUsagePurpose(usage) === `scene-image:${platform}:${id}`);
           }).length;
@@ -1019,7 +1033,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
         const script = await this.prisma.scriptVersion.findFirst({ where: { contentItemId, platform }, orderBy: { version: "desc" } });
         const prepared = await this.prisma.assetUsage.findMany({ where: { sceneVersionId }, select: { usageSnapshot: true, purpose: true } });
         const reusable = prepared.some((usage) => readAssetUsagePurpose(usage).startsWith("tts-narration"));
-        usage.characters = reusable ? 0 : script ? [script.hook, script.body, script.callToAction].filter(Boolean).join(" ").length : 0;
+        usage.characters = reusable ? 0 : script ? normalizeNarration([script.hook, script.body, script.callToAction].filter(Boolean).join(" "), script.language).speech.length : 0;
       }
     }
     const estimate = estimateAutomationStageCost(loadConfig(), stage as "SCRIPT" | "ASSET" | "TTS" | "RENDER", usage);
@@ -1093,6 +1107,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     this.scheduling = true;
     try {
     const now = new Date();
+    await this.settleKnownReservations();
     await scheduleAnalytics(this.prisma, this.jobs, now);
     const channels = await this.prisma.channel.findMany({
       where: { status: "ACTIVE" },
@@ -1147,6 +1162,17 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     } finally {
       this.scheduling = false;
     }
+  }
+
+  private async settleKnownReservations(): Promise<void> {
+    const reservations = await this.prisma.automationCostReservation.findMany({ where: { releasedAt: null, settledAt: null, ...(this.settlementCursor ? { id: { gt: this.settlementCursor } } : {}) }, orderBy: { id: "asc" }, take: 100 });
+    for (const reservation of reservations) {
+      const platform = reservation.idempotencyKey.split(":").at(-2)?.toUpperCase();
+      if (platform !== "YOUTUBE" && platform !== "INSTAGRAM" && platform !== "TIKTOK") continue;
+      const step = await this.prisma.automationStep.findFirst({ where: { automationRunId: reservation.automationRunId, stage: reservation.stage, platform }, select: { productionJobId: true } });
+      if (step?.productionJobId) await settleJobReservation(this.prisma, step.productionJobId);
+    }
+    this.settlementCursor = reservations.length === 100 ? reservations.at(-1)!.id : null;
   }
 
   private async scheduleCollectionPass(workspaceId: string, channelId: string, mode: "DISCOVER" | "RANK", bucket: number): Promise<void> {

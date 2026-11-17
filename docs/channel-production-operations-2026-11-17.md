@@ -101,6 +101,24 @@ Remotion은 AbortSignal을 취소 신호와 직접 소유한 Chromium 종료에 
 
 검증: API 기존 자동화/분기/시뮬레이터/복구와 새 실제 MySQL·Redis 수요 테스트 총 25개 통과. 7일 뒤 실제 예약 3개와 승인 대기를 유지하면서 보충, 다른 키의 동시 요청에서 2개 producer 상한, 검수 5개 상한, 수집/RANK 키 경쟁과 Redis waiting 상태를 확인했다. worker 기존 생성/Redis 재전달 회귀 6개와 후보 평가/경쟁/빈 선정/채널 정지 3개 통과. 새 fixture의 필수 점수·workspaceId 누락을 수정 후 재검증했다. 모바일 Playwright로 동시 제작 2·검수 7·가까운 예약 12시간 저장과 기존 플랫폼 설정 보존 통과. 변경 contracts/API/worker/web lint·typecheck 통과. migration 없음. 전역 보존·사용량 정산·게시 결과 대사는 후속 단계다.
 
+## 20.7 사용량 정산과 안전한 복구
+
+비용 예약은 호출되지 않음/캐시 재사용이면 해제하고, 사용량과 설정 단가가 확인되면 KNOWN_USAGE_BILLING_PENDING으로 정산한다. 청구서가 아직 없다는 이유로 같은 예약을 영구 유지하지 않는다. 실제 청구가 확정된 INVOICE_CONFIRMED와 구분한다. STARTED journal·불명확 Provider 결과는 계속 위험 예약을 유지한다. 과거 사용량만 있고 단가·청구액이 모두 없는 기록은 USAGE_KNOWN_RATE_PENDING으로 보존하며 금액을 지어내 정산하지 않는다. 스케줄러의 cursor/batch 100개 재검사로 완료 직후 알림이 유실된 예약도 정산한다.
+
+예산은 같은 사용의 추정액과 실제액을 더하지 않으며, 진행 중 예약에서는 이미 비용으로 기록한 사용분을 뺀 나머지 위험만 계산한다. UTC 일/월 예약 창을 분리하고 이전 날 호출되지 않은 예약을 오늘의 일별 상한에 넣지 않는다. 오래된 예약의 새 호출은 현재 창의 예산을 재승인해야 한다. 재승인 후에도 accountedActual로 이전 확정 비용을 중복 반영하지 않는다. 원래 journal과 호출 키는 유지한다. GRAPHIC은 이미지 비용 추정에서 제외하고 TTS 예상 글자 수는 정규화 발화를 기준으로 한다. 프로필 제작 상한은 대본 외 제작 단계에도 적용하며 상한 추정 때문에 캐시 적중 전 보수적 보류가 발생할 수 있다.
+
+OWNER 전용 `POST /operations/usage/:usageId/reconcile`은 expectedRevision, 멱등 키, 실제 금액 문자열, 증빙 SHA-256, 비밀이 아닌 외부 참조를 받는다. 수동으로 확인한 증빙을 등록하는 경로이며 실 청구 API 조회나 증빙 내용의 독립 검증을 수행한 것으로 표시하지 않는다. 이전 금액/새 금액/수정 revision/주체를 영구 영수증으로 저장하고 ACTUAL ledger에는 차액만 기록한다. 증빙 해시·참조와 감사 이력은 원시 인증정보를 포함하지 않아야 한다. 같은 키의 다른 금액/증빙, stale revision, 다른 workspace, 비 OWNER 요청은 거절한다. 제작 조회에 billingState/billingRevision을 노출하며 청구 미확정 사용이 있는 비용 보고서는 reconciled=true로 표시하지 않는다.
+
+`POST /operations/jobs/:jobId/provider-outcome`은 OWNER가 원래 callKey와 증빙을 고정해 NOT_ACCEPTED 또는 RESULT_AVAILABLE을 확인한다. 원래 STARTED 값은 별도 불변 receipt에 남기며 journal을 삭제하거나 새로운 요청 키로 우회하지 않는다. 복구된 LLM 응답은 원래 요청 키/토큰 수/크기를 검사한 뒤 기존 구조·근거·품질 검증으로 다시 처리한다. 미디어는 같은 job·channel·scene·purpose·원래 cache/provider 사용 영수증을 갖춘 자산만 연결한다. 현재 파일/권리 검사는 재개 시에도 유지한다. 사용 금액 증거와 모순되는 NOT_ACCEPTED는 거절한다. 기존 callKey NULL 캐시는 단일 미확정 호출과 캐시를 유일하게 대응할 수 있을 때만 OWNER 증빙으로 연결하고, 모호한 과거 기록은 LEGACY_CALL_SCOPE_REVIEW_REQUIRED로 남긴다. 외부 결과를 확보하지 못하면 검토를 유지한다.
+
+HTTP 오류는 VALIDATION/AUTH/RATE_LIMIT/TRANSIENT/AMBIGUOUS와 로컬 BUDGET/QUALITY를 구분한다. 400·인증·가격 설정 오류는 반복 자동 호출하지 않는다. 429/503은 공식 응답의 Retry-After와 지수 backoff/jitter를 적용하고 한도 후 검토한다. timeout/응답 유실/불명확 5xx는 자동 재과금하지 않는다. 거절된 cache/journal은 REJECTED로 보존하며 재개해도 원래 키를 사용한다. 공유 캐시 진행 중은 제한된 대기, 객체 유실은 복원 검토로 처리한다. 렌더 시간 초과는 RENDER_TIMEOUT으로 구분한다. HTTP 503의 재시도 분류는 공식 unavailable 응답 계약을 따른 것이며 개별 계정 청구 결과 보장은 아니다.
+
+Migration `202611180001_billing_reconciliation`, `202611180002_generation_call_scope`, `202611180003_reservation_actual_accounting`: 청구 상태/revision과 immutable 청구 영수증, nullable cache callKey, 예약 정산 근거·반영 actual 추가. 기존 actualCost가 있는 행만 INVOICE_CONFIRMED로 backfill하며 그 외 비용을 실제 청구로 승격하지 않는다. 기존 정산된 예약은 연결된 stage/platform 사용량의 actual 합계를 accountedActual로 채운다. 빈 격리 DB의 24개 migration 및 기존 데이터 DB 업그레이드 통과. actual 3.000000을 가진 기존 예약에서 accountedActual=3.000000, run budgetActual=3.000000을 확인했다. 이전 앱으로 rollback할 때 제작을 정지하고 추가 DB/영수증을 유지한다. 이전 회계 로직의 중복·보류 결함까지 안전하게 되돌리는 down migration은 제공하지 않는다.
+
+검증: API 예산/청구/대사/조회 실제 MySQL 회귀 12개, worker Mock HTTP·원래 키 재개·음성·렌더 회귀 20개, 자산 공유 캐시 10개, Provider 계약/오류 14개, 기존 data-model 8개, 명시 삭제 FK 회귀 2개 통과. 관련 contracts/database/providers/asset-library/API/worker lint·typecheck 통과. 예전 LLM 테스트의 청구 미확정 예약을 계속 유지한다는 기대는 새 정산 계약으로 바꾸었고, 모든 재시도 토큰·비용 기록 검증은 유지했다. 새 통합 fixture의 JSON 타입과 lint 오류는 수정 후 재검증했다. 실제 유료 호출·청구 API·SNS·외부 알림은 실행하지 않았다.
+
+오류 계약 확인일 2026-11-18: [Gemini API errors](https://ai.google.dev/gemini-api/docs/api-errors?hl=en), [ElevenLabs errors](https://elevenlabs.io/docs/eleven-api/resources/errors), [ElevenLabs 429](https://elevenlabs.io/docs/help-center/technical/api-error-code-429). 갱신 책임은 Provider 어댑터 유지보수자다.
+
 ## 공식 문서 확인
 
 확인일 2026-11-17. 구현 단계별로 해당 사양·정책을 다시 대조하며 고정 가격/과거 할당량을 근거 없이 넣지 않는다. 갱신 책임: 해당 Provider/connector 유지보수자.

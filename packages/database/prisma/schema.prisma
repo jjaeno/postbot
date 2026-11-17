@@ -736,6 +736,7 @@ model AssetGenerationCache {
   inputKey       String   @db.VarChar(64)
   state          String   @db.VarChar(24)
   ownerKey       String   @db.VarChar(191)
+  callKey        String?  @db.VarChar(191)
   assetId        String?
   snapshot       Json?
   createdAt      DateTime @default(now()) @db.DateTime(3)
@@ -969,6 +970,8 @@ model AutomationCostReservation {
   currency        String            @default("USD") @db.VarChar(3)
   releasedAt      DateTime?         @db.DateTime(3)
   settledAt       DateTime?         @db.DateTime(3)
+  settlementBasis String?           @db.VarChar(40)
+  accountedActual Decimal           @default(0) @db.Decimal(18, 6)
   createdAt       DateTime          @default(now()) @db.DateTime(3)
   automationRun   AutomationRun     @relation(fields: [automationRunId], references: [id], onDelete: Restrict)
 
@@ -1209,16 +1212,35 @@ model ProviderUsage {
   currency         String         @default("USD") @db.VarChar(3)
   estimatedCost    Decimal?       @db.Decimal(18, 6)
   actualCost       Decimal?       @db.Decimal(18, 6)
+  billingState     String         @default("KNOWN_ESTIMATE") @db.VarChar(40)
+  billingRevision  Int            @default(0)
   idempotencyKey   String?        @unique @db.VarChar(191)
   providerResponse Json?
   occurredAt       DateTime       @default(now()) @db.DateTime(3)
   contentItem      ContentItem?   @relation(fields: [contentItemId], references: [id], onDelete: SetNull)
   productionJob    ProductionJob? @relation(fields: [productionJobId], references: [id], onDelete: SetNull)
   costLedger       CostLedger[]
+  billingReconciliations BillingReconciliation[]
 
   @@index([provider, operation, occurredAt])
   @@index([contentItemId])
   @@map("provider_usages")
+}
+
+model BillingReconciliation {
+  id String @id @default(cuid())
+  providerUsageId String
+  idempotencyKey String @unique @db.VarChar(191)
+  actorUserId String
+  previousAmount Decimal? @db.Decimal(18, 6)
+  actualAmount Decimal @db.Decimal(18, 6)
+  evidenceHash String @db.Char(64)
+  externalReference String @db.VarChar(191)
+  revision Int
+  createdAt DateTime @default(now()) @db.DateTime(3)
+  providerUsage ProviderUsage @relation(fields: [providerUsageId], references: [id], onDelete: Restrict)
+  @@unique([providerUsageId, revision])
+  @@map("billing_reconciliations")
 }
 
 model CostLedger {

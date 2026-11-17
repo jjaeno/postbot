@@ -82,6 +82,19 @@ describe.skipIf(!enabled).sequential("automation budget isolation", () => {
     expect((await prisma.automationRun.findUniqueOrThrow({ where: { id: first.id } })).budgetReserved.toNumber()).toBe(0.4);
     expect(await reserve(budget, first.id, 0.4)).toBe("EXISTING");
   });
+  it("does not apply yesterday's uncalled reservation to today's daily limit and reauthorizes it before execution", async () => {
+    const a = await workspaceFixture("budget-window");
+    const budget = await prisma.automationBudget.create({ data: { workspaceId: a.workspace.id, dailyHardLimit: 1, currency: "USD" } });
+    const old = await run(a.channel1.id); const current = await run(a.channel1.id);
+    const yesterday = new Date(); yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+    await prisma.automationCostReservation.create({ data: { automationRunId: old.id, stage: "SCRIPT", amount: 100, createdAt: yesterday, idempotencyKey: `automation:${old.id}:script:youtube:cost` } });
+    await prisma.automationRun.update({ where: { id: old.id }, data: { budgetReserved: 100 } });
+    expect(await reserve(budget, current.id, 0.5)).toBe("RESERVED");
+    expect(await reserve(budget, old.id, 0.6)).toBe("HARD_LIMIT");
+    expect(await reserve(budget, old.id, 0.5)).toBe("RESERVED");
+    expect((await prisma.automationRun.findUniqueOrThrow({ where: { id: old.id } })).budgetReserved.toNumber()).toBe(0.5);
+    expect((await prisma.automationCostReservation.findFirstOrThrow({ where: { automationRunId: old.id } })).createdAt.getTime()).toBeGreaterThan(yesterday.getTime());
+  });
 
   it("keeps currencies separate and fails closed for an unattributed ledger entry", async () => {
     const a = await workspaceFixture("currency-orphan");

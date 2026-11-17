@@ -1,0 +1,56 @@
+import { PrismaClient, settleJobReservation } from "@postbot/database";
+import { randomUUID } from "node:crypto";
+import { afterAll, describe, expect, it } from "vitest";
+import { OperationsService } from "./operations.service.js";
+import type { OAuthCryptoService } from "../oauth/oauth-crypto.service.js";
+import type { MaintenanceQueueAdapter } from "@postbot/jobs";
+import { reserveAutomationCost } from "../automation/automation-budget.js";
+
+describe.skipIf(process.env.RUN_DB_INTEGRATION !== "1")("known usage and invoice reconciliation", () => {
+  const prisma = new PrismaClient(); afterAll(() => prisma.$disconnect());
+  const service = new OperationsService(prisma, {} as OAuthCryptoService, {} as MaintenanceQueueAdapter);
+  it("settles known usage without an invoice, counts risk once and applies invoice corrections once", async () => {
+    const key = randomUUID();
+    const user = await prisma.user.create({ data: { email: `${key}@billing.test`, displayName: "Fixture", passwordHash: "fixture" } });
+    const workspace = await prisma.workspace.create({ data: { ownerId: user.id, name: "Fixture", slug: key } });
+    const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Fixture", slug: key } });
+    const content = await prisma.contentItem.create({ data: { channelId: channel.id, title: "Fixture", topicKey: key } });
+    const run = await prisma.automationRun.create({ data: { channelId: channel.id, idempotencyKey: key, budgetReserved: 4 } });
+    const payload = { automation: { runId: run.id, platform: "YOUTUBE" }, _mediaCalls: { tts: "COMPLETED" } };
+    const job = await prisma.productionJob.create({ data: { channelId: channel.id, contentItemId: content.id, type: "TTS", queueName: "tts", status: "SUCCEEDED", idempotencyKey: key, payload } });
+    await prisma.automationStep.create({ data: { automationRunId: run.id, stage: "TTS", platform: "YOUTUBE", branchKey: "YOUTUBE", productionJobId: job.id } });
+    const reservation = await prisma.automationCostReservation.create({ data: { automationRunId: run.id, stage: "TTS", amount: 4, idempotencyKey: `automation:${run.id}:tts:youtube:cost` } });
+    const usage = await prisma.providerUsage.create({ data: { contentItemId: content.id, productionJobId: job.id, provider: "contract-fixture", operation: "tts", quantity: 100, unit: "character", estimatedCost: 2 } });
+    await prisma.costLedger.create({ data: { contentItemId: content.id, providerUsageId: usage.id, direction: "ESTIMATED", category: "tts", amount: 2 } });
+    const budget = await prisma.automationBudget.create({ data: { workspaceId: workspace.id, dailyHardLimit: 5, monthlyHardLimit: 5 } });
+    // Before settlement, $2 known use + $2 remaining risk + $1 fits $5.
+    const next = await prisma.automationRun.create({ data: { channelId: channel.id, idempotencyKey: `${key}:next` } });
+    expect(await reserveAutomationCost({ prisma, budget, runId: next.id, stage: "SCRIPT", platform: "YOUTUBE", estimate: 1 })).toBe("RESERVED");
+    expect((await Promise.all([settleJobReservation(prisma, job.id), settleJobReservation(prisma, job.id)])).sort()).toEqual(["SETTLED", "UNCHANGED"]);
+    expect(await prisma.automationCostReservation.findUniqueOrThrow({ where: { id: reservation.id } })).toMatchObject({ settlementBasis: "KNOWN_USAGE_BILLING_PENDING", releasedAt: null });
+    expect((await prisma.automationRun.findUniqueOrThrow({ where: { id: run.id } })).budgetReserved.toNumber()).toBe(0);
+    const input = { idempotencyKey: key, expectedRevision: 0, actualAmount: "2.5", evidenceHash: "a".repeat(64), externalReference: "invoice-item-fixture" };
+    const receipts = await Promise.all([service.reconcileUsageBilling(workspace.id, user.id, "OWNER", usage.id, input), service.reconcileUsageBilling(workspace.id, user.id, "OWNER", usage.id, input)]);
+    expect(receipts[0]).toEqual(receipts[1]);
+    expect((await prisma.automationRun.findUniqueOrThrow({ where: { id: run.id } })).budgetActual.toNumber()).toBe(2.5);
+    await service.reconcileUsageBilling(workspace.id, user.id, "OWNER", usage.id, { ...input, idempotencyKey: `${key}:correction`, expectedRevision: 1, actualAmount: "2.25" });
+    expect((await prisma.costLedger.aggregate({ where: { providerUsageId: usage.id, direction: "ACTUAL" }, _sum: { amount: true } }))._sum.amount!.toNumber()).toBe(2.25);
+    expect((await prisma.automationRun.findUniqueOrThrow({ where: { id: run.id } })).budgetActual.toNumber()).toBe(2.25);
+    const last = await prisma.automationRun.create({ data: { channelId: channel.id, idempotencyKey: `${key}:last` } });
+    expect(await reserveAutomationCost({ prisma, budget, runId: last.id, stage: "SCRIPT", platform: "YOUTUBE", estimate: 1.75 })).toBe("RESERVED");
+    expect(await reserveAutomationCost({ prisma, budget, runId: run.id, stage: "TTS", platform: "YOUTUBE", estimate: 0 })).toBe("RESERVED");
+    expect(await settleJobReservation(prisma, job.id)).toBe("SETTLED");
+    expect((await prisma.automationRun.findUniqueOrThrow({ where: { id: run.id } })).budgetActual.toNumber()).toBe(2.25);
+    expect((await prisma.automationRun.findUniqueOrThrow({ where: { id: run.id } })).budgetReserved.toNumber()).toBe(0);
+    await expect(service.reconcileUsageBilling(workspace.id, user.id, "EDITOR", usage.id, input)).rejects.toThrow("OWNER_ROLE_REQUIRED");
+    await expect(service.reconcileUsageBilling("foreign", user.id, "OWNER", usage.id, input)).rejects.toThrow("PROVIDER_USAGE_NOT_FOUND");
+    await expect(service.reconcileUsageBilling(workspace.id, user.id, "OWNER", usage.id, { ...input, actualAmount: "9" })).rejects.toThrow("BILLING_IDEMPOTENCY_CONFLICT");
+    await prisma.productionJob.update({ where: { id: job.id }, data: { payload: { ...payload, _mediaCalls: { tts: "STARTED" } } } });
+    await prisma.automationCostReservation.update({ where: { id: reservation.id }, data: { settledAt: null } });
+    expect(await settleJobReservation(prisma, job.id)).toBe("AMBIGUOUS");
+    await prisma.productionJob.update({ where: { id: job.id }, data: { payload } });
+    const unknownRate = await prisma.providerUsage.create({ data: { productionJobId: job.id, provider: "legacy-fixture", operation: "legacy", quantity: 1, unit: "request" } });
+    expect(await settleJobReservation(prisma, job.id)).toBe("AMBIGUOUS");
+    expect((await prisma.providerUsage.findUniqueOrThrow({ where: { id: unknownRate.id } })).billingState).toBe("USAGE_KNOWN_RATE_PENDING");
+  });
+});

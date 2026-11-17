@@ -123,6 +123,7 @@ export class DataLifecycleProcessor {
       await tx.optimizationSuggestion.deleteMany({ where: { channelId: { in: channelIds } } });
       await tx.strategyVersion.deleteMany({ where: { channelId: { in: channelIds } } });
       await tx.costLedger.deleteMany({ where: { OR: [{ contentItemId: { in: contentIds } }, { providerUsageId: { in: providerUsageIds } }] } });
+      await tx.billingReconciliation.deleteMany({ where: { providerUsageId: { in: providerUsageIds } } });
       await tx.providerUsage.deleteMany({ where: { id: { in: providerUsageIds } } });
       await tx.automationCostReservation.deleteMany({ where: { automationRunId: { in: runIds } } });
       await tx.automationEvent.deleteMany({ where: { automationRunId: { in: runIds } } });
