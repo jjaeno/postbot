@@ -116,7 +116,7 @@ describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, 
     const channelInput = {
       name: `Acceptance ${suffix}`, language: "en", targetAudience: "Science readers", topic: "science",
       platforms: ["YOUTUBE"],
-      collectionRule: { keywords: ["science"], recencyHours: 24, collectionFrequencyMinutes: 1440 },
+      collectionRule: { keywords: ["rocket"], recencyHours: 24, collectionFrequencyMinutes: 1440 },
       template: { name: "Acceptance", tone: "clear", voiceProfile: "neutral", subtitleStyle: {}, visualStyle: {}, aiStockRatio: 1 },
       outputProfiles: [{ platform: "YOUTUBE", minDurationSeconds: 30, maxDurationSeconds: 60, hookStyle: "question", captionStyle: "simple", metadataRules: {} }],
       scheduleRules: [{ platform: "YOUTUBE", dayOfWeek: 1, timeOfDayLocal: "12:00", timezone: "UTC", maxPosts: 1 }],
@@ -133,10 +133,14 @@ describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, 
     const callbackUrl = new URL(oauth.authorizationUrl);
     const callback = OAuthCallbackResultSchema.parse(await session.json(`${callbackUrl.pathname}${callbackUrl.search}`));
 
-    const collection = { channelId: channel.id, idempotencyKey: `collect:${suffix}`, source: "manual", manualCandidates: [{
-      title: "Science observation", summary: "A repeatable science observation.",
+    const undatedCollection = { channelId: channel.id, idempotencyKey: `undated:${suffix}`, source: "manual", manualCandidates: [{
+      title: "Rocket observation", summary: "A repeatable rocket observation.",
       url: `https://example.com/science/${suffix}`, sourceName: "Acceptance fixture", sourceKind: "MANUAL"
     }] };
+    expect(CollectIdeasResponseSchema.parse(await session.json("/ideas/collect", undatedCollection))).toMatchObject({ created: 0, rejected: 1 });
+    // The passing journey needs an actual collected original, not a bare URL or
+    // undated manual summary. The fixture provider supplies dated FULL_TEXT.
+    const collection = { channelId: channel.id, idempotencyKey: `collect:${suffix}`, source: "auto" };
     const collected = CollectIdeasResponseSchema.parse(await session.json("/ideas/collect", collection));
     expect(collected.created).toBe(1);
     expect(CollectIdeasResponseSchema.parse(await session.json("/ideas/collect", collection))).toEqual(collected);
@@ -180,14 +184,18 @@ describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, 
     const period = { periodStart: new Date(Date.now() - 86_400_000).toISOString(), periodEnd: new Date(Date.now() + 86_400_000).toISOString() };
     const analytics = ProductionJobResponseSchema.parse(await session.json("/analytics/sync", { channelId: channel.id, platform: "YOUTUBE", ...period, timezone: "UTC", idempotencyKey: `analytics:${suffix}` }));
     const analyticsStartedAt = performance.now();
-    await session.job(analytics.id);
+    expect((await session.job(analytics.id)).result).toMatchObject({ collectionStatus: "PARTIAL" });
     timings.analyticsJobMs = Math.round(performance.now() - analyticsStartedAt);
     const report = AnalyticsReportResponseSchema.parse(await session.json(`/analytics/report?${new URLSearchParams({ channelId: channel.id, ...period })}`));
     expect(report.metrics.some((metric) => metric.metric === "views" && metric.value !== null)).toBe(true);
+    expect(report.collectionStatus).toBe("PARTIAL");
+    expect(report.nextCollectionAt).not.toBeNull();
     const suggestion = OptimizationSuggestionResponseSchema.parse(await session.json("/optimization/suggestions/generate", { channelId: channel.id, platform: "YOUTUBE", metric: "views", ...period, idempotencyKey: `optimize:${suffix}` }));
-    expect(suggestion.sampleSize).toBe(1);
+    // Fresh period totals have not passed the provider's reporting delay.
+    // Preserve their values, schedule recollection, and exclude them from advice.
+    expect(suggestion).toMatchObject({ sampleSize: 0, status: "HELD", confidenceScore: null });
     expect(suggestion.targetStrategy).toBeNull();
-    expect(suggestion.evidence).toMatchObject({ conclusion: "insufficient_sample_or_incomplete_data" });
+    expect(suggestion.evidence).toMatchObject({ excludedUnknownOrUnbound: 1, conclusion: "insufficient_comparable_sample_or_variation" });
 
     const stranger = new Session();
     AuthResponseSchema.parse(await stranger.json("/auth/register", { ...accountInput, email: `other-${suffix}@acceptance.test` }));
@@ -273,12 +281,12 @@ describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, 
     const posts = await prisma.platformPost.findMany({ where: { publishPlan: { contentItemId } } });
     expect(posts).toHaveLength(3);
     expect(new Set(posts.map((post) => post.externalPostId)).size).toBe(3);
-    expect(await prisma.analyticsSync.count({ where: { channelId: channel.id, idempotencyKey: { startsWith: `automation:${started.id}:` }, status: "SUCCEEDED" } })).toBe(3);
+    expect(await prisma.analyticsSync.count({ where: { channelId: channel.id, idempotencyKey: { startsWith: `automation:${started.id}:` }, status: "PARTIAL", nextAttemptAt: { not: null } } })).toBe(3);
     expect(AutomationRunResponseSchema.parse(await session.json("/automation/runs", input)).id).toBe(started.id);
     expect(await prisma.platformPost.count({ where: { publishPlan: { contentItemId } } })).toBe(3);
     const period = { periodStart: new Date(Date.now() - 86_400_000).toISOString(), periodEnd: new Date(Date.now() + 86_400_000).toISOString() };
     const suggestion = OptimizationSuggestionResponseSchema.parse(await session.json("/optimization/suggestions/generate", { channelId: channel.id, platform: "YOUTUBE", metric: "views", ...period, idempotencyKey: `optimization:${started.id}` }));
-    expect(suggestion.sampleSize).toBeGreaterThanOrEqual(1);
+    expect(suggestion).toMatchObject({ sampleSize: 0, status: "HELD", targetStrategy: null, confidenceScore: null });
     process.stdout.write(`LOCAL_BASELINE ${JSON.stringify({ flow: mode.toLowerCase(), timings: { schedulerObservedMs: await schedulerObservation, totalMs: Math.round(performance.now() - flowStartedAt) } })}\n`);
   }, 900_000);
 });

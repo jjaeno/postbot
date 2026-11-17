@@ -104,3 +104,13 @@
 - 병행 검사 중 API DB 테스트 기본 5초 timeout이 발생하여 30초 한도로 재실행했고 실제 검증이 통과했다. 실행 증거는 `.artifacts/stage6-*.log`, `.artifacts/final-*.log`, `.artifacts/migrate-*-final.log`에 보존한다. 렌더 증거는 5단계와 같다.
 - 유료 결과는 자산 연결 소유권 확인/파일 저장보다 먼저 비용 영수증을 남겨 늦은 응답의 비용을 유실하지 않는다. Turbo dev/test 실행에도 새 출력 제한과 LLM 요율 환경 변수가 전달되도록 LLM_*를 허용한다.
 - 기존 web 번들 500kB 경고와 Node 20에 대한 AWS SDK 향후 지원 종료 안내가 남는다. 이번 변경의 실패가 아니며 운영 런타임 업그레이드와 번들 분리는 별도 범위다.
+
+## PR #4 CI 후속 검증 (19.10)
+
+사용자의 CI 검증·PR 요청으로 6개 커밋을 `fix/operations-content-remediation`에 push하여 PR #4를 생성했다. 원격 CI run 43919545211에서 validate(전체 lint/typecheck/test/build·DB 장애 회귀), 브라우저, 네 이미지 smoke, 실제 renderer smoke, proxy-rate-limit은 성공했고 acceptance만 실패했다. security run 43919549876의 의존성/시크릿/파일·네 이미지 검사도 성공했다.
+
+- 원격 acceptance 첫 실패는 발행일 없는 수동 후보를 1건 수집한다고 기대한 fixture였다. NEWS에서 발행일 없음을 거절하는 판정은 유지한다. 테스트는 해당 후보의 거절을 먼저 검증하고, 날짜와 FULL_TEXT 원문을 제공하는 기존 Fixture Provider로 정상 제작 여정을 진행한다. bare URL/요약을 전체 원문으로 간주하지 않는다.
+- Fake Provider의 question Hook은 `question: 제목` 대신 실제 질문문을 반환한다. 물음표 없는 새 진술을 자동 근거 통과시키는 예외를 추가하지 않는다. 실제 Provider 계약/검증 기준은 바꾸지 않는다.
+- 실제 로컬 acceptance를 실행하자 렌더·게시·수집은 성공했고, 최신 집계 전 값을 최적화 표본 1건으로 기대하던 다음 assertion이 실패했다. 게시 직후 값은 보존하면서 PARTIAL/nextAttemptAt으로 재수집하고 비교에서 제외하는 것이 새 계약이다. 수동·APPROVAL·FULL_AUTO 테스트가 이 상태와 HELD/표본 0/통계적 신뢰도 null을 확인하도록 갱신한다. 집계된 동질 표본의 판정은 6단계 DB 회귀에서 별도로 검증했다.
+- production DB/유료 호출/실 게시/merge/배포는 수행하지 않는다. 로컬 acceptance는 `postbot-pr4-ci` Compose project의 전용 MySQL/Redis/MinIO와 실제 HTTP·렌더러를 사용한다. test fixture만 수정한 반복 실행은 해당 파일을 read-only bind mount하여 나머지 동일 이미지를 재사용한다.
+- 최종 검증: providers lint/typecheck·22건 unit, API lint/typecheck·관련 11건 unit/HTTP 성공. 실제 Docker acceptance 수동·APPROVAL·FULL_AUTO 3건 모두 성공(각 128.3/317.0/361.4초, 총 807.2초). 첫 추가 실행의 표본 1건 기대와 다음 실행의 WAITING 기대를 수정했다. 도착한 값이 있어 실제 상태는 PARTIAL이며, 값이 전혀 없는 WAITING과 구분한다. 이를 정확히 검증한 최종 성공 로그는 `.artifacts/pr4-acceptance-complete.log`다.

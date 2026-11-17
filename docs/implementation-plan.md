@@ -1181,6 +1181,16 @@ Commit: `fix: 이미지 모션 MVP 운영 복구와 정합성 보완`
 
 각 단계는 변경 app/package lint/typecheck와 관련 테스트가 통과한 뒤 커밋하고 다음 단계로 진행한다. migration은 빈 DB 및 기존 데이터 DB에 적용 검증하며 기본값·복구·rollback 한계를 기록한다. 공유 계약/스키마 영향이 넓으면 마지막에 전체 lint/typecheck/test/build를 수행한다. 필수 검증 미실행은 완료로 간주하지 않는다.
 
+### 19.10단계 — PR #4 CI 전체 여정 계약 보완
+
+**상태:** API/providers 관련 lint·typecheck·unit과 격리 Docker acceptance 3개 여정 통과. 수정 커밋을 PR #4에 반영한 뒤 원격 CI를 확인한다.
+
+범위: 사용자 요청에 따라 PR #4의 실패한 acceptance fixture와 Fake Provider 계약을 수정한다. NEWS 발행일/원문 근거와 최신 분석 결론을 검증하며 운영 판정 기준은 유지한다. 검증 후 같은 PR에 push하고 원격 CI 결과를 확인한다. merge/운영 배포는 제외한다.
+
+필수 검증: 변경 API/providers lint·typecheck와 관련 unit, 실제 격리 Docker HTTP·MySQL·Redis·S3·renderer의 acceptance 3개 여정. 원격 CI 실패 로그에 따라 필요한 회귀만 추가한다.
+
+Commit: `fix: CI 전체 여정의 수집 근거와 Fake Hook 계약 보완`
+
 세부 제품 요구사항과 각 단계의 추적 관계는 기능 명세에서 관리한다.
 
 구현 계획에는 **단계 범위와 완료 조건만 유지**하며 기능 명세의 전체 내용을 중복 복사하지 않는다.

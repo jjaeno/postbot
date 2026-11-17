@@ -417,7 +417,7 @@ const fakeStructuredOutput = (request: LlmGenerationRequest): Record<string, unk
   const maximum = context?.maxDurationSeconds ?? 45;
   const strategyDuration = context?.strategy?.durationSeconds;
   const durationSeconds = Math.max(1, Math.round(typeof strategyDuration === "number" ? Math.max(minimum, Math.min(maximum, strategyDuration)) : (minimum + maximum) / 2));
-  const hook = context?.hookStyle ? `${context.hookStyle}: ${request.title}` : `What changed in ${request.title}?`;
+  const hook = !context?.hookStyle || context.hookStyle === "question" ? `What changed in ${request.title}?` : `${context.hookStyle}: ${request.title}`;
   const callToAction = context?.callToActionStyle ?? "Check the source before sharing.";
   return {
     planning: {
