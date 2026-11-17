@@ -1,0 +1,30 @@
+import { collectionProfilePreset } from "@postbot/contracts";
+import { PrismaClient } from "@postbot/database";
+import { randomUUID } from "node:crypto";
+import { afterAll, describe, expect, it, vi } from "vitest";
+import { SourceCollection } from "./source-collection.js";
+const prisma = new PrismaClient();
+const suite = process.env.RUN_DB_INTEGRATION === "1" ? describe : describe.skip;
+suite("channel source budget and shared request cache", () => {
+  afterAll(() => prisma.$disconnect());
+  it("atomically reserves the daily call across schedulers, reuses results and isolates channels", async () => {
+    const key = randomUUID();
+    const user = await prisma.user.create({ data: { email: `${key}@source.test`, displayName: "Fixture", passwordHash: "fixture" } });
+    const workspace = await prisma.workspace.create({ data: { ownerId: user.id, name: "Fixture", slug: key } });
+    const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Fixture", slug: key } });
+    const other = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Other", slug: `${key}-other` } });
+    const profile = collectionProfilePreset("HISTORY", "en"); profile.limits.dailyCalls = 1;
+    const read = vi.fn(() => Promise.resolve({ results: ["record"] }));
+    const first = new SourceCollection(prisma, channel.id, profile, "", read);
+    const second = new SourceCollection(prisma, channel.id, profile, "", read);
+    const results = await Promise.allSettled([first.read("LOC", "https://www.loc.gov/search/?q=one"), second.read("LOC", "https://www.loc.gov/search/?q=two")]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(read).toHaveBeenCalledTimes(1);
+    const url = results[0]?.status === "fulfilled" ? "https://www.loc.gov/search/?q=one" : "https://www.loc.gov/search/?q=two";
+    expect(await second.read("LOC", url)).toEqual({ results: ["record"] });
+    expect(read).toHaveBeenCalledTimes(1);
+    await new SourceCollection(prisma, other.id, profile, "", read).read("LOC", url);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(await prisma.sourceFetch.count({ where: { channelId: channel.id } })).toBe(1);
+  });
+});

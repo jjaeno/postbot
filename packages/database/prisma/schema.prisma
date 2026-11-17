@@ -343,6 +343,8 @@ model Channel {
   platformAccounts        PlatformAccount[]
   templates               ChannelTemplate[]
   collectionRules         CollectionRule[]
+  sourceFetches           SourceFetch[]
+  researchQuestions       ResearchQuestion[]
   outputProfiles          PlatformOutputProfile[]
   scheduleRules           ScheduleRule[]
   contentItems            ContentItem[]
@@ -407,6 +409,7 @@ model CollectionRule {
   excludedSources            Json?
   recencyHours               Int
   selectionPolicy            Json?
+  profile                    Json?
   collectionFrequencyMinutes Int
   isActive                   Boolean  @default(true)
   createdAt                  DateTime @default(now()) @db.DateTime(3)
@@ -416,6 +419,42 @@ model CollectionRule {
   @@unique([channelId, version])
   @@index([channelId, isActive])
   @@map("collection_rules")
+}
+
+model SourceFetch {
+  id         String   @id @default(cuid())
+  channelId  String
+  requestKey String   @db.VarChar(64)
+  source     String   @db.VarChar(40)
+  state      String   @db.VarChar(16)
+  response   Json?
+  startedAt  DateTime @default(now()) @db.DateTime(3)
+  expiresAt  DateTime @db.DateTime(3)
+  channel    Channel  @relation(fields: [channelId], references: [id], onDelete: Restrict)
+
+  @@unique([channelId, requestKey])
+  @@index([channelId, startedAt])
+  @@index([expiresAt])
+  @@map("source_fetches")
+}
+
+model ResearchQuestion {
+  id             String   @id @default(cuid())
+  channelId      String
+  idempotencyKey String   @db.VarChar(120)
+  question       String   @db.Text
+  subtopic       String   @db.VarChar(200)
+  origin         String   @db.VarChar(24)
+  status         String   @default("INVESTIGATE") @db.VarChar(24)
+  evidence       Json?
+  reason         String?  @db.VarChar(120)
+  createdAt      DateTime @default(now()) @db.DateTime(3)
+  updatedAt      DateTime @updatedAt @db.DateTime(3)
+  channel        Channel  @relation(fields: [channelId], references: [id], onDelete: Restrict)
+
+  @@unique([channelId, idempotencyKey])
+  @@index([channelId, status])
+  @@map("research_questions")
 }
 
 model PlatformAccount {

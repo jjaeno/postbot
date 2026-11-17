@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { ChannelCollectionProfileSchema } from "./collection-profile.js";
+export { ChannelCollectionProfileSchema, collectionProfilePreset, ResearchQuestionInputSchema, type ChannelCollectionProfile } from "./collection-profile.js";
 
 export const HealthStatusSchema = z.enum(["ok"]);
 
@@ -76,8 +78,9 @@ export const ConnectionStatusSchema = z.enum(["PLANNED", "CONNECTED", "EXPIRED",
 
 export const JsonObjectSchema = z.record(z.string(), z.unknown());
 
-export const TopicSelectionPolicySchema = z.object({ freshness: z.enum(["NEWS", "EVERGREEN"]).optional(), keywordMatch: z.enum(["REQUIRED", "PREFER"]).optional(), semanticDuplicateThreshold: z.number().min(0.2).max(1).optional(), recentTopicDays: z.number().int().min(1).max(365).optional() });
+export const TopicSelectionPolicySchema = z.object({ freshness: z.enum(["NEWS", "EVERGREEN", "MIXED"]).optional(), keywordMatch: z.enum(["REQUIRED", "PREFER"]).optional(), semanticDuplicateThreshold: z.number().min(0.2).max(1).optional(), recentTopicDays: z.number().int().min(1).max(365).optional() });
 export const CollectionRuleSchema = z.object({
+  profile: ChannelCollectionProfileSchema.optional(),
   selectionPolicy: TopicSelectionPolicySchema.optional(),
   keywords: z.array(z.string().min(1).max(80)).min(1).max(20),
   excludedKeywords: z.array(z.string().min(1).max(80)).max(20).default([]),

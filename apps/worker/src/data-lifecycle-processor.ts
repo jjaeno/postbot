@@ -143,6 +143,8 @@ export class DataLifecycleProcessor {
       await tx.platformAccount.deleteMany({ where: { workspaceId } });
       await tx.oAuthConnectionState.deleteMany({ where: { workspaceId } });
       await tx.collectionRule.deleteMany({ where: { channelId: { in: channelIds } } });
+      await tx.sourceFetch.deleteMany({ where: { channelId: { in: channelIds } } });
+      await tx.researchQuestion.deleteMany({ where: { channelId: { in: channelIds } } });
       await tx.channelTemplate.deleteMany({ where: { channelId: { in: channelIds } } });
       await tx.platformOutputProfile.deleteMany({ where: { channelId: { in: channelIds } } });
       await tx.scheduleRule.deleteMany({ where: { channelId: { in: channelIds } } });
