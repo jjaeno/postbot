@@ -301,6 +301,7 @@ test("saves operational controls without overwriting independent platform settin
   let saved = false;
   await page.route(/^https?:\/\/[^/]+\/channels\/channel-1$/, async (route) => {
     expect(route.request().postDataJSON()).toMatchObject({ topic: "Verified rocket", collectionRule: { keywords: ["rocket", "space"], allowedSources: ["https://example.com"], profile: { language: "fr", subtopics: ["Roman history", "Egyptian history"], cadence: { collectMinutes: 360, selectMinutes: 60, produceMinutes: 120 } } }, outputProfiles: [{ platform: "YOUTUBE", hookStyle: "YT only" }], automation: { minInventoryCount: 3 } });
+    expect(route.request().postDataJSON()).toMatchObject({ collectionRule: { profile: { production: { producerConcurrency: 2, reviewCap: 7, scheduledBufferHours: 12 } } } });
     saved = true; await route.fulfill({ json: channel("Science Today") });
   });
   await page.setViewportSize({ width: 390, height: 844 }); await page.goto("/#channels");
@@ -308,6 +309,9 @@ test("saves operational controls without overwriting independent platform settin
   const editor = page.getByTestId("channel-operations-editor");
   await editor.getByRole("button", { name: "역사 초기값", exact: true }).click();
   await editor.getByLabel("제작·검색 언어", { exact: true }).fill("fr");
+  await editor.getByLabel("동시 제작 상한", { exact: true }).fill("2");
+  await editor.getByLabel("검수 대기 상한", { exact: true }).fill("7");
+  await editor.getByLabel("재고에 포함할 가까운 예약 (시간)", { exact: true }).fill("12");
   await editor.getByLabel("세부 주제 (한 줄에 하나)", { exact: true }).fill("Roman history\nEgyptian history");
   await editor.getByLabel("주제", { exact: true }).fill("Verified rocket");
   await editor.getByLabel("수집 키워드 (쉼표 구분)").fill("rocket,space");

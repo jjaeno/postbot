@@ -3,6 +3,7 @@ import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundExce
 import {
   AutomationBudgetRequestSchema,
   TopicSelectionPolicySchema,
+  ChannelCollectionProfileSchema,
   AutomationControlRequestSchema,
   AutomationRunRequestSchema,
   AutomationRunResponseSchema,
@@ -39,10 +40,10 @@ export const isAbandonedAutomationClaim = (updatedAt: Date, now = Date.now()): b
 export const inventoryDeficit = (
   minimum: number,
   generating: number,
-  review: number,
+  _review: number,
   approved: number,
   scheduled: number
-): number => Math.max(0, minimum - (generating + review + approved + scheduled));
+): number => Math.max(0, minimum - (generating + approved + scheduled));
 
 type RunStep = {
   id?: string;
@@ -139,6 +140,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
       where: { id: input.channelId, workspaceId, status: input.sample ? { in: ["ACTIVE", "PAUSED"] } : "ACTIVE" },
       include: {
         platformAccounts: true,
+        collectionRules: { where: { isActive: true }, orderBy: { version: "desc" }, take: 1 },
         scheduleRules: { where: { isActive: true } },
         outputProfiles: { where: { isActive: true } },
         templates: { where: { isActive: true }, orderBy: { version: "desc" }, take: 1 }
@@ -171,50 +173,52 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     const selectedIdea = input.ideaId ? await this.prisma.contentIdea.findFirst({ where: { id: input.ideaId, channelId: channel.id, channel: { workspaceId } } }) : null;
     if (input.ideaId && !selectedIdea) throw new NotFoundException("CONTENT_IDEA_NOT_FOUND");
 
-    const counts = await this.prisma.contentItem.groupBy({
-      by: ["status"],
-      where: { channelId: channel.id },
-      _count: { _all: true }
-    });
-    const count = (status: "GENERATING" | "REVIEW_REQUIRED" | "APPROVED" | "SCHEDULED"): number =>
-      counts.find((entry) => entry.status === status)?._count._all ?? 0;
-    const deficit = selectedIdea || input.sample ? 1 : inventoryDeficit(
-      channel.minInventoryCount,
-      count("GENERATING"),
-      count("REVIEW_REQUIRED"),
-      count("APPROVED"),
-      count("SCHEDULED")
-    );
     const missingFullAutoSetup = !input.sample && channel.automationMode === "FULL_AUTO" && platforms.some((platform) =>
       !channel.platformAccounts.some((account) => account.status === "CONNECTED" && account.platform === platform)
       || !channel.scheduleRules.some((rule) => rule.platform === null || rule.platform === platform)
     );
     const heldReason = missingFullAutoSetup ? "NO_CONNECTED_ACCOUNT_OR_SCHEDULE" : null;
-    const initialStatus: "SKIPPED" | "HELD" | "PENDING" = deficit === 0 ? "SKIPPED" : heldReason ? "HELD" : "PENDING";
     const ideaSnapshot = selectedIdea ? {
       id: selectedIdea.id, channelId: selectedIdea.channelId, title: selectedIdea.title, summary: selectedIdea.summary ?? "",
       canonicalUrl: selectedIdea.canonicalUrl, sourceName: selectedIdea.sourceName, sourceKind: selectedIdea.sourceKind,
       publishedAt: selectedIdea.publishedAt?.toISOString() ?? null, topic: channel.topic ?? channel.name, language: channel.language
     } : null;
-    const steps = [
-      { stage: "COLLECT" as const, platform: null, branchKey: "COMMON", status: selectedIdea && !heldReason ? "SUCCEEDED" as const : initialStatus, ...(ideaSnapshot ? { output: { idea: ideaSnapshot }, finishedAt: new Date() } : {}) },
-      ...platforms.flatMap((platform) => platformStages.map((stage) => ({
-        stage,
-        platform,
-        branchKey: platform,
-        status: initialStatus
-      })))
-    ];
     const reservation = await this.prisma.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM channels WHERE id = ${channel.id} FOR UPDATE`;
+      const duplicate = await tx.automationRun.findUnique({ where: { idempotencyKey: input.idempotencyKey }, include: { steps: { orderBy: [{ platform: "asc" }, { createdAt: "asc" }] } } });
+      if (duplicate) return { run: duplicate, created: false };
+      const currentChannel = await tx.channel.findUniqueOrThrow({ where: { id: channel.id } });
+      if (!input.sample && currentChannel.status !== "ACTIVE") throw new ConflictException("CHANNEL_NOT_ACTIVE");
+      const rule = await tx.collectionRule.findFirst({ where: { channelId: channel.id, isActive: true }, orderBy: { version: "desc" } });
+      const profile = rule?.profile ? ChannelCollectionProfileSchema.parse(rule.profile) : null;
       if (selectedIdea) {
         const current = await tx.contentIdea.findUniqueOrThrow({ where: { id: selectedIdea.id } });
         const reservation = asObject(current.rawSnapshot).reservationRunId;
         if (typeof reservation === "string" && await tx.automationRun.count({ where: { id: reservation, status: { in: ["QUEUED", "RUNNING", "PAUSED", "DRAINING"] } } })) throw new ConflictException("IDEA_ALREADY_IN_PRODUCTION");
         if (["REJECTED", "EXPIRED"].includes(current.status)) throw new ConflictException("IDEA_NOT_AVAILABLE");
       }
-      const active = !selectedIdea && !input.sample ? await tx.automationRun.findFirst({ where: { channelId: channel.id, status: { in: ["QUEUED", "RUNNING", "PAUSED", "DRAINING"] } }, orderBy: { createdAt: "desc" }, include: { steps: { orderBy: [{ platform: "asc" }, { createdAt: "asc" }] } } }) : null;
-      if (active) return { run: active, created: false };
+      const active = await tx.automationRun.findMany({ where: { channelId: channel.id, status: { in: ["QUEUED", "RUNNING", "PAUSED", "DRAINING"] } }, orderBy: { createdAt: "desc" }, include: { steps: { orderBy: [{ platform: "asc" }, { createdAt: "asc" }] } } });
+      const producers = active.filter((run) => asObject(run.checkpoint).collectionMode === undefined && run.steps.some((step) => ["COLLECT", "SCRIPT", "ASSET", "TTS", "RENDER"].includes(step.stage) && !["SUCCEEDED", "SKIPPED", "CANCELLED"].includes(step.status)));
+      if (producers.length >= (profile?.production.producerConcurrency ?? 1)) {
+        if (selectedIdea || input.sample) throw new ConflictException("PRODUCER_CONCURRENCY_LIMIT");
+        return { run: producers[0]!, created: false };
+      }
+      if (active.some((run) => run.status === "DRAINING" || (run.status === "PAUSED" && asObject(run.checkpoint).explicitPause === true))) throw new ConflictException("CHANNEL_PRODUCTION_EXPLICITLY_PAUSED");
+      const counts = await tx.contentItem.groupBy({ by: ["status"], where: { channelId: channel.id }, _count: { _all: true } });
+      const count = (status: string) => counts.find((entry) => entry.status === status)?._count._all ?? 0;
+      const nearScheduled = await tx.contentItem.count({ where: { channelId: channel.id, status: "SCHEDULED", publishPlans: { some: { status: "SCHEDULED", scheduledAt: { lte: new Date(Date.now() + (profile?.production.scheduledBufferHours ?? 24) * 3600000) } } } } });
+      const deficit = selectedIdea || input.sample ? 1 : inventoryDeficit(currentChannel.minInventoryCount, Math.max(count("GENERATING"), producers.length), count("REVIEW_REQUIRED"), count("APPROVED"), nearScheduled);
+      if (!input.sample && count("REVIEW_REQUIRED") >= (profile?.production.reviewCap ?? 5)) throw new ConflictException("PRODUCTION_REVIEW_CAP_REACHED");
+      const initialStatus: "SKIPPED" | "HELD" | "PENDING" = deficit === 0 ? "SKIPPED" : heldReason ? "HELD" : "PENDING";
+      const steps = [
+        { stage: "COLLECT" as const, platform: null, branchKey: "COMMON", status: selectedIdea && !heldReason ? "SUCCEEDED" as const : initialStatus, ...(ideaSnapshot ? { output: { idea: ideaSnapshot }, finishedAt: new Date() } : {}) },
+        ...platforms.flatMap((platform) => platformStages.map((stage) => ({
+          stage,
+          platform,
+          branchKey: platform,
+          status: initialStatus
+        })))
+      ];
       const created = await tx.automationRun.create({
       data: {
         channelId: channel.id,
@@ -226,8 +230,9 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
           deficit,
           completed: [],
           platforms,
-          partial: input.partial
-          , sample: input.sample === true
+          partial: input.partial,
+          selectStoredOnly: profile !== null,
+          sample: input.sample === true
         },
         nextRunAt: deficit === 0 || heldReason ? null : new Date(),
         steps: { create: steps },
@@ -235,12 +240,15 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
       },
       include: { steps: { orderBy: [{ platform: "asc" }, { createdAt: "asc" }] } }
       });
-      if (selectedIdea) await tx.contentIdea.update({ where: { id: selectedIdea.id }, data: { rawSnapshot: { ...asObject(selectedIdea.rawSnapshot), reservationRunId: created.id } } });
+      if (selectedIdea) {
+        const current = await tx.contentIdea.findUniqueOrThrow({ where: { id: selectedIdea.id } });
+        await tx.contentIdea.update({ where: { id: selectedIdea.id }, data: { rawSnapshot: { ...asObject(current.rawSnapshot), reservationRunId: created.id } } });
+      }
       return { run: created, created: true };
     });
     const run = reservation.run;
     if (!reservation.created) return this.toResponse(run);
-    if (deficit > 0 && !heldReason) {
+    if (run.status === "QUEUED") {
       if (selectedIdea) await Promise.all(platforms.map((platform) => this.enqueueStage(workspaceId, run.id, channel.id, "SCRIPT", platform)));
       else await this.enqueueStage(workspaceId, run.id, channel.id, "COLLECT", null);
     }
@@ -509,6 +517,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
             status,
             pausedReason: input.action === "resume" ? null : input.reason ?? input.action,
             nextRunAt: input.action === "resume" ? new Date() : null,
+            checkpoint: { ...asObject(run.checkpoint), explicitPause: input.action === "pause" || input.action === "drain" },
             budgetReserved: { decrement: released }
           }
         });
@@ -662,6 +671,8 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     };
 
     if (stage === "COLLECT") {
+      const currentRun = await this.prisma.automationRun.findUniqueOrThrow({ where: { id: runId }, select: { checkpoint: true } });
+      const checkpoint = asObject(currentRun.checkpoint);
       const rule = channel.collectionRules[0];
       if (!rule) {
         await this.holdStep(runId, stage, null, "COLLECTION_RULE_REQUIRED");
@@ -673,6 +684,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
         payload: {
           automation,
           collect: {
+            mode: checkpoint.collectionMode ?? (checkpoint.selectStoredOnly === true ? "SELECT" : "COLLECT_SELECT"),
             channelId,
             topic: channel.topic ?? channel.name,
             language: channel.language,
@@ -1097,7 +1109,17 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     await Promise.all(channels.map(async (channel) => {
       const rule = channel.collectionRules[0];
       if (!rule) return;
-      const intervalMs = rule.collectionFrequencyMinutes * 60_000;
+      const profile = rule.profile ? ChannelCollectionProfileSchema.parse(rule.profile) : null;
+      if (profile) {
+        for (const [mode, minutes] of [["DISCOVER", profile.cadence.collectMinutes], ["RANK", profile.cadence.selectMinutes]] as const) {
+          try { await this.scheduleCollectionPass(channel.workspaceId, channel.id, mode, Math.floor(now.getTime() / (minutes * 60000))); } catch { /* Independent cadence retries on the next tick. */ }
+        }
+        const available = await this.prisma.contentIdea.count({ where: { channelId: channel.id, status: { in: ["CANDIDATE", "SHORTLISTED"] }, usedContentItemId: null, rejectionReason: null } });
+        if (available === 0) return;
+        const waiting = await this.prisma.automationRun.findFirst({ where: { channelId: channel.id, pausedReason: "NO_UNUSED_SOURCE_CANDIDATE", nextRunAt: { gt: now } } });
+        if (waiting) return;
+      }
+      const intervalMs = (profile?.cadence.produceMinutes ?? rule.collectionFrequencyMinutes) * 60_000;
       const bucket = Math.floor(now.getTime() / intervalMs);
       try {
         await this.start(channel.workspaceId, {
@@ -1125,6 +1147,22 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     } finally {
       this.scheduling = false;
     }
+  }
+
+  private async scheduleCollectionPass(workspaceId: string, channelId: string, mode: "DISCOVER" | "RANK", bucket: number): Promise<void> {
+    const idempotencyKey = `collection:${channelId}:${mode}:${bucket}`;
+    const run = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM channels WHERE id = ${channelId} FOR UPDATE`;
+      const channel = await tx.channel.findUniqueOrThrow({ where: { id: channelId } });
+      if (channel.status !== "ACTIVE") return null;
+      if (await tx.automationSwitch.count({ where: { workspaceId, provider: null, isEnabled: false } })) return null;
+      const existing = await tx.automationRun.findUnique({ where: { idempotencyKey } });
+      if (existing) return existing;
+      const pending = await tx.automationRun.findFirst({ where: { channelId, status: { in: ["QUEUED", "RUNNING", "PAUSED"] }, checkpoint: { path: "$.collectionMode", equals: mode } } });
+      if (pending) return pending;
+      return tx.automationRun.create({ data: { channelId, idempotencyKey, status: "QUEUED", checkpoint: { collectionMode: mode }, steps: { create: { stage: "COLLECT", branchKey: "COMMON", status: "PENDING" } } } });
+    });
+    if (run && ["QUEUED", "RUNNING"].includes(run.status)) await this.enqueueStage(workspaceId, run.id, channelId, "COLLECT", null);
   }
 
   private async resumeNextStep(run: {
@@ -1186,6 +1224,11 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
       finishedAt: ["SUCCEEDED", "CANCELLED"].includes(run.status) ? run.updatedAt?.toISOString() ?? null : null,
       channelId: run.channelId,
       status: run.status,
+      productionState: asObject(run.checkpoint).collectionMode ? "DISCOVERY" : run.status === "CANCELLED" ? "CANCELLED"
+        : asObject(run.checkpoint).skipped === true || asObject(run.checkpoint).stage === "inventory-satisfied" ? "NOT_REQUIRED"
+        : run.steps.some((step) => ["COLLECT", "SCRIPT", "ASSET", "TTS", "RENDER"].includes(step.stage) && step.status === "FAILED") ? "FAILED"
+        : run.steps.some((step) => ["COLLECT", "SCRIPT", "ASSET", "TTS", "RENDER", "POLICY"].includes(step.stage) && step.status === "HELD") ? "REVIEW_REQUIRED"
+        : run.steps.filter((step) => step.stage !== "PUBLISH").every((step) => ["SUCCEEDED", "SKIPPED", "CANCELLED"].includes(step.status)) ? "READY" : "PRODUCING",
       idempotencyKey: run.idempotencyKey,
       checkpoint: run.checkpoint,
       failureCount: run.failureCount,

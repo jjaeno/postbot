@@ -1,10 +1,56 @@
 import { PrismaClient } from "@postbot/database";
+import { collectionProfilePreset } from "@postbot/contracts";
 import { randomUUID } from "node:crypto";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { CollectProcessor } from "./collect-processor.js";
+import { DeterministicJobProcessor } from "./job-processor.js";
 
 describe.skipIf(process.env.RUN_DB_INTEGRATION !== "1")("stored topic reevaluation", () => {
   const prisma = new PrismaClient(); afterAll(() => prisma.$disconnect());
+  it("holds an already queued job when its channel pauses and ends empty selections until collection is due", async () => {
+    const key = randomUUID();
+    const user = await prisma.user.create({ data: { email: `${key}@pause.test`, displayName: "Fixture", passwordHash: "fixture" } });
+    const workspace = await prisma.workspace.create({ data: { ownerId: user.id, name: "Fixture", slug: key } });
+    const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Fixture", slug: key, collectionRules: { create: { keywords: ["absent"], recencyHours: 24, collectionFrequencyMinutes: 60 } } } });
+    const run = await prisma.automationRun.create({ data: { channelId: channel.id, status: "RUNNING", idempotencyKey: key } });
+    const payload = { automation: { runId: run.id, stage: "COLLECT" }, collect: { mode: "SELECT", channelId: channel.id, topic: "absent", language: "en", keywords: ["absent"], excludedKeywords: [], excludedTopics: [], allowedSources: [], excludedSources: [], recencyHours: 24, idempotencyKey: key } };
+    const job = await prisma.productionJob.create({ data: { channelId: channel.id, type: "COLLECT", queueName: "collect", idempotencyKey: key, payload } });
+    await prisma.automationStep.create({ data: { automationRunId: run.id, stage: "COLLECT", branchKey: "COMMON", status: "QUEUED", productionJobId: job.id } });
+    const processor = new DeterministicJobProcessor(prisma);
+    await processor.process({ id: job.id, type: "COLLECT", queueName: "collect", runAfter: null, payload });
+    const emptyRun = await prisma.automationRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(emptyRun).toMatchObject({ status: "SUCCEEDED", pausedReason: "NO_UNUSED_SOURCE_CANDIDATE" });
+    expect(emptyRun.nextRunAt!.getTime()).toBeGreaterThan(Date.now() + 3500000);
+    await prisma.channel.update({ where: { id: channel.id }, data: { status: "PAUSED" } });
+    const paused = await prisma.productionJob.create({ data: { channelId: channel.id, type: "ASSET", queueName: "asset", idempotencyKey: `${key}:paused`, payload: {} } });
+    await processor.process({ id: paused.id, type: "ASSET", queueName: "asset", runAfter: null, payload: {} });
+    expect(await prisma.productionJob.findUniqueOrThrow({ where: { id: paused.id } })).toMatchObject({ status: "NEEDS_REVIEW", errorCode: "CHANNEL_NOT_ACTIVE", startedAt: null });
+    expect(await prisma.providerUsage.count({ where: { productionJobId: paused.id } })).toBe(0);
+  });
+  it("ranks stored candidates without external reads or claims and atomically selects once", async () => {
+    const key = randomUUID();
+    const user = await prisma.user.create({ data: { email: `${key}@cadence.test`, displayName: "Fixture", passwordHash: "fixture" } });
+    const workspace = await prisma.workspace.create({ data: { ownerId: user.id, name: "Fixture", slug: key } });
+    const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Fixture", slug: key } });
+    const profile = collectionProfilePreset("SCIENCE", "en"); profile.subtopics = ["rocket"];
+    await prisma.collectionRule.create({ data: { channelId: channel.id, profile, keywords: ["rocket"], recencyHours: 72, collectionFrequencyMinutes: 60 } });
+    const candidate = await prisma.contentIdea.create({ data: { channelId: channel.id, title: "How reusable rocket recovery works", summary: "rocket recovery process and data", canonicalUrl: `https://example.org/${key}`, urlHash: key, contentHash: key, sourceName: "Fixture", sourceKind: "OFFICIAL", provider: "fixture", reliabilityScore: 1, suitabilityScore: 1, freshnessScore: 1, expectedValueScore: 1, publishedAt: new Date() } });
+    const runs = await Promise.all([0, 1, 2].map((index) => prisma.automationRun.create({ data: { channelId: channel.id, status: "RUNNING", idempotencyKey: `${key}:${index}` } })));
+    const collect = vi.fn(() => { throw new Error("STORED_SELECTION_MUST_NOT_CALL_PROVIDER"); });
+    const processor = new CollectProcessor(prisma, { collect });
+    const payload = (runId: string, mode: "RANK" | "SELECT") => ({ automation: { runId, stage: "COLLECT" }, collect: { mode, channelId: channel.id, topic: "rocket", language: "en", keywords: ["rocket"], excludedKeywords: [], excludedTopics: [], allowedSources: [], excludedSources: [], recencyHours: 72, idempotencyKey: `${key}:${runId}` } });
+    expect(await processor.process(payload(runs[0]!.id, "RANK"))).toMatchObject({ ranked: 0 });
+    expect((await prisma.contentIdea.findUniqueOrThrow({ where: { id: candidate.id } })).rejectionReason).toBe("VISUAL_REFERENCE_REQUIRED");
+    await prisma.contentIdea.update({ where: { id: candidate.id }, data: { rawSnapshot: { visualReferences: { references: ["https://example.org/reference.png"], rights: "ITEM_REVIEW_REQUIRED" } } } });
+    expect(await processor.process(payload(runs[0]!.id, "RANK"))).toMatchObject({ ranked: 1 });
+    expect((await prisma.contentIdea.findUniqueOrThrow({ where: { id: candidate.id } })).rawSnapshot).not.toHaveProperty("reservationRunId");
+    const results = await Promise.allSettled(runs.slice(1).map((run) => processor.process(payload(run.id, "SELECT"))));
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.find((result) => result.status === "rejected")).toMatchObject({ reason: { message: "NO_UNUSED_SOURCE_CANDIDATE_WAIT_FOR_NEXT_COLLECTION" } });
+    expect(collect).not.toHaveBeenCalled();
+    await prisma.channel.update({ where: { id: channel.id }, data: { status: "PAUSED" } });
+    await expect(processor.process(payload(runs[0]!.id, "SELECT"))).rejects.toThrow("CHANNEL_NOT_ACTIVE");
+  });
   it("uses current scores and filters, releases cancelled reservations and rejects a recent event duplicate", async () => {
     const key = randomUUID();
     const user = await prisma.user.create({ data: { email: `${key}@selection.test`, displayName: "Fixture", passwordHash: "fixture" } });

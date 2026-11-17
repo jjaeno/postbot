@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { AmbiguousPublishError } from "@postbot/publishers";
 import { assertExecutionOwner, jobExecution, assertJobScope, type Prisma, type PrismaClient } from "@postbot/database";
 import type { EnqueueJobInput } from "@postbot/jobs";
-import { AssetPreparationJobPayloadSchema, CollectAutomationJobPayloadSchema, PolicyAutomationJobPayloadSchema, RenderJobPayloadSchema, ScriptGenerationJobPayloadSchema, TtsPreparationJobPayloadSchema } from "@postbot/contracts";
+import { AssetPreparationJobPayloadSchema, ChannelCollectionProfileSchema, CollectAutomationJobPayloadSchema, PolicyAutomationJobPayloadSchema, RenderJobPayloadSchema, ScriptGenerationJobPayloadSchema, TtsPreparationJobPayloadSchema } from "@postbot/contracts";
 import { ScriptGenerationProcessor } from "./script-generation-processor.js";
 import { AssetPreparationProcessor } from "./asset-preparation-processor.js";
 import { RenderProcessor } from "./render-processor.js";
@@ -123,12 +123,24 @@ export class DeterministicJobProcessor {
     input = { ...input, type: persisted.type, payload: persisted.payload as Record<string, unknown>, runAfter: persisted.runAfter };
 
     const runId = automationRunId(input.payload);
-    const run = runId ? await this.prisma.automationRun.findUnique({ where: { id: runId }, select: { status: true } }) : null;
+    const run = runId ? await this.prisma.automationRun.findUnique({ where: { id: runId }, select: { status: true, checkpoint: true } }) : null;
     if (runId && run?.status === "CANCELLED") {
       await this.cancel(input.id, null);
       return;
     }
     if (runId && run && !["QUEUED", "RUNNING"].includes(run.status)) return;
+    if (persisted.channelId) {
+      const channel = await this.prisma.channel.findUnique({ where: { id: persisted.channelId }, select: { status: true } });
+      const sample = run?.checkpoint && typeof run.checkpoint === "object" && !Array.isArray(run.checkpoint) && run.checkpoint.sample === true;
+      if (channel && channel.status !== "ACTIVE" && !(sample && channel.status === "PAUSED")) {
+        await this.prisma.productionJob.update({ where: { id: input.id }, data: { status: "NEEDS_REVIEW", errorCode: "CHANNEL_NOT_ACTIVE" } });
+        if (runId) await this.prisma.$transaction([
+          this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: input.id }, data: { status: "HELD", errorCode: "CHANNEL_NOT_ACTIVE" } }),
+          this.prisma.automationRun.updateMany({ where: { id: runId, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "PAUSED", pausedReason: "CHANNEL_NOT_ACTIVE" } })
+        ]);
+        return;
+      }
+    }
     if (await this.isProviderDisabled(input.id, input.type)) {
       await this.holdForProviderSwitch(input.id, input.type);
       return;
@@ -193,7 +205,8 @@ export class DeterministicJobProcessor {
         const message = error instanceof Error ? error.message : "COLLECT_FAILED";
         if (message === "NO_UNUSED_SOURCE_CANDIDATE_WAIT_FOR_NEXT_COLLECTION" && runId) {
           const rule = await this.prisma.collectionRule.findFirst({ where: { channelId: persisted.channelId ?? "", isActive: true }, orderBy: { version: "desc" } });
-          const next = new Date(Date.now() + (rule?.collectionFrequencyMinutes ?? 60) * 60_000);
+          const profile = rule?.profile ? ChannelCollectionProfileSchema.parse(rule.profile) : null;
+          const next = new Date(Date.now() + (profile?.cadence.collectMinutes ?? rule?.collectionFrequencyMinutes ?? 60) * 60_000);
           await this.succeed(input.id, attemptNumber, { skipped: true, reason: message, nextCollectionAt: next.toISOString() });
           await this.prisma.$transaction([
             this.prisma.automationStep.updateMany({ where: { automationRunId: runId, status: { not: "CANCELLED" } }, data: { status: "SKIPPED", errorCode: "NO_UNUSED_SOURCE_CANDIDATE", finishedAt: new Date() } }),

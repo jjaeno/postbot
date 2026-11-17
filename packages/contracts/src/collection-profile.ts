@@ -17,6 +17,8 @@ export const ChannelCollectionProfileSchema = z.object({
     targetCandidates: z.number().int().min(1).max(100), recentTopicDays: z.number().int().min(1).max(365),
     maxPersonRepeats: z.number().int().min(1).max(20), maxEventRepeats: z.number().int().min(1).max(20), maxSubtopicRepeats: z.number().int().min(1).max(20) }).strict(),
   production: z.object({ maxEstimatedCostUsd: z.string().regex(/^\d{1,6}(?:\.\d{1,6})?$/),
+    producerConcurrency: z.number().int().min(1).max(10).default(1), reviewCap: z.number().int().min(1).max(100).default(5),
+    scheduledBufferHours: z.number().int().min(0).max(168).default(24),
     minSeconds: z.number().int().min(15).max(180), maxSeconds: z.number().int().min(15).max(180),
     requireVisualEvidence: z.boolean() }).strict()
 }).strict().refine((p) => p.production.minSeconds <= p.production.maxSeconds, { message: "PROFILE_DURATION_INVALID" });

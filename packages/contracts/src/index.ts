@@ -556,6 +556,7 @@ export const AutomationJobContextSchema = z.object({
 
 export const CollectAutomationJobPayloadSchema = AutomationJobContextSchema.extend({
   collect: z.object({
+    mode: z.enum(["DISCOVER", "RANK", "SELECT", "COLLECT_SELECT"]).default("COLLECT_SELECT"),
     selectionPolicy: TopicSelectionPolicySchema.optional(),
     channelId: z.string().min(1),
     topic: z.string().min(1),
@@ -653,6 +654,7 @@ export const AutomationRunRequestSchema = z.object({
 });
 export const AutomationControlRequestSchema = z.object({ action: z.enum(["pause", "resume", "drain", "kill", "retry", "hold", "skip"]), reason: z.string().max(500).optional(), stage: AutomationStageSchema.optional(), platform: PlatformSchema.optional() });
 export const AutomationRunResponseSchema = z.object({
+  productionState: z.enum(["DISCOVERY", "NOT_REQUIRED", "PRODUCING", "REVIEW_REQUIRED", "READY", "FAILED", "CANCELLED"]).optional(),
   id: z.string(), channelId: z.string(), status: AutomationRunStatusSchema, idempotencyKey: z.string(),
   createdAt: z.string().datetime().optional(), finishedAt: z.string().datetime().nullable().optional(),
   checkpoint: z.record(z.string(), z.unknown()).nullable(), failureCount: z.number().int(),

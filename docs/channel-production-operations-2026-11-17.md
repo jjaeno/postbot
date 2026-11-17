@@ -91,6 +91,16 @@ Remotion은 AbortSignal을 취소 신호와 직접 소유한 Chromium 종료에 
 
 실제 Docker Chromium/FFmpeg의 1080×1920, 6초 영상과 HOOK/COMPARISON/PROCESS 대표 프레임 3장을 출력해 직접 확인했다. 합성 음성과 BGM fixture이며 실제 유료 TTS가 아니다. QA: audio=true, mean -15.3dB, peak -10.4dB, blackFrameRatio=0. 첫 프레임에서 발견한 한글 어절 분리를 수정하고 재출력해 확인했다. 산출물은 로컬 .artifacts/production-qa-2026-11-18에 있으며 Git에는 포함하지 않는다. 넓게 실행된 worker 검사에서 병렬 부하에 의한 5초 timeout과 서로 다른 메모리 저장소를 사용한 fixture 결함을 발견했다. 저장소를 주입해 동일 Fake 객체를 사용하도록 고친 뒤 관련 4파일 14개를 단일 worker로 재검증했다. 객체 누락 검사는 완화하지 않았다. migration 없음. 실제 Provider 청감/타임스탬프 검증은 외부 확인 필요다.
 
+## 20.6 제작 수요와 운영 대기
+
+제작 수요는 채널 행 잠금 안에서 다시 계산하고 run 생성과 후보 예약을 함께 선점한다. 생성 중 콘텐츠/실행, 승인된 재고, 설정된 시간 안의 가까운 예약을 준비 재고로 계산한다. 검수 대기는 별도 상한으로 관리하며 멀리 있는 예약은 준비 버퍼를 채우지 않는다. 렌더를 마친 승인·정책·게시 대기는 producer slot을 점유하지 않는다. 제작 중 보류는 slot을 유지해 불명확 유료 작업을 우회하지 않는다. 명시적 pause/drain은 새 제작으로 우회하지 않으며 비활성 채널의 이미 큐에 있던 작업도 시작 전에 검토 보류한다. 사용자가 명시적으로 요청한 PAUSED 채널의 샘플 제작 예외는 유지한다.
+
+프로필 production에 producerConcurrency(기본 1), reviewCap(기본 5), scheduledBufferHours(기본 24)를 추가하고 운영 화면에서 편집한다. 기존 JSON은 읽을 때 기본값을 적용하며 DB 강제 backfill은 없다. run 응답의 productionState는 DISCOVERY/NOT_REQUIRED/PRODUCING/REVIEW_REQUIRED/READY/FAILED/CANCELLED로 제작 책임을 표시하고 기존 status는 운영 실행 상태로 유지한다. READY는 게시 성공을 의미하지 않는다.
+
+프로필 채널은 DISCOVER(외부 수집), RANK(저장 후보 재평가), SELECT(제작용 원자적 후보 선점)를 구분한다. 수집·선정·제작 주기는 각각 독립된 durable 멱등 키를 사용한다. 수집과 후보 평가만 하는 run에는 유료 제작 단계를 만들지 않는다. 선정은 원격 소스를 재호출하지 않으며 현재 규칙과 중복·예약 상태를 재검사한다. 시각 자료 확보 조건은 실제 HTTPS 참고 자료가 있는 후보만 통과시키며 권리 승인을 대신하지 않는다. 후보가 없으면 다음 수집 시각까지 기다리고 새 빈 제작 run을 매 tick 생성하지 않는다. 프로필 없는 기존 채널은 기존 수집+선정 경로를 유지한다.
+
+검증: API 기존 자동화/분기/시뮬레이터/복구와 새 실제 MySQL·Redis 수요 테스트 총 25개 통과. 7일 뒤 실제 예약 3개와 승인 대기를 유지하면서 보충, 다른 키의 동시 요청에서 2개 producer 상한, 검수 5개 상한, 수집/RANK 키 경쟁과 Redis waiting 상태를 확인했다. worker 기존 생성/Redis 재전달 회귀 6개와 후보 평가/경쟁/빈 선정/채널 정지 3개 통과. 새 fixture의 필수 점수·workspaceId 누락을 수정 후 재검증했다. 모바일 Playwright로 동시 제작 2·검수 7·가까운 예약 12시간 저장과 기존 플랫폼 설정 보존 통과. 변경 contracts/API/worker/web lint·typecheck 통과. migration 없음. 전역 보존·사용량 정산·게시 결과 대사는 후속 단계다.
+
 ## 공식 문서 확인
 
 확인일 2026-11-17. 구현 단계별로 해당 사양·정책을 다시 대조하며 고정 가격/과거 할당량을 근거 없이 넣지 않는다. 갱신 책임: 해당 Provider/connector 유지보수자.

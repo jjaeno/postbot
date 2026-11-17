@@ -15,7 +15,7 @@ export type SimulationInput = {
 export type SimulationResult = { generated: number; reserved: number; published: boolean; paused: boolean; heldReason: string | null };
 
 export const simulateAutomationRun = (input: SimulationInput): SimulationResult => {
-  const available = input.inventory.generating + input.inventory.review + input.inventory.approved + input.inventory.scheduled;
+  const available = input.inventory.generating + input.inventory.approved + input.inventory.scheduled;
   const generated = Math.max(0, input.minimumInventory - available);
   let reserved = 0;
   for (const estimate of input.estimatedCosts) {
