@@ -65,6 +65,20 @@ Migration `202611170005_collection_profiles`: nullable profile 추가와 source_
 
 검증: scene-schema 16개, worker 생성/Hook unit 및 실제 MySQL·Redis 생성/중복 전달/취소 회귀 7개, API 권리·플랫폼 격리·메타데이터·변경 장면 이미지 무효화 회귀 6개 통과. 첫 worker integration 실행의 테스트 Redis 주소 누락을 중단하고 격리 16379 포트로 다시 실행했다. 변경 scene-schema/providers/API/worker lint·typecheck 통과. migration 없음. Provider의 이미지 참조·공유 캐시·실제 음성 시간·렌더 중단은 후속 단계 범위다.
 
+## 20.4 자산 캐시와 권리 정책 (11월 18일 재개)
+
+GRAPHIC 장면은 이미지 수량·스톡 선택·유료 이미지 호출에서 제외한다. 채널의 공통 visualGuide와 장면별 subject/setting/continuity/avoid 요구사항을 저장하고 생성 프롬프트에 함께 전달한다. 참조 자산은 같은 채널과 유효 권리를 검사한다. 현재 이미지 어댑터는 텍스트 설명만 지원하며 실제 이미지 참조 conditioning을 구현했다고 표시하지 않는다.
+
+호출 전 캐시는 채널별 입력 키를 MySQL 행 잠금으로 선점한다. 키에는 Provider·모델·계정/계약 범위·이미지 프롬프트·크기·가이드/설정 버전 또는 음성·전체 낭독문·정규화/설정 버전을 포함한다. 다른 플랫폼에서 동일 입력을 재요청해도 실제 Provider 호출과 비용 기록은 한 번이다. 진행 중 호출은 대기로, 불명확 호출은 원래 journal/캐시 키를 보존한 검토로 처리한다. 캐시와 이미 준비된 자산 모두 실제 파일을 확인하며 누락을 ready로 취급하거나 자동 재과금하지 않는다. 캐시 조회는 현재 license를 다시 평가한다. 비밀 키는 저장하지 않으며 미설정 계정은 비밀 키의 비가역 fingerprint로 캐시를 구분하되 권리 승인 근거로 사용하지 않는다.
+
+권리 API는 `GET/POST /channels/:channelId/provider-rights`, `POST /channels/:channelId/provider-rights/:policyId/revoke`다. 생성은 OWNER의 확인, 증빙 URL/문서 해시/약관 버전/검토 메모, 정확한 Provider·모델·계정 참조·계약 버전 및 유효 기간을 요구한다. 해당 범위에서 생성한 자산만 정책 FK와 기간을 가진 license를 얻는다. 미확정 계정/계약, 다른 모델, 만료/철회된 정책은 검토가 필요하다. Provider 이름만 보고 VERIFIED로 승격하지 않는다. 철회 시 연결 자산의 권리 이력을 추가하고 관련 SCHEDULED 예약을 HELD로 전환한다. 이미 진행 중이거나 완료한 외부 게시를 취소했다고 보고하지 않는다.
+
+환경 변수: `IMAGE_PROVIDER_ACCOUNT_REF`, `IMAGE_PROVIDER_CONTRACT_VERSION`, `TTS_PROVIDER_ACCOUNT_REF`, `TTS_PROVIDER_CONTRACT_VERSION`. 계정 참조는 운영자가 관리하는 비밀이 아닌 식별자다. 실제 API 키나 계약 원문을 넣지 않는다. Google/ElevenLabs의 최신 공식 약관과 계정별 계약을 운영자가 확인한 후 증빙을 등록한다.
+
+Migration `202611170006_generation_cache_rights`: generation cache와 versioned rights policy, asset license의 nullable policy FK 추가. 새 테스트 DB 및 기존 테스트 DB 업그레이드 통과. 기존 자산/권리는 backfill이나 자동 승인 없이 유지한다. rollback은 이전 앱과 추가 DB 구조를 유지하는 방식이며, 캐시/journal 삭제는 유료 호출 중복 위험 때문에 복구 방법으로 제공하지 않는다. workspace 명시 삭제 시 관련 신규 FK 순서를 반영했다.
+
+검증: asset-library 10개(실제 DB 동시 선점, 플랫폼 간 이미지·음성 재사용, 음성 변경, 파일 누락 포함), API 권리/검수 회귀 7개, worker GRAPHIC·기존 불명확 호출 journal 회귀 5개, scene-schema 16개 통과. 변경 asset-library/config/database/scene-schema/API/worker lint·typecheck 통과. 실제 유료 호출이나 외부 게시 없음. 실제 시각 연속성은 이미지 참조 미지원 한계를 포함해 후속 renderer smoke와 외부 확인을 구분한다.
+
 ## 공식 문서 확인
 
 확인일 2026-11-17. 구현 단계별로 해당 사양·정책을 다시 대조하며 고정 가격/과거 할당량을 근거 없이 넣지 않는다. 갱신 책임: 해당 Provider/connector 유지보수자.
@@ -72,3 +86,4 @@ Migration `202611170005_collection_profiles`: nullable profile 추가와 source_
 - [YouTube search](https://developers.google.com/youtube/data/reference/rest/v3/search/list), [playlistItems](https://developers.google.com/youtube/data/reference/rest/v3/playlistItems/list), [정책](https://developers.google.com/youtube/terms/developer-policies), [정책 가이드](https://developers.google.com/youtube/terms/developer-policies-guide)
 - [LoC JSON API](https://www.loc.gov/apis/json-and-yaml/requests/)
 - [NASA API](https://api.nasa.gov/), [이미지 API 명세](https://images.nasa.gov/docs/images.nasa.gov_api_docs.pdf)
+- 2026-11-18 재확인: [Gemini API 약관](https://aistudio.google.com/docs/terms), [ElevenLabs TTS 문서](https://elevenlabs.io/docs/overview/capabilities/text-to-speech). 소유권·계정 요금제·상업 사용·제한 조건을 각각 검토해야 하며 일반 약관 링크만으로 개별 자산 권리를 확정하지 않는다.

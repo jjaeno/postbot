@@ -4,6 +4,7 @@ import { AssetPreparationJobPayloadSchema, TtsPreparationJobPayloadSchema } from
 import { assertExecutionOwner, type Prisma, type PrismaClient } from "@postbot/database";
 import { FakeImageProvider, FakeStorageProvider, FakeTtsProvider, GoogleImageProvider, ElevenLabsTtsProvider, S3StorageProvider, resolveTtsVoice } from "@postbot/providers";
 import { SceneDocumentSchema, aiSceneCount } from "@postbot/scene-schema";
+import { createHash } from "node:crypto";
 
 export class AssetPreparationProcessor {
   private readonly preparation: AssetPreparationService;
@@ -21,7 +22,10 @@ export class AssetPreparationProcessor {
       ? new ElevenLabsTtsProvider({ apiKey: this.config.ELEVENLABS_API_KEY, timeoutMs: this.config.TTS_TIMEOUT_MS, usdPerThousandCharacters: this.config.TTS_USD_PER_THOUSAND_CHARACTERS })
       : new FakeTtsProvider();
     this.assets = new AssetRepository(prisma, storage);
-    this.preparation = new AssetPreparationService(this.assets, image, tts);
+    this.preparation = new AssetPreparationService(this.assets, image, tts, { imageProvider: this.config.IMAGE_PROVIDER, ttsProvider: this.config.TTS_PROVIDER,
+      imageAccountRef: this.config.IMAGE_PROVIDER_ACCOUNT_REF || `unconfirmed:${createHash("sha256").update(this.config.GOOGLE_API_KEY).digest("hex")}`,
+      ttsAccountRef: this.config.TTS_PROVIDER_ACCOUNT_REF || `unconfirmed:${createHash("sha256").update(this.config.ELEVENLABS_API_KEY).digest("hex")}`,
+      imageContractVersion: this.config.IMAGE_PROVIDER_CONTRACT_VERSION, ttsContractVersion: this.config.TTS_PROVIDER_CONTRACT_VERSION });
   }
 
   private async realMediaCall<Result>(jobId: string, key: string, operation: () => Promise<Result>, canReuse: () => Promise<boolean>): Promise<Result> {
@@ -55,13 +59,19 @@ export class AssetPreparationProcessor {
     const document = SceneDocumentSchema.parse(version.sceneDocument);
     const platformKey = input.platform ?? "COMMON";
     const assets = [];
-    const aiCount = aiSceneCount(document.scenes.length, document.aiStockRatio ?? 1);
-    const stock = aiCount < document.scenes.length ? await this.assets.selectLicensedStock(input.channelId) : [];
+    const imageScenes = document.scenes.filter((scene) => scene.visualMode !== "GRAPHIC");
+    if (document.visualGuide?.referenceAssetIds.length) {
+      const references = await this.prisma.asset.findMany({ where: { id: { in: document.visualGuide.referenceAssetIds }, channelId: input.channelId } });
+      if (references.length !== document.visualGuide.referenceAssetIds.length) throw new Error("VISUAL_REFERENCE_SCOPE_INVALID");
+      for (const reference of references) { const license = await this.assets.getLicense(reference.id); if (!license || license.status !== "verified" || !license.derivativeAllowed || !license.commercialUseAllowed) throw new Error("VISUAL_REFERENCE_RIGHTS_REVIEW_REQUIRED"); }
+    }
+    const aiCount = aiSceneCount(imageScenes.length, document.aiStockRatio ?? 1);
+    const stock = aiCount < imageScenes.length ? await this.assets.selectLicensedStock(input.channelId) : [];
     // Validate stock availability before making any paid AI requests.
-    if (aiCount < document.scenes.length && stock.length === 0) return { assets: [], needsReview: true, reviewCode: "STOCK_ASSET_REQUIRED", contentItemId: input.contentItemId };
+    if (aiCount < imageScenes.length && stock.length === 0) return { assets: [], needsReview: true, reviewCode: "STOCK_ASSET_REQUIRED", contentItemId: input.contentItemId };
     const selections = new Map<string, typeof stock[number]>();
     const uses = new Map<string, number>();
-    for (const scene of document.scenes.slice(aiCount)) {
+    for (const scene of imageScenes.slice(aiCount)) {
       const prepared = await this.assets.findPreparedImage({ channelId: input.channelId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose: `scene-image:${platformKey}:${scene.id}` });
       const ranked = stock.map((asset) => ({ asset, score: scoreStockMatch(scene.visualPrompt, asset, uses.get(asset.assetId) ?? 0) }))
         .filter((entry) => entry.score >= 0.25 && (!prepared || prepared.assetId === entry.asset.assetId))
@@ -70,7 +80,7 @@ export class AssetPreparationProcessor {
       if (!selected) return { assets: [], needsReview: true, reviewCode: "STOCK_MATCH_REQUIRED", sceneId: scene.id, metadataMissing: stock.every((asset) => !asset.description && !asset.tags.length), contentItemId: input.contentItemId };
       selections.set(scene.id, selected); uses.set(selected.assetId, (uses.get(selected.assetId) ?? 0) + 1);
     }
-    for (const [index, scene] of document.scenes.entries()) {
+    for (const [index, scene] of imageScenes.entries()) {
       if (index >= aiCount) {
         const purpose = `scene-image:${platformKey}:${scene.id}`;
         const existing = await this.assets.findPreparedImage({ channelId: input.channelId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose });
@@ -81,8 +91,11 @@ export class AssetPreparationProcessor {
         continue;
       }
       if (this.config.IMAGE_PROVIDER === "google" && !(this.config.IMAGE_USD_PER_OUTPUT > 0)) throw new Error("IMAGE_PRICING_REQUIRED");
-      const prepare = () => this.preparation.prepareImage({ channelId: input.channelId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, productionJobId: jobId, purpose: `scene-image:${platformKey}:${scene.id}`, key: `images/${jobId}/${scene.id}`, prompt: scene.visualPrompt || input.prompt, model: this.config.IMAGE_MODEL, idempotencyKey: `${input.idempotencyKey}:${scene.id}`, holdOnFailure: this.config.IMAGE_PROVIDER === "google" });
-      const result = this.config.IMAGE_PROVIDER === "google" ? await this.realMediaCall(jobId, `image:${scene.id}`, prepare, async () => Boolean(await this.assets.findPreparedImage({ channelId: input.channelId, contentItemId: input.contentItemId!, sceneVersionId: input.sceneVersionId!, purpose: `scene-image:${platformKey}:${scene.id}` }))) : await prepare();
+      const prompt = JSON.stringify({ guide: document.visualGuide ?? null, requirements: scene.visualRequirements ?? null, scene: scene.visualPrompt || input.prompt, narration: scene.narration.text,
+        note: "Reference identifiers are internal continuity records. No image-reference conditioning is supported by this adapter." });
+      const result = await this.preparation.prepareImage({ channelId: input.channelId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, productionJobId: jobId, purpose: `scene-image:${platformKey}:${scene.id}`, key: `images/${jobId}/${scene.id}`, prompt, model: this.config.IMAGE_MODEL, idempotencyKey: `${input.idempotencyKey}:${scene.id}`, holdOnFailure: this.config.IMAGE_PROVIDER === "google",
+        inputVersions: { promptVersion: "scene-image-v2", settingsVersion: "image-settings-v1", guideVersion: document.visualGuide?.version ?? "legacy", sourceUrl: scene.narration.sourceUrl },
+        ...(this.config.IMAGE_PROVIDER === "google" ? { invoke: (operation) => this.realMediaCall(jobId, `image:${scene.id}`, operation, () => Promise.resolve(false)) } : {}) });
       assets.push({ sceneId: scene.id, ...result });
     }
     return { assets, needsReview: assets.some((asset) => asset.needsReview), contentItemId: input.contentItemId };
@@ -103,9 +116,10 @@ export class AssetPreparationProcessor {
     }
     if (this.config.TTS_PROVIDER === "elevenlabs" && !(this.config.TTS_USD_PER_THOUSAND_CHARACTERS > 0)) throw new Error("TTS_PRICING_REQUIRED");
     const voice = resolveTtsVoice(this.config.TTS_PROVIDER, input.voice, this.config.ELEVENLABS_VOICE_ID);
-    const prepare = () => this.preparation.prepareTts({ channelId: input.channelId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, productionJobId: jobId, purpose: input.platform ? `tts-narration:${input.platform}` : undefined, key: `audio/${jobId}`, text: input.text, voice, model: this.config.TTS_MODEL, idempotencyKey: input.idempotencyKey });
     if (this.config.TTS_PROVIDER === "elevenlabs" && !jobId) throw new Error("REAL_PROVIDER_JOB_REQUIRED");
-    const result = this.config.TTS_PROVIDER === "elevenlabs" && jobId ? await this.realMediaCall(jobId, "tts", prepare, async () => Boolean(await this.assets.findPreparedTts({ contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose: input.platform ? `tts-narration:${input.platform}` : "tts-narration" }))) : await prepare();
+    const result = await this.preparation.prepareTts({ channelId: input.channelId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, productionJobId: jobId, purpose: input.platform ? `tts-narration:${input.platform}` : undefined, key: `audio/${jobId}`, text: input.text, voice, model: this.config.TTS_MODEL, idempotencyKey: input.idempotencyKey,
+      inputVersions: { normalizationVersion: "raw-v1", settingsVersion: "tts-settings-v1" },
+      ...(this.config.TTS_PROVIDER === "elevenlabs" ? { invoke: (operation) => this.realMediaCall(jobId, "tts", operation, () => Promise.resolve(false)) } : {}) });
     return result;
   }
 }

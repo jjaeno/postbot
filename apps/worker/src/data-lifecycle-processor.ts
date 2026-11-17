@@ -55,6 +55,8 @@ export class DataLifecycleProcessor {
       const assetIds = assets.map(({ id }) => id);
       await tx.assetSource.deleteMany({ where: { assetId: { in: assetIds } } });
       await tx.assetLicense.deleteMany({ where: { assetId: { in: assetIds } } });
+      await tx.assetGenerationCache.deleteMany({ where: { OR: [{ channelId: { in: channelIds } }, { assetId: { in: assetIds } }] } });
+      await tx.providerRightsPolicy.deleteMany({ where: { channelId: { in: channelIds } } });
       const removedAssets = await tx.asset.deleteMany({ where: { id: { in: assetIds } } });
       const renderManifests = await tx.sceneVersion.updateMany({ where: { id: { in: scenes.map(({ id }) => id) } }, data: { renderManifest: Prisma.DbNull } });
       const oauthStates = await tx.oAuthConnectionState.deleteMany({ where: { workspaceId, expiresAt: { lt: before } } });

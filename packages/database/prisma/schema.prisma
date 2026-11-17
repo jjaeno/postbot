@@ -345,6 +345,8 @@ model Channel {
   collectionRules         CollectionRule[]
   sourceFetches           SourceFetch[]
   researchQuestions       ResearchQuestion[]
+  generationCaches        AssetGenerationCache[]
+  providerRightsPolicies  ProviderRightsPolicy[]
   outputProfiles          PlatformOutputProfile[]
   scheduleRules           ScheduleRule[]
   contentItems            ContentItem[]
@@ -682,6 +684,7 @@ model Asset {
   sources         AssetSource[]
   licenses        AssetLicense[]
   usages          AssetUsage[]
+  generationCaches AssetGenerationCache[]
 
   @@unique([dedupScope, checksumSha256])
   @@index([channelId, kind, origin])
@@ -706,6 +709,8 @@ model AssetSource {
 }
 
 model AssetLicense {
+  rightsPolicyId       String?
+  rightsPolicy         ProviderRightsPolicy? @relation(fields: [rightsPolicyId], references: [id], onDelete: Restrict)
   id                   String        @id @default(cuid())
   assetId              String
   status               LicenseStatus @default(PENDING)
@@ -723,6 +728,47 @@ model AssetLicense {
 
   @@index([assetId, status, checkedAt])
   @@map("asset_licenses")
+}
+
+model AssetGenerationCache {
+  id             String   @id @default(cuid())
+  channelId      String
+  inputKey       String   @db.VarChar(64)
+  state          String   @db.VarChar(24)
+  ownerKey       String   @db.VarChar(191)
+  assetId        String?
+  snapshot       Json?
+  createdAt      DateTime @default(now()) @db.DateTime(3)
+  updatedAt      DateTime @updatedAt @db.DateTime(3)
+  channel        Channel  @relation(fields: [channelId], references: [id], onDelete: Restrict)
+  asset          Asset?   @relation(fields: [assetId], references: [id], onDelete: Restrict)
+  @@unique([channelId, inputKey])
+  @@index([assetId])
+  @@map("asset_generation_caches")
+}
+
+model ProviderRightsPolicy {
+  id                   String   @id @default(cuid())
+  channelId            String
+  version              Int
+  provider             String   @db.VarChar(80)
+  model                String   @db.VarChar(120)
+  accountRef           String   @db.VarChar(120)
+  contractVersion      String   @db.VarChar(120)
+  proofUrl             String   @db.Text
+  evidence             Json
+  commercialUseAllowed Boolean
+  derivativeAllowed    Boolean
+  attributionRequired  Boolean  @default(false)
+  attributionText      String?  @db.Text
+  validFrom            DateTime @db.DateTime(3)
+  validUntil           DateTime @db.DateTime(3)
+  revokedAt            DateTime? @db.DateTime(3)
+  createdAt            DateTime @default(now()) @db.DateTime(3)
+  channel              Channel @relation(fields: [channelId], references: [id], onDelete: Restrict)
+  licenses             AssetLicense[]
+  @@unique([channelId, provider, model, accountRef, contractVersion, version], map: "provider_rights_scope_version_key")
+  @@map("provider_rights_policies")
 }
 
 model AssetUsage {

@@ -12,6 +12,7 @@ export const SceneOverlaySchema = z.object({
 }).strict();
 
 export const SceneSchema = z.object({
+  visualRequirements: z.object({ subject: z.string().max(500), setting: z.string().max(300), continuityKey: z.string().max(191), avoid: z.array(z.string().max(200)).max(20) }).optional(),
   role: z.enum(["HOOK", "COMPARISON", "PROCESS", "METRIC", "REVEAL"]).optional(),
   visualMode: z.enum(["IMAGE", "GRAPHIC"]).optional(),
   id: z.string().min(1).max(80),
@@ -38,6 +39,9 @@ export const AudioStyleSchema = z.object({ bgmAssetId: z.string().min(1).max(80)
 export const aiSceneCount = (sceneCount: number, aiStockRatio: number): number => Math.round(sceneCount * Math.max(0, Math.min(1, aiStockRatio)));
 
 export const SceneDocumentSchema = z.object({
+  visualGuide: z.object({ version: z.literal("visual-guide-v1"), style: z.string().max(500), era: z.string().max(200).nullable(), location: z.string().max(200).nullable(),
+    palette: z.array(z.string().max(60)).max(10), characters: z.array(z.string().max(500)).max(20), referenceAssetIds: z.array(z.string().max(80)).max(10),
+    referenceMode: z.literal("TEXT_DESCRIPTION_ONLY") }).optional(),
   schemaVersion: z.literal("1.0.0"),
   platform: z.enum(["YOUTUBE", "INSTAGRAM", "TIKTOK"]).optional(),
   title: z.string().min(1),

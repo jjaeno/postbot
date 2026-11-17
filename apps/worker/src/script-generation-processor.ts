@@ -203,6 +203,12 @@ export class ScriptGenerationProcessor {
         if (input.request.partial === "full") structured.sceneDocument = alignSceneNarration(structured.sceneDocument, [structured.script.hook, structured.script.body, structured.script.callToAction].filter(Boolean).join(" "));
         if (experiment && (Math.abs(structured.script.durationSeconds - experiment.strategy.durationSeconds) > experiment.durationToleranceSeconds || Math.abs(structured.sceneDocument.durationInFrames / structured.sceneDocument.fps - experiment.strategy.durationSeconds) > experiment.durationToleranceSeconds)) throw new Error("EXPERIMENT_DURATION_NOT_APPLIED");
         structured.sceneDocument.style = VideoStyleSchema.parse({ ...visual, captionColor: subtitle.color, captionBackground: subtitle.backgroundColor, captionFontSize: subtitle.fontSize, watermark: typeof visual.watermark === "string" ? visual.watermark : channel?.name ?? "Postbot" });
+        const suppliedGuide = jsonObject(visual.visualGuide ?? null);
+        structured.sceneDocument = SceneDocumentSchema.parse({ ...structured.sceneDocument, visualGuide: { version: "visual-guide-v1", style: typeof suppliedGuide.style === "string" ? suppliedGuide.style : template?.tone ?? "Editorial illustration",
+          era: typeof suppliedGuide.era === "string" ? suppliedGuide.era : null, location: typeof suppliedGuide.location === "string" ? suppliedGuide.location : null,
+          palette: [structured.sceneDocument.style.brandColor], characters: Array.isArray(suppliedGuide.characters) ? suppliedGuide.characters : [], referenceAssetIds: Array.isArray(suppliedGuide.referenceAssetIds) ? suppliedGuide.referenceAssetIds : [], referenceMode: "TEXT_DESCRIPTION_ONLY" },
+          scenes: structured.sceneDocument.scenes.map((scene) => ({ ...scene, visualRequirements: { subject: scene.narration.text, setting: scene.visualPrompt,
+            continuityKey: input.idea.id, avoid: ["unsupported factual detail", "unlicensed brand or likeness"] } })) });
         structured.sceneDocument.aiStockRatio = template?.aiStockRatio.toNumber() ?? 1;
         if (visual.audio) structured.sceneDocument.audio = AudioStyleSchema.parse(visual.audio);
         return { ...structured, model: response.model, usage: config.LLM_PROVIDER === "openai" ? knownUsage : response.usage, estimatedCostUsd: config.LLM_PROVIDER === "openai" ? knownCost.toFixed(6) : response.estimatedCostUsd, generationContext: { ...generationContext, editorialQuality }, strategyVersion: channel?.strategyVersions[0]?.version ?? null };
