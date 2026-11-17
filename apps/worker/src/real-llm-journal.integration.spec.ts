@@ -38,7 +38,29 @@ describe.skipIf(!enabled).sequential("real LLM call journal (mock HTTP, no paid 
     expect(usage._sum.quantity?.toNumber()).toBe(60);
     expect(await processor.process(item.job.id, item.payload)).toEqual(result);
     expect(network).toHaveBeenCalledTimes(2);
+    await new DeterministicJobProcessor(prisma).process({ id: item.job.id, type: "SCRIPT", queueName: "script", runAfter: null, payload: item.payload });
+    expect(await prisma.automationCostReservation.findUniqueOrThrow({ where: { idempotencyKey: `automation:${item.payload.automation.runId}:script:youtube:cost` } })).toMatchObject({ releasedAt: null, settledAt: null });
+
     expect(await prisma.costLedger.count({ where: { providerUsage: { productionJobId: item.job.id } } })).toBe(2);
+  });
+  it("refuses a long-input call before network I/O when remaining reservation is insufficient", async () => {
+    const item = await fixture();
+    await prisma.contentIdea.update({ where: { id: item.payload.generation.idea.id }, data: { rawSnapshot: { body: "긴 원문 ".repeat(2000) } } });
+    await prisma.automationCostReservation.updateMany({ where: { automationRunId: item.payload.automation.runId }, data: { amount: "0.000001" } });
+    const network = vi.fn<typeof fetch>(); vi.stubGlobal("fetch", network);
+    await expect(new ScriptGenerationProcessor(prisma).process(item.job.id, item.payload)).rejects.toThrow("BUDGET_RESERVATION_EXHAUSTED");
+    expect(network).not.toHaveBeenCalled();
+  });
+  it("checks remaining reservation again before schema regeneration and keeps incurred usage", async () => {
+    const item = await fixture();
+    const network = vi.fn<typeof fetch>(async () => {
+      await prisma.automationCostReservation.updateMany({ where: { automationRunId: item.payload.automation.runId }, data: { amount: "0.000001" } });
+      return response({ invalid: true });
+    });
+    vi.stubGlobal("fetch", network);
+    await expect(new ScriptGenerationProcessor(prisma).process(item.job.id, item.payload)).rejects.toThrow("BUDGET_RESERVATION_EXHAUSTED");
+    expect(network).toHaveBeenCalledTimes(1);
+    expect((await prisma.providerUsage.aggregate({ where: { productionJobId: item.job.id }, _sum: { estimatedCost: true } }))._sum.estimatedCost?.toFixed(6)).toBe("0.000030");
   });
   it("does not pay for a new attempt when usage persistence fails after a response", async () => {
     const item = await fixture();

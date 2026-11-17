@@ -28,5 +28,7 @@ suite("analytics synchronization isolation and recovery", () => {
     await prisma.analyticsSync.create({ data: { channelId: channel.id, platform: "INSTAGRAM", status: "SUCCEEDED", syncedAt: otherTime, idempotencyKey: `${key}:other`, periodStart: new Date(input.periodStart), periodEnd: new Date(input.periodEnd), timezone: "UTC" } });
     expect((await service.report(workspace.id, channel.id, input.periodStart, input.periodEnd, "YOUTUBE")).lastSyncedAt).toBeNull();
     expect((await service.report(workspace.id, channel.id, input.periodStart, input.periodEnd, "INSTAGRAM")).lastSyncedAt).toBe(otherTime.toISOString());
+    await Promise.all([service.sync(workspace.id, { ...input, recheck: true }), service.sync(workspace.id, { ...input, recheck: true })]);
+    expect(await prisma.productionJob.count({ where: { idempotencyKey: `analytics:${sync.id}:recheck` } })).toBe(1);
   });
 });

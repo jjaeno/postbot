@@ -3,12 +3,12 @@ import { Prisma, type PrismaClient } from "@postbot/database";
 import { AssignExperimentRequestSchema, CreateExperimentRequestSchema, ExperimentActionRequestSchema, ExperimentResponseSchema, GenerateSuggestionsRequestSchema, OptimizationSettingsSchema, OptimizationSuggestionResponseSchema, SuggestionActionRequestSchema, UpdateOptimizationSettingsRequestSchema, type ExperimentResponse, type OptimizationSettings, type OptimizationSuggestionResponse } from "@postbot/contracts";
 import { createHash } from "node:crypto";
 import { OperationsService } from "../operations/operations.service.js";
-import { deterministicExperimentArm, compareExperimentArms } from "@postbot/optimization";
+import { assignProductionExperiment, compareExperimentArms, observationCohortKey, publishedFeatures, durationCompliance } from "@postbot/optimization";
 export { deterministicExperimentArm } from "@postbot/optimization";
 
 const MIN_SAMPLE_SIZE = 4;
-const RULE_VERSION = "optimization-rules-v1";
-const METRIC_VERSION = "analytics-mapping-v2";
+const RULE_VERSION = "optimization-rules-v2";
+const METRIC_VERSION = "analytics-mapping-v3";
 const terminalSuggestion = new Set(["REJECTED", "APPLIED", "EXPIRED"]);
 const terminalExperiment = new Set(["COMPLETED", "CANCELLED", "STOPPED", "INCONCLUSIVE"]);
 const asRecord = (value: Prisma.JsonValue | null): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -48,42 +48,39 @@ export class OptimizationService {
     const channel = await this.channel(workspaceId, input.channelId);
     const settings = OptimizationSettingsSchema.parse(asRecord(channel.optimizationSettings));
     const snapshots = await this.prisma.analyticsMetricSnapshot.findMany({
-      where: { mappingVersion: { not: "legacy-ambiguous-v1" }, metric: input.metric, status: "AVAILABLE", value: { not: null }, observedAt: { gte: new Date(input.periodStart), lte: new Date(input.periodEnd) }, platformPost: { platform: input.platform, publishPlan: { contentItem: { channelId: channel.id } } } },
-      include: {
-        platformPost: {
-          include: {
-            publishPlan: {
-              include: {
-                contentItem: { include: { scriptVersions: { orderBy: { version: "desc" }, take: 1 } } }
-              }
-            }
-          }
-        }
-      },
-      orderBy: [{ platformPostId: "asc" }, { observedAt: "desc" }]
+      where: { metric: input.metric, status: "AVAILABLE", value: { not: null }, collectedAt: { gte: new Date(input.periodStart), lte: new Date(input.periodEnd) }, platformPost: { platform: input.platform, publishPlan: { contentItem: { channelId: channel.id } } } },
+      include: { platformPost: { include: { publishPlan: { include: { contentItem: true } } } } },
+      orderBy: [{ observedAt: "desc" }, { revision: "desc" }]
     });
-    const latestByPost = new Map<string, typeof snapshots[number]>();
-    for (const snapshot of snapshots) if (!latestByPost.has(snapshot.platformPostId)) latestByPost.set(snapshot.platformPostId, snapshot);
-    const candidates = [...latestByPost.values()].filter((snapshot) => !isProtected(snapshot.platformPost.publishPlan.contentItem, settings));
-    const complete = candidates.filter((snapshot) => snapshot.platformPost.publishPlan.contentItem.scriptVersions[0]?.durationSeconds !== null && snapshot.platformPost.publishPlan.contentItem.scriptVersions[0]?.durationSeconds !== undefined);
-    const values = complete.map((snapshot) => Number(snapshot.value));
-    const mean = values.length === 0 ? 0 : values.reduce((total, value) => total + value, 0) / values.length;
-    const variance = values.length === 0 ? 0 : values.reduce((total, value) => total + (value - mean) ** 2, 0) / values.length;
-    const standardDeviation = Math.sqrt(variance);
-    const nonOutliers = complete.filter((snapshot) => standardDeviation === 0 || Math.abs(Number(snapshot.value) - mean) <= standardDeviation * 2);
-    const sorted = [...nonOutliers].sort((left, right) => Number(right.value) - Number(left.value) || left.platformPostId.localeCompare(right.platformPostId));
-    const sampleSize = sorted.length;
-    const split = Math.max(1, Math.floor(sampleSize / 2));
-    const top = sorted.slice(0, split);
-    const bottom = sorted.slice(-split);
-    const averageDuration = (items: typeof sorted): number => items.length === 0 ? 0 : items.reduce((total, item) => total + Number(item.platformPost.publishPlan.contentItem.scriptVersions[0]?.durationSeconds ?? 0), 0) / items.length;
-    const topDuration = averageDuration(top);
-    const bottomDuration = averageDuration(bottom);
-    const sufficient = sampleSize >= MIN_SAMPLE_SIZE && candidates.length === complete.length && nonOutliers.length >= MIN_SAMPLE_SIZE;
-    const confidence = sufficient ? Math.min(0.95, 0.45 + sampleSize / 100 + Math.min(0.25, Math.abs(topDuration - bottomDuration) / Math.max(1, bottomDuration))) : 0;
-    const targetDuration = bottomDuration === 0 ? 0 : Math.round(bottomDuration * (1 + Math.max(-settings.maxChangeRatio, Math.min(settings.maxChangeRatio, (topDuration - bottomDuration) / bottomDuration))));
-    const evidence = { platform: input.platform, metric: input.metric, periodStart: input.periodStart, periodEnd: input.periodEnd, baseline: { mean, standardDeviation, bottomDuration, topDuration }, cohorts: { topPostIds: top.map((item) => item.platformPostId), bottomPostIds: bottom.map((item) => item.platformPostId) }, completeness: { total: candidates.length, complete: complete.length, outliersExcluded: complete.length - nonOutliers.length }, conclusion: sufficient ? "hypothesis" : "insufficient_sample_or_incomplete_data" };
-    const suggestion = await this.prisma.optimizationSuggestion.create({ data: { channelId: channel.id, suggestionKey: hash(input.idempotencyKey), status: "PENDING", title: sufficient ? "Test a bounded duration adjustment" : "Collect more comparable performance data", rationale: sufficient ? "This is a correlation-based hypothesis, not a causal claim. Run an experiment before broad adoption." : "The sample, completeness, or outlier screening is insufficient for a confirmed pattern.", evidence, sampleSize, confidenceScore: new Prisma.Decimal(confidence.toFixed(6)), expectedImpact: { metric: input.metric, direction: topDuration >= bottomDuration ? "increase" : "decrease", hypothesisOnly: true }, targetStrategy: sufficient && settings.autoApplyFields.includes("durationSeconds") ? toInputJson({ durationSeconds: targetDuration, maxChangeRatio: settings.maxChangeRatio }) : Prisma.DbNull, risk: { protectedItemsExcluded: candidates.length - snapshots.length, requiresExperiment: true, rollback: "restore previous StrategyVersion" }, inputSnapshot: { snapshotIds: sorted.map((item) => item.id), metricVersion: METRIC_VERSION, ruleVersion: RULE_VERSION }, metricVersion: METRIC_VERSION, ruleVersion: RULE_VERSION, expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) } });
+    const usable = snapshots.flatMap((snapshot) => {
+      const post = snapshot.platformPost; const features = publishedFeatures(post.productionSnapshot);
+      const cohort = observationCohortKey({ ...snapshot, platform: post.platform, publishedAt: post.publishedAt });
+      if (!features || !cohort || features.sceneVersionId !== snapshot.sceneVersionId || features.scriptVersionId !== snapshot.scriptVersionId || isProtected(post.publishPlan.contentItem, settings)) return [];
+      return [{ snapshot, features, cohort }];
+    });
+    const latest = new Map<string, typeof usable[number]>();
+    for (const item of usable) { const key = `${item.snapshot.platformPostId}:${item.cohort}`; if (!latest.has(key)) latest.set(key, item); }
+    const cohorts = new Map<string, typeof usable>();
+    for (const item of latest.values()) cohorts.set(item.cohort, [...(cohorts.get(item.cohort) ?? []), item]);
+    const selectedCohort = [...cohorts.entries()].sort((left, right) => right[1].length - left[1].length || left[0].localeCompare(right[0]))[0];
+    const comparable = selectedCohort?.[1] ?? [];
+    const values = comparable.map((item) => Number(item.snapshot.value));
+    const mean = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+    const standardDeviation = values.length > 1 ? Math.sqrt(values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1)) : 0;
+    const sorted = [...comparable].sort((left, right) => Number(right.snapshot.value) - Number(left.snapshot.value) || left.snapshot.platformPostId.localeCompare(right.snapshot.platformPostId));
+    const split = Math.max(1, Math.floor(sorted.length / 2)); const top = sorted.slice(0, split); const bottom = sorted.slice(-split);
+    const averageDuration = (items: typeof sorted): number => items.length ? items.reduce((sum, item) => sum + item.features.actualDurationSeconds, 0) / items.length : 0;
+    const topDuration = averageDuration(top); const bottomDuration = averageDuration(bottom);
+    const sufficient = sorted.length >= MIN_SAMPLE_SIZE && standardDeviation > 0 && Math.abs(topDuration - bottomDuration) >= 0.1;
+    const targetDuration = bottomDuration ? Math.round(bottomDuration * (1 + Math.max(-settings.maxChangeRatio, Math.min(settings.maxChangeRatio, (topDuration - bottomDuration) / bottomDuration)))) : 0;
+    const featureAnalysis = ["hookType", "sceneTemplates", "transitionsPerMinute", "subtitles", "voice"].map((field) => {
+      const groups = new Map<string, number[]>();
+      for (const item of comparable) { const value = item.features[field]; if (value === undefined || value === null) continue; const key = JSON.stringify(value); groups.set(key, [...(groups.get(key) ?? []), Number(item.snapshot.value)]); }
+      return { field, status: groups.size >= 2 && [...groups.values()].every((values) => values.length >= MIN_SAMPLE_SIZE) ? "DESCRIPTIVE_HYPOTHESIS" : "HELD_INSUFFICIENT_COMPARABLE_SAMPLES", groups: [...groups.entries()].map(([featureValue, values]) => ({ featureValue, sampleSize: values.length, mean: values.reduce((sum, value) => sum + value, 0) / values.length })), causalClaim: false };
+    });
+    const evidence = { platform: input.platform, metric: input.metric, collectionPeriod: { start: input.periodStart, end: input.periodEnd }, observationCohort: selectedCohort?.[0] ?? null, cohortSelection: "LARGEST_COUNT_THEN_KEY_WITHOUT_USING_OUTCOME_VALUES", baseline: { mean, standardDeviation, bottomDuration, topDuration }, sampleSize: comparable.length, excludedUnknownOrUnbound: snapshots.length - usable.length, excludedOtherObservationCohorts: latest.size - comparable.length, featureAnalysis, denominator: input.metric === "engagement_rate" ? input.platform === "INSTAGRAM" ? "provider_interactions_per_reached_account" : "provider_interactions_per_view" : input.metric === "average_view_ratio" ? "provider_average_watch_fraction_not_completion_probability" : "provider_metric_definition", completeness: { total: snapshots.length, comparable: comparable.length }, limitations: ["CORRELATION_NOT_CAUSATION", "NO_CALIBRATED_CONFIDENCE_LEVEL", "NO_AUTOMATIC_BROAD_STRATEGY_APPLICATION"], conclusion: sufficient ? "descriptive_hypothesis" : "insufficient_comparable_sample_or_variation" };
+    const suggestion = await this.prisma.optimizationSuggestion.create({ data: { channelId: channel.id, suggestionKey: hash(input.idempotencyKey), status: sufficient ? "PENDING" : "HELD", title: sufficient ? "Test a bounded duration adjustment" : "Collect more comparable performance data", rationale: sufficient ? "A descriptive association using immutable published features. Run a bounded experiment before applying a strategy." : "Comparable observations, published features or metric variation are insufficient.", evidence: toInputJson(evidence), sampleSize: comparable.length, confidenceScore: null, expectedImpact: { metric: input.metric, direction: topDuration >= bottomDuration ? "increase" : "decrease", hypothesisOnly: true }, targetStrategy: sufficient && settings.autoApplyFields.includes("durationSeconds") ? toInputJson({ durationSeconds: targetDuration, maxChangeRatio: settings.maxChangeRatio }) : Prisma.DbNull, risk: { requiresExperiment: true, rollback: "restore previous StrategyVersion" }, inputSnapshot: { snapshotIds: sorted.map((item) => item.snapshot.id), metricVersion: METRIC_VERSION, ruleVersion: RULE_VERSION }, metricVersion: METRIC_VERSION, ruleVersion: RULE_VERSION, expiresAt: new Date(Date.now() + 30 * 86_400_000) } });
+
     return this.suggestionResponse(suggestion);
   }
 
@@ -114,8 +111,10 @@ export class OptimizationService {
       await this.operations.audit(workspaceId, userId, `optimization.suggestion.${input.action}`, "optimization_suggestion", updated.id);
       return this.suggestionResponse(updated);
     }
+    if (input.action === "approve" && suggestion.status === "HELD") throw new ConflictException("INSUFFICIENT_COMPARABLE_EVIDENCE");
     if (input.action === "approve") { const updated = await this.prisma.optimizationSuggestion.update({ where: { id: suggestion.id }, data: { status: "APPROVED", decidedAt: new Date() } }); await this.operations.audit(workspaceId, userId, "optimization.suggestion.approve", "optimization_suggestion", updated.id); return this.suggestionResponse(updated); }
     if (suggestion.status !== "APPROVED") throw new ConflictException("SUGGESTION_REQUIRES_APPROVAL");
+    if (suggestion.ruleVersion !== RULE_VERSION) throw new ConflictException("LEGACY_EVIDENCE_REQUIRES_NEW_SUGGESTION");
     const evidence = asRecord(suggestion.evidence);
     if (suggestion.metricVersion !== METRIC_VERSION && ((evidence.platform === "YOUTUBE" && evidence.metric === "completion_rate") || (evidence.platform === "INSTAGRAM" && evidence.metric === "impressions"))) throw new ConflictException("LEGACY_METRIC_REQUIRES_RESYNC_AND_NEW_SUGGESTION");
     const applied = await this.applyStrategy(suggestion);
@@ -130,7 +129,7 @@ export class OptimizationService {
     const profile = await this.prisma.platformOutputProfile.findFirst({ where: { channelId: input.channelId, platform: input.platform, isActive: true }, orderBy: { version: "desc" } });
     const settings = await this.getSettings(workspaceId, input.channelId);
     if (!profile || [input.control.durationSeconds, input.variant.durationSeconds].some((value) => value < profile.minDurationSeconds || value > profile.maxDurationSeconds) || Math.abs(input.variant.durationSeconds / input.control.durationSeconds - 1) > settings.maxChangeRatio) throw new ConflictException("EXPERIMENT_DURATION_OUTSIDE_ALLOWED_RANGE");
-    const experiment = await this.prisma.experiment.create({ data: { channelId: input.channelId, name: input.name, hypothesis: input.hypothesis, allocation: toInputJson({ control: input.control, variant: input.variant, platform: input.platform, periodDays: input.periodDays }), successCriteria: toInputJson(input.successCriteria), targetMetric: input.targetMetric, minSampleSize: input.minSampleSize, stopCriteria: input.stopCriteria ? toInputJson(input.stopCriteria) : Prisma.DbNull } });
+    const experiment = await this.prisma.experiment.create({ data: { channelId: input.channelId, name: input.name, hypothesis: input.hypothesis, allocation: toInputJson({ control: input.control, variant: input.variant, platform: input.platform, periodDays: input.periodDays, durationToleranceSeconds: input.durationToleranceSeconds ?? 1 }), successCriteria: toInputJson(input.successCriteria), targetMetric: input.targetMetric, minSampleSize: input.minSampleSize, stopCriteria: input.stopCriteria ? toInputJson(input.stopCriteria) : Prisma.DbNull } });
     return this.experimentResponse(experiment);
   }
 
@@ -151,7 +150,9 @@ export class OptimizationService {
       const allocation = asRecord(experiment.allocation);
       const platform = allocation.platform;
       if (platform !== "YOUTUBE" && platform !== "INSTAGRAM" && platform !== "TIKTOK") throw new ConflictException("EXPERIMENT_PLATFORM_REQUIRED");
-      const end = new Date(Math.min(Date.now(), experiment.startedAt.getTime() + (typeof allocation.periodDays === "number" ? allocation.periodDays : 30) * 86_400_000));
+      const now = new Date();
+      const plannedEnd = new Date(experiment.startedAt.getTime() + (typeof allocation.periodDays === "number" ? allocation.periodDays : 30) * 86_400_000);
+      const end = new Date(Math.min(now.getTime(), plannedEnd.getTime()));
       const assignments = await this.prisma.experimentAssignment.findMany({
         where: { experimentId },
         include: { contentItem: { include: { publishPlans: {
@@ -159,30 +160,49 @@ export class OptimizationService {
           include: {
             sceneVersion: { include: { scriptVersion: true } },
             platformPost: { include: { analyticsSnapshots: {
-              where: { mappingVersion: { not: "legacy-ambiguous-v1" }, metric: experiment.targetMetric ?? "", status: "AVAILABLE", value: { not: null }, observedAt: { gte: experiment.startedAt, lte: end } },
+              where: { mappingVersion: { not: "legacy-ambiguous-v1" }, metric: experiment.targetMetric ?? "", status: "AVAILABLE", value: { not: null }, collectedAt: { gte: experiment.startedAt, lte: now } },
               orderBy: [{ observedAt: "desc" }, { revision: "desc" }]
             } } }
           }
         } } } }
       });
-      const control: number[] = []; const variant: number[] = []; const evidence: Array<{ contentItemId: string; arm: string; snapshotId: string; observedAt: string }> = [];
+      const records: Array<{ assignment: typeof assignments[number]; snapshot: NonNullable<typeof assignments[number]["contentItem"]["publishPlans"][number]["platformPost"]>["analyticsSnapshots"][number]; features: NonNullable<ReturnType<typeof publishedFeatures>>; cohort: string }> = [];
       for (const assignment of assignments) {
-        const matching = assignment.contentItem.publishPlans.filter((plan) => {
-          const context = asRecord(asRecord(plan.sceneVersion?.scriptVersion?.qualitySnapshot ?? null).generationContext ?? null);
-          return asRecord(context.experiment ?? null).assignmentKey === assignment.assignmentKey && plan.platformPost && plan.platformPost.publishedAt >= assignment.assignedAt && plan.platformPost.publishedAt <= end;
-        });
-        const snapshots = matching.flatMap((plan) => plan.platformPost?.analyticsSnapshots.filter((metric) => metric.observedAt >= plan.platformPost!.publishedAt) ?? []).sort((left, right) => right.observedAt.getTime() - left.observedAt.getTime() || right.revision - left.revision);
-        const snapshot = snapshots[0];
-        if (!snapshot?.value || !["control", "variant"].includes(assignment.arm)) continue;
-        const value = snapshot.value.toNumber();
-        if (!Number.isFinite(value)) continue;
-        (assignment.arm === "control" ? control : variant).push(value);
-        evidence.push({ contentItemId: assignment.contentItemId, arm: assignment.arm, snapshotId: snapshot.id, observedAt: snapshot.observedAt.toISOString() });
+        if (!["control", "variant"].includes(assignment.arm)) continue;
+        const target = asRecord(allocation[assignment.arm] as Prisma.JsonValue ?? null).durationSeconds;
+        const tolerance = typeof allocation.durationToleranceSeconds === "number" ? allocation.durationToleranceSeconds : 1;
+        for (const plan of assignment.contentItem.publishPlans) {
+          const post = plan.platformPost; const features = post ? publishedFeatures(post.productionSnapshot) : null;
+          const featureExperiment = asRecord(features?.experiment ?? null);
+          if (!post || !features || features.platform !== platform || features.sceneVersionId !== plan.sceneVersionId || featureExperiment.assignmentKey !== assignment.assignmentKey || featureExperiment.compliant !== true || typeof target !== "number" || !durationCompliance(features.actualDurationSeconds, target, tolerance) || post.publishedAt < assignment.assignedAt || post.publishedAt > end) continue;
+          for (const snapshot of post.analyticsSnapshots) {
+            const cohort = observationCohortKey({ ...snapshot, platform: post.platform, publishedAt: post.publishedAt });
+            if (cohort && snapshot.sceneVersionId === features.sceneVersionId && snapshot.scriptVersionId === features.scriptVersionId) records.push({ assignment, snapshot, features, cohort });
+          }
+        }
+      }
+      records.sort((left, right) => right.snapshot.observedAt.getTime() - left.snapshot.observedAt.getTime() || right.snapshot.revision - left.snapshot.revision);
+      const latest = new Map<string, typeof records[number]>();
+      for (const item of records) { const key = `${item.assignment.id}:${item.cohort}`; if (!latest.has(key)) latest.set(key, item); }
+      const groups = new Map<string, Array<typeof records[number]>>();
+      for (const item of latest.values()) groups.set(item.cohort, [...(groups.get(item.cohort) ?? []), item]);
+      const selected = [...groups.entries()].sort((left, right) => right[1].length - left[1].length || left[0].localeCompare(right[0]))[0];
+      const control: number[] = []; const variant: number[] = [];
+      const evidence: Array<{ contentItemId: string; arm: string; snapshotId: string; observedAt: string; sceneVersionId: string; scriptVersionId: string; actualDurationSeconds: number }> = [];
+      for (const item of selected?.[1] ?? []) {
+        if (item.snapshot.value === null) continue;
+        const value = item.snapshot.value.toNumber(); if (!Number.isFinite(value)) continue;
+        (item.assignment.arm === "control" ? control : variant).push(value);
+        evidence.push({ contentItemId: item.assignment.contentItemId, arm: item.assignment.arm, snapshotId: item.snapshot.id, observedAt: item.snapshot.observedAt.toISOString(), sceneVersionId: item.features.sceneVersionId, scriptVersionId: item.features.scriptVersionId, actualDurationSeconds: item.features.actualDurationSeconds });
       }
       const criteria = asRecord(experiment.successCriteria);
       const comparison = compareExperimentArms(control, variant, experiment.minSampleSize, typeof criteria.minRelativeImprovement === "number" ? criteria.minRelativeImprovement : 0.1, criteria.direction === "lower" ? "lower" : "higher");
       if (!comparison.sufficient) throw new ConflictException({ code: "EXPERIMENT_INSUFFICIENT_SAMPLES", message: `각 그룹에 ${experiment.minSampleSize}건의 가용 지표가 필요합니다. 현재 대조 ${control.length}, 변경 ${variant.length}건입니다.` });
-      const changed = await this.prisma.experiment.updateMany({ where: { id: experimentId, status: { in: ["RUNNING", "PAUSED"] } }, data: { status: "COMPLETED", endedAt: end, result: toInputJson({ ...comparison, metric: experiment.targetMetric, platform, periodStart: experiment.startedAt.toISOString(), periodEnd: end.toISOString(), evidence, metricVersion: METRIC_VERSION }) } });
+      const stop = asRecord(experiment.stopCriteria);
+      const capReached = typeof stop.maxAssignments === "number" && assignments.length >= stop.maxAssignments;
+      if (now < plannedEnd && !capReached) throw new ConflictException({ code: "EXPERIMENT_NOT_READY_FOR_FINAL_ANALYSIS", message: "Wait for the predefined observation period or assignment cap before final analysis." });
+      const coverage = evidence.length / Math.max(1, assignments.length);
+      const changed = await this.prisma.experiment.updateMany({ where: { id: experimentId, status: { in: ["RUNNING", "PAUSED"] } }, data: { status: "COMPLETED", endedAt: now, result: toInputJson({ ...comparison, winner: coverage >= 0.8 ? comparison.winner : "inconclusive", assignmentCoverage: coverage, excludedAssignments: assignments.length - evidence.length, observationCohort: selected?.[0] ?? null, cohortSelection: "LARGEST_COUNT_THEN_KEY_WITHOUT_USING_OUTCOME_VALUES", stoppingRule: capReached ? "PREDEFINED_ASSIGNMENT_CAP" : "PREDEFINED_PERIOD_END", analyzedAt: now.toISOString(), metric: experiment.targetMetric, platform, periodStart: experiment.startedAt.toISOString(), periodEnd: end.toISOString(), evidence, metricVersion: METRIC_VERSION }) } });
       const completed = await this.prisma.experiment.findUniqueOrThrow({ where: { id: experimentId } });
       if (completed.status !== "COMPLETED") throw new ConflictException("EXPERIMENT_TERMINAL");
       if (userId && changed.count === 1) await this.operations.audit(workspaceId, userId, "experiment.complete", "experiment", experimentId);
@@ -209,9 +229,9 @@ export class OptimizationService {
     if (!experiment) throw new NotFoundException("RUNNING_EXPERIMENT_NOT_FOUND");
     const content = await this.prisma.contentItem.findFirst({ where: { id: input.contentItemId, channelId: experiment.channelId } });
     if (!content) throw new NotFoundException("CONTENT_ITEM_NOT_FOUND");
-    const key = hash(`${experiment.id}:${content.id}`);
-    const arm = deterministicExperimentArm(experiment.id, content.id);
-    const assignment = await this.prisma.experimentAssignment.upsert({ where: { experimentId_contentItemId: { experimentId: experiment.id, contentItemId: content.id } }, create: { experimentId: experiment.id, contentItemId: content.id, arm, assignmentKey: key }, update: {} });
+    const platform = asRecord(experiment.allocation).platform;
+    const assignment = await this.prisma.$transaction((tx) => assignProductionExperiment(tx, experiment.channelId, content.id, typeof platform === "string" ? platform : undefined));
+    if (!assignment) throw new ConflictException("EXPERIMENT_ASSIGNMENT_NOT_ELIGIBLE");
     return { arm: assignment.arm === "control" ? "control" : "variant", assignmentKey: assignment.assignmentKey };
   }
 

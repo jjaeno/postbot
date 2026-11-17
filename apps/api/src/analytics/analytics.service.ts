@@ -17,6 +17,23 @@ export class AnalyticsService {
     if (existing && (existing.channelId !== channel.id || existing.platform !== input.platform)) throw new ConflictException("ANALYTICS_IDEMPOTENCY_CONFLICT");
     const sync = existing ?? await this.prisma.analyticsSync.upsert({ where: { idempotencyKey: input.idempotencyKey }, update: {}, create: { channelId: channel.id, platform: input.platform, status: "RUNNING", idempotencyKey: input.idempotencyKey, periodStart: new Date(input.periodStart), periodEnd: new Date(input.periodEnd), timezone: input.timezone } });
     if (sync.channelId !== channel.id || sync.platform !== input.platform) throw new ConflictException("ANALYTICS_IDEMPOTENCY_CONFLICT");
+    if (input.recheck) {
+      const recheckKey = `analytics:${sync.id}:recheck`;
+      await this.prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM analytics_syncs WHERE id = ${sync.id} FOR UPDATE`;
+        if (await tx.productionJob.findUnique({ where: { idempotencyKey: recheckKey } })) return;
+        const current = await tx.analyticsSync.findUniqueOrThrow({ where: { id: sync.id } });
+        if (current.status === "COLLECTING") throw new ConflictException("ANALYTICS_COLLECTION_IN_PROGRESS");
+        await tx.analyticsSync.update({ where: { id: sync.id }, data: { status: "RUNNING", nextAttemptAt: null, collectionAttempts: 0 } });
+        const priorMetrics = await tx.analyticsMetricSnapshot.findMany({ where: { analyticsSyncId: sync.id } });
+        for (const metric of priorMetrics) {
+          const rawSnapshot = metric.rawSnapshot && typeof metric.rawSnapshot === "object" && !Array.isArray(metric.rawSnapshot) ? metric.rawSnapshot : {};
+          await tx.analyticsMetricSnapshot.update({ where: { id: metric.id }, data: { rawSnapshot: { ...rawSnapshot, collectionPending: true } } });
+        }
+        await tx.productionJob.create({ data: { type: "ANALYTICS", queueName: "analytics", channelId: channel.id, idempotencyKey: recheckKey, payload: { analytics: { syncId: sync.id } } } });
+      });
+      return this.jobs.create(workspaceId, { type: "ANALYTICS", channelId: channel.id, idempotencyKey: recheckKey, payload: { analytics: { syncId: sync.id } } });
+    }
     if (sync.status !== "RUNNING") return { id: sync.id, status: sync.status };
     // Retry an interrupted sync-to-queue handoff with the same production job key.
     return this.jobs.create(workspaceId, { type: "ANALYTICS", channelId: channel.id, idempotencyKey: `analytics:${sync.id}`, payload: { analytics: { syncId: sync.id } } });
@@ -27,6 +44,6 @@ export class AnalyticsService {
     const sync = await this.prisma.analyticsSync.findFirst({ where: { channelId, channel: { workspaceId }, ...(platform ? { platform } : {}) }, orderBy: { syncedAt: "desc" } });
     const lastSuccess = await this.prisma.analyticsSync.findFirst({ where: { channelId, channel: { workspaceId }, status: "SUCCEEDED", ...(platform ? { platform } : {}) }, orderBy: { syncedAt: "desc" } });
     const latest = new Set<string>();
-    return AnalyticsReportResponseSchema.parse({ channelId, platform, periodStart, periodEnd, metrics: snapshots.map((snapshot) => { const key = `${snapshot.platformPostId}:${snapshot.metric}`; const isLatest = !latest.has(key); latest.add(key); return { id: snapshot.id, contentItemId: snapshot.platformPost.publishPlan.contentItemId, platformPostId: snapshot.platformPostId, externalPostId: snapshot.platformPost.externalPostId, title: snapshot.platformPost.publishPlan.title, platform: snapshot.platformPost.platform, periodStart: snapshot.analyticsSync.periodStart.toISOString(), periodEnd: snapshot.analyticsSync.periodEnd.toISOString(), latest: isLatest, metric: snapshot.metric, status: snapshot.status, value: snapshot.value ? Number(snapshot.value) : null, unit: snapshot.unit, aggregation: snapshot.aggregation, unavailableReason: snapshot.unavailableReason, observedAt: snapshot.observedAt.toISOString(), revision: snapshot.revision, mappingVersion: snapshot.mappingVersion }; }), partial: snapshots.some((snapshot) => snapshot.status !== "AVAILABLE"), lastSyncedAt: lastSuccess?.syncedAt?.toISOString() ?? null, lastError: sync?.errorCode ?? null });
+    return AnalyticsReportResponseSchema.parse({ collectionStatus: sync?.status ?? null, nextCollectionAt: sync?.nextAttemptAt?.toISOString() ?? null, channelId, platform, periodStart, periodEnd, metrics: snapshots.map((snapshot) => { const key = `${snapshot.platformPostId}:${snapshot.metric}:${snapshot.observationKind}:${snapshot.periodStart?.toISOString()}:${snapshot.periodEnd?.toISOString()}`; const isLatest = !latest.has(key); latest.add(key); return { id: snapshot.id, contentItemId: snapshot.platformPost.publishPlan.contentItemId, platformPostId: snapshot.platformPostId, externalPostId: snapshot.platformPost.externalPostId, title: snapshot.platformPost.publishPlan.title, platform: snapshot.platformPost.platform, periodStart: snapshot.periodStart?.toISOString() ?? null, periodEnd: snapshot.periodEnd?.toISOString() ?? null, observationKind: snapshot.observationKind, collectedAt: snapshot.collectedAt.toISOString(), sceneVersionId: snapshot.sceneVersionId, scriptVersionId: snapshot.scriptVersionId, latest: isLatest, metric: snapshot.metric, status: snapshot.status, value: snapshot.value ? Number(snapshot.value) : null, unit: snapshot.unit, aggregation: snapshot.aggregation, unavailableReason: snapshot.unavailableReason, observedAt: snapshot.observedAt.toISOString(), revision: snapshot.revision, mappingVersion: snapshot.mappingVersion }; }), partial: snapshots.some((snapshot) => snapshot.status !== "AVAILABLE"), lastSyncedAt: lastSuccess?.syncedAt?.toISOString() ?? null, lastError: sync?.errorCode ?? null });
   }
 }

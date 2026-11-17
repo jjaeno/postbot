@@ -1,5 +1,7 @@
+import { RenderQualityReviewError } from "@postbot/renderer";
+import { randomUUID } from "node:crypto";
 import { AmbiguousPublishError } from "@postbot/publishers";
-import { assertJobScope, type Prisma, type PrismaClient } from "@postbot/database";
+import { assertExecutionOwner, jobExecution, assertJobScope, type Prisma, type PrismaClient } from "@postbot/database";
 import type { EnqueueJobInput } from "@postbot/jobs";
 import { AssetPreparationJobPayloadSchema, CollectAutomationJobPayloadSchema, PolicyAutomationJobPayloadSchema, RenderJobPayloadSchema, ScriptGenerationJobPayloadSchema, TtsPreparationJobPayloadSchema } from "@postbot/contracts";
 import { ScriptGenerationProcessor } from "./script-generation-processor.js";
@@ -102,6 +104,17 @@ export class DeterministicJobProcessor {
   }
 
   async process(input: EnqueueJobInput): Promise<void> {
+    const owner = { jobId: input.id, token: randomUUID() };
+    await jobExecution.run(owner, async () => {
+      const heartbeat = setInterval(() => {
+        void this.prisma.productionJob.updateMany({ where: { id: owner.jobId, executionToken: owner.token, status: { in: ["RUNNING", "CANCEL_REQUESTED"] } }, data: { heartbeatAt: new Date() } }).catch(() => undefined);
+      }, 5_000);
+      try { await this.execute(input); }
+      finally { clearInterval(heartbeat); }
+    });
+  }
+
+  private async execute(input: EnqueueJobInput): Promise<void> {
     const persisted = await this.prisma.productionJob.findUnique({ where: { id: input.id } });
     if (!persisted) throw new Error("JOB_NOT_FOUND");
     if (persisted?.status === "SUCCEEDED" || persisted?.status === "CANCELLED") return;
@@ -129,8 +142,8 @@ export class DeterministicJobProcessor {
     const config = loadConfig();
     const realPaid = (input.type === "SCRIPT" && config.LLM_PROVIDER === "openai") || (input.type === "ASSET" && config.IMAGE_PROVIDER === "google") || (input.type === "TTS" && config.TTS_PROVIDER === "elevenlabs");
     if (realPaid) {
-      const reservation = runId ? await this.prisma.automationCostReservation.findFirst({ where: { automationRunId: runId, stage: input.type as "SCRIPT" | "ASSET" | "TTS", releasedAt: null } }) : null;
-      if (!reservation) { await this.needsReview(input.id, attemptNumber, { reason: "Start a budgeted production workflow." }, "BUDGET_WORKFLOW_REQUIRED"); return; }
+      const reservation = runId ? await this.prisma.automationCostReservation.findUnique({ where: { idempotencyKey: `automation:${runId}:${input.type.toLowerCase()}:${automationPlatform(input.payload)?.toLowerCase()}:cost` } }) : null;
+      if (!reservation || reservation.releasedAt || reservation.settledAt) { await this.needsReview(input.id, attemptNumber, { reason: "Start a budgeted production workflow." }, "BUDGET_WORKFLOW_REQUIRED"); return; }
     }
 
     // The scheduler currently emits only { automation: { runId, stage } }.
@@ -242,6 +255,7 @@ export class DeterministicJobProcessor {
         await this.succeed(input.id, attemptNumber, await this.render.process(input.payload, input.id));
         return;
       } catch (error) {
+        if (error instanceof RenderQualityReviewError) { await this.needsReview(input.id, attemptNumber, { findings: [...error.findings], reason: "Adjust the scene layout or narration timing before rendering." }, "RENDER_TECHNICAL_REVIEW_REQUIRED"); return; }
         const message = error instanceof Error ? error.message : "RENDER_FAILED";
         await this.fail(input.id, attemptNumber, "RENDER_FAILED", message);
         throw error;
@@ -312,6 +326,8 @@ export class DeterministicJobProcessor {
         data: {
           status: "RUNNING",
           startedAt: new Date(),
+          executionToken: jobExecution.getStore()?.token ?? null,
+          heartbeatAt: new Date(),
           errorCode: null,
           errorMessage: null
         }
@@ -415,7 +431,15 @@ export class DeterministicJobProcessor {
     const key = `automation:${runId}:${type.toLowerCase()}:${platform.toLowerCase()}:cost`;
     const reservation = await this.prisma.automationCostReservation.findUnique({ where: { idempotencyKey: key } });
     if (!reservation || reservation.releasedAt || reservation.settledAt) return;
-    const usage = release ? null : await this.prisma.providerUsage.aggregate({ where: { productionJobId: jobId }, _sum: { actualCost: true } });
+    const record = await this.prisma.productionJob.findUniqueOrThrow({ where: { id: jobId } });
+    const calls = record.payload && typeof record.payload === "object" && !Array.isArray(record.payload) ? record.payload : {};
+    if (JSON.stringify(calls._llmAttempts ?? {}).includes('"STARTED"') || JSON.stringify(calls._mediaCalls ?? {}).includes('"STARTED"')) return;
+    const usage = await this.prisma.providerUsage.aggregate({ where: { productionJobId: jobId }, _sum: { actualCost: true, estimatedCost: true } });
+    // Configured-rate usage estimates are not reconciled invoice charges. Keep
+    // paid reservations until actual costs are recorded; failure is not a refund.
+    const paid = (type === "SCRIPT" && loadConfig().LLM_PROVIDER === "openai") || (type === "ASSET" && loadConfig().IMAGE_PROVIDER === "google") || (type === "TTS" && loadConfig().TTS_PROVIDER === "elevenlabs");
+    if (paid && usage._sum.estimatedCost?.gt(0) && usage._sum.actualCost === null) return;
+    if (release && paid && usage._sum.actualCost?.gt(0)) return;
     const actual = usage?._sum.actualCost;
     const now = new Date();
     await this.prisma.$transaction(async (tx) => {
@@ -434,18 +458,20 @@ export class DeterministicJobProcessor {
   }
 
   private async needsReview(jobId: string, attemptNumber: number, result: Record<string, unknown>, errorCode = "ASSET_LICENSE_REVIEW_REQUIRED"): Promise<void> {
+    const stockMessage = "장면에 맞는 스톡 이미지가 없습니다. 이미지 설명·태그를 보완하거나 관련 소재를 등록한 뒤 재시도하세요.";
+    const layoutMessage = "장면의 글자 배치·소재·자막 타이밍을 확인하고 검토 사유를 보완한 뒤 재시도하세요.";
     await this.finish(jobId, attemptNumber, "NEEDS_REVIEW", {
       status: "NEEDS_REVIEW",
       result: result as Prisma.InputJsonObject,
       finishedAt: new Date(),
       errorCode,
-      errorMessage: errorCode === "AMBIGUOUS_PUBLISH_RECONCILIATION_REQUIRED" ? "Publication outcome requires reconciliation before retry; no automatic re-upload." : result.reconciliationRequired === true ? "Provider call outcome and billing require reconciliation before retry; no automatic paid retry." : errorCode === "POLICY_REVIEW_REQUIRED" ? "Policy findings require manual review." : "Asset license requires manual review."
+      errorMessage: errorCode === "STOCK_MATCH_REQUIRED" ? stockMessage : errorCode === "RENDER_TECHNICAL_REVIEW_REQUIRED" ? layoutMessage : errorCode === "AMBIGUOUS_PUBLISH_RECONCILIATION_REQUIRED" ? "Publication outcome requires reconciliation before retry; no automatic re-upload." : result.reconciliationRequired === true ? "Provider call outcome and billing require reconciliation before retry; no automatic paid retry." : errorCode === "POLICY_REVIEW_REQUIRED" ? "Policy findings require manual review." : "Asset license requires manual review."
     });
     const job = await this.prisma.productionJob.findUnique({ where: { id: jobId }, select: { payload: true, type: true } });
     const runId = job ? automationRunId(job.payload as Record<string, unknown>) : null;
     if (runId && job && result.reconciliationRequired !== true) await this.settleReservation(runId, jobId, job.type, false);
     if (runId) await this.prisma.$transaction([
-      this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "HELD", attemptCount: attemptNumber, output: result as Prisma.InputJsonObject, errorCode, errorMessage: "Manual review is required.", finishedAt: new Date() } }),
+      this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: jobId }, data: { status: "HELD", attemptCount: attemptNumber, output: result as Prisma.InputJsonObject, errorCode, errorMessage: errorCode === "STOCK_MATCH_REQUIRED" ? stockMessage : errorCode === "RENDER_TECHNICAL_REVIEW_REQUIRED" ? layoutMessage : "Manual review is required.", finishedAt: new Date() } }),
       this.prisma.automationRun.updateMany({ where: { id: runId, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "RUNNING", pausedReason: null, heartbeatAt: new Date(), nextRunAt: new Date() } })
     ]);
   }
@@ -485,25 +511,10 @@ export class DeterministicJobProcessor {
     attemptStatus: ProductionJobStatus,
     jobData: Prisma.ProductionJobUpdateInput
   ): Promise<void> {
-    await this.prisma.$transaction([
-      this.prisma.jobAttempt.update({
-        where: {
-          productionJobId_attemptNumber: {
-            productionJobId: jobId,
-            attemptNumber
-          }
-        },
-        data: {
-          status: attemptStatus,
-          finishedAt: new Date(),
-          errorCode: typeof jobData.errorCode === "string" ? jobData.errorCode : null,
-          errorMessage: typeof jobData.errorMessage === "string" ? jobData.errorMessage : null
-        }
-      }),
-      this.prisma.productionJob.update({
-        where: { id: jobId },
-        data: jobData
-      })
-    ]);
+    await this.prisma.$transaction(async (tx) => {
+      await assertExecutionOwner(tx);
+      await tx.jobAttempt.update({ where: { productionJobId_attemptNumber: { productionJobId: jobId, attemptNumber } }, data: { status: attemptStatus, finishedAt: new Date(), errorCode: typeof jobData.errorCode === "string" ? jobData.errorCode : null, errorMessage: typeof jobData.errorMessage === "string" ? jobData.errorMessage : null } });
+      await tx.productionJob.update({ where: { id: jobId }, data: { ...jobData, executionToken: null, heartbeatAt: null } });
+    });
   }
 }

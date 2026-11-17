@@ -1,6 +1,6 @@
-import { PolicyAutomationJobPayloadSchema } from "@postbot/contracts";
-import type { Prisma, PrismaClient } from "@postbot/database";
-import { evaluatePolicy, type PolicyRule } from "@postbot/policy-engine";
+import { FactSourceLinkSchema, PolicyAutomationJobPayloadSchema } from "@postbot/contracts";
+import { assertExecutionOwner, type Prisma, type PrismaClient } from "@postbot/database";
+import { verifyFactEvidence, scriptEvidenceFingerprint, evaluatePolicy, type PolicyRule } from "@postbot/policy-engine";
 
 const object = (value: Prisma.JsonValue): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value : {};
 const numberValue = (value: Prisma.JsonValue, keys: readonly string[], fallback: number): number => { const data = object(value); for (const key of keys) if (typeof data[key] === "number") return data[key]; return fallback; };
@@ -35,9 +35,16 @@ export class PolicyProcessor {
       minimumSourceCount: numberValue(ruleRecord.originalityRule, ["minimumSourceCount"], 1), minimumSourceReliability: numberValue(ruleRecord.originalityRule, ["minimumSourceReliability"], 0.6), minimumOriginalityScore: numberValue(ruleRecord.originalityRule, ["minimumOriginalityScore"], 0.55)
     };
     const script = item.scriptVersions[0]; const metadata = object(script?.qualitySnapshot ?? {}); const nested = metadata.metadata; const description = nested && typeof nested === "object" && !Array.isArray(nested) && typeof (nested as Record<string, unknown>).description === "string" ? String((nested as Record<string, unknown>).description) : item.summary ?? "";
-    const sourceUrls = new Set(item.sourceReferences.map((source) => source.url));
     const facts = Array.isArray(metadata.facts) ? metadata.facts as unknown[] : item.sourceReferences.flatMap((source): unknown[] => { const raw = object(source.normalizedSnapshot ?? {}); return Array.isArray(raw.facts) ? raw.facts as unknown[] : []; });
-    const allFactsLinked = facts.length > 0 && facts.every((fact) => fact && typeof fact === "object" && !Array.isArray(fact) && typeof (fact as Record<string, unknown>).sourceUrl === "string" && sourceUrls.has(String((fact as Record<string, unknown>).sourceUrl)));
+    const scriptText = [script?.hook, script?.body, script?.callToAction].filter(Boolean).join("\n");
+    const parsedFacts = facts.flatMap((fact) => { const parsed = FactSourceLinkSchema.safeParse(fact); return parsed.success ? [parsed.data] : []; });
+    const evidence = verifyFactEvidence(parsedFacts, item.sourceReferences.map((source) => {
+      const snapshot = object(source.normalizedSnapshot ?? {});
+      return { url: source.url, text: `${source.title ?? ""}\n${typeof snapshot.body === "string" ? snapshot.body : ""}`, scope: snapshot.contentScope === "FULL_TEXT" ? "FULL_TEXT" as const : snapshot.contentScope === "SUMMARY" ? "SUMMARY" as const : "UNKNOWN" as const, conflicting: snapshot.conflicting === true || (Array.isArray(snapshot.conflictsWith) && snapshot.conflictsWith.length > 0) };
+    }), scriptText);
+    const humanConfirmed = typeof metadata.factsConfirmedBy === "string" && metadata.factsConfirmedFingerprint === scriptEvidenceFingerprint(scriptText);
+    const allFactsLinked = facts.length > 0 && parsedFacts.length === facts.length && !evidence.sourceConflict && evidence.claims.every((claim) => claim.reason !== "SOURCE_NOT_COLLECTED") && (evidence.autoPass || humanConfirmed);
+
     const licenses = item.assetUsages.map((usage) => usage.asset.licenses[0]);
     const maximumSimilarity = item.channel.contentItems.reduce((maximum, other) => Math.max(maximum, similarity(script?.body ?? "", other.scriptVersions[0]?.body ?? "")), 0);
     const evaluation = evaluatePolicy(rule, {
@@ -52,12 +59,13 @@ export class PolicyProcessor {
     const dbStatus = evaluation.status === "pass" ? "PASS" : evaluation.status === "warning" || evaluation.status === "review" ? "WARNING" : "FAIL";
     const now = new Date();
     await this.prisma.$transaction(async (tx) => {
+      await assertExecutionOwner(tx);
       const check = await tx.policyCheck.create({ data: { contentItemId: item.id, policyRuleId: ruleRecord.id, platform: input.platform, status: dbStatus, reasons: evaluation.findings } });
       const snapshot = JSON.parse(JSON.stringify({ policy: rule, status: evaluation.status, findings: evaluation.findings })) as Prisma.InputJsonObject;
       await tx.policySnapshot.create({ data: { channelId: item.channelId, policyRuleId: ruleRecord.id, policyCheckId: check.id, checkedAt: now, snapshot } });
-      if (script) await tx.scriptVersion.update({ where: { id: script.id }, data: { qualitySnapshot: { ...metadata, reviewStatus: evaluation.status === "pass" && item.channel.automationMode === "FULL_AUTO" ? "APPROVED" : evaluation.status === "block" ? "HELD" : "REVIEW_REQUIRED" }  } });
+      if (script) await tx.scriptVersion.update({ where: { id: script.id }, data: { qualitySnapshot: { ...metadata, factEvidence: evidence, reviewStatus: evaluation.status === "pass" && item.channel.automationMode === "FULL_AUTO" ? "APPROVED" : evaluation.status === "block" ? "HELD" : "REVIEW_REQUIRED" }  } });
       await tx.contentItem.update({ where: { id: item.id }, data: evaluation.status === "block" ? { status: "HELD", heldReason: "POLICY_BLOCK" } : evaluation.status !== "pass" ? { status: "REVIEW_REQUIRED", heldReason: "POLICY_REVIEW" } : item.channel.automationMode === "FULL_AUTO" ? { status: "APPROVED", approvedAt: now, heldReason: null } : { status: "REVIEW_REQUIRED", heldReason: null } });
     });
-    return { contentItemId: item.id, status: evaluation.status, findings: evaluation.findings, rightsVerified: licenses.length > 0 && licenses.every((license) => license?.status === "VERIFIED" && license.commercialUseAllowed), policyVersion: rule.version, effectiveAt: rule.effectiveAt, checkedAt: now.toISOString() };
+    return { contentItemId: item.id, status: evaluation.status, findings: evaluation.findings, factEvidence: evidence, rightsVerified: licenses.length > 0 && licenses.every((license) => license?.status === "VERIFIED" && license.commercialUseAllowed), policyVersion: rule.version, effectiveAt: rule.effectiveAt, checkedAt: now.toISOString() };
   }
 }

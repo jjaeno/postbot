@@ -406,6 +406,7 @@ model CollectionRule {
   allowedSources             Json?
   excludedSources            Json?
   recencyHours               Int
+  selectionPolicy            Json?
   collectionFrequencyMinutes Int
   isActive                   Boolean  @default(true)
   createdAt                  DateTime @default(now()) @db.DateTime(3)
@@ -717,6 +718,8 @@ model ProductionJob {
   runAfter        DateTime?           @db.DateTime(3)
   startedAt       DateTime?           @db.DateTime(3)
   finishedAt      DateTime?           @db.DateTime(3)
+  executionToken  String?             @db.VarChar(36)
+  heartbeatAt     DateTime?           @db.DateTime(3)
   createdAt       DateTime            @default(now()) @db.DateTime(3)
   updatedAt       DateTime            @updatedAt @db.DateTime(3)
   channel         Channel?            @relation(fields: [channelId], references: [id], onDelete: SetNull)
@@ -1045,6 +1048,7 @@ model PlatformPost {
   postUrl            String                    @db.Text
   publishedAt        DateTime                  @db.DateTime(3)
   policyVersion      Int
+  productionSnapshot Json?
   createdAt          DateTime                  @default(now()) @db.DateTime(3)
   publishPlan        PublishPlan               @relation(fields: [publishPlanId], references: [id], onDelete: Restrict)
   platformAccount    PlatformAccount           @relation(fields: [platformAccountId], references: [id], onDelete: Restrict)
@@ -1066,6 +1070,8 @@ model AnalyticsSync {
   timezone       String                    @db.VarChar(64)
   syncedAt       DateTime                  @default(now()) @db.DateTime(3)
   dataDelayHours Int?
+  collectionAttempts Int                  @default(0)
+  nextAttemptAt  DateTime?                @db.DateTime(3)
   errorCode      String?                   @db.VarChar(80)
   errorMessage   String?                   @db.Text
   channel        Channel                   @relation(fields: [channelId], references: [id], onDelete: Restrict)
@@ -1088,6 +1094,12 @@ model AnalyticsMetricSnapshot {
   unavailableReason String?               @db.Text
   rawSnapshot       Json
   observedAt        DateTime              @db.DateTime(3)
+  collectedAt       DateTime              @default(now()) @db.DateTime(3)
+  observationKind   String                @default("LEGACY_UNKNOWN") @db.VarChar(32)
+  periodStart       DateTime?             @db.DateTime(3)
+  periodEnd         DateTime?             @db.DateTime(3)
+  sceneVersionId    String?
+  scriptVersionId   String?
   revision          Int                   @default(1)
   createdAt         DateTime              @default(now()) @db.DateTime(3)
   analyticsSync     AnalyticsSync         @relation(fields: [analyticsSyncId], references: [id], onDelete: Restrict)

@@ -1,14 +1,16 @@
+import { durationCompliance } from "@postbot/optimization";
+import { jobExecution, assertExecutionOwner } from "@postbot/database";
 import { loadConfig } from "@postbot/config";
 import { readAssetUsagePurpose, AssetRepository, assetNeedsReview } from "@postbot/asset-library";
 import { RenderJobPayloadSchema } from "@postbot/contracts";
 import type { Prisma, PrismaClient } from "@postbot/database";
 import { FakeStorageProvider, S3StorageProvider, type StorageProvider } from "@postbot/providers";
-import { FfmpegPostProcessor, RemotionVideoRenderer, type FfprobeResult, type VideoRenderer } from "@postbot/renderer";
+import { inspectTechnicalQuality, splitDisplayCaptions, RenderQualityReviewError, textUnits, FfmpegPostProcessor, RemotionVideoRenderer, type FfprobeResult, type VideoRenderer } from "@postbot/renderer";
 import { readFile, rm, writeFile, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CaptionTiming } from "@postbot/renderer";
-import { retimeNarration, SceneDocumentSchema } from "@postbot/scene-schema";
+import { retimeNarration, SceneDocumentSchema, VideoStyleSchema } from "@postbot/scene-schema";
 
 export interface MediaPostProcessor {
   postprocess(input: { videoInput: string; output: string; narrationInput?: string; backgroundInput?: string; effectsInput?: string; backgroundVolume?: number; effectsVolume?: number }): Promise<void>;
@@ -61,6 +63,17 @@ export class RenderProcessor {
       return previous;
     }
     let sceneDocument = SceneDocumentSchema.parse(sceneVersion.sceneDocument);
+    sceneDocument = { ...sceneDocument, platform: sceneVersion.platform ?? sceneDocument.platform, scenes: sceneDocument.scenes.map((scene) => ({ ...scene, visualMode: scene.visualMode ?? "IMAGE" })) };
+    const object = (value: Prisma.JsonValue | null | undefined): Prisma.JsonObject => value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    const script = sceneVersion.scriptVersionId ? await this.prisma.scriptVersion.findUnique({ where: { id: sceneVersion.scriptVersionId } }) : null;
+    const generationContext = object(object(script?.qualitySnapshot).generationContext);
+    const experiment = object(generationContext.experiment);
+    const strategy = object(generationContext.strategy);
+    const targetDuration = typeof experiment.targetDurationSeconds === "number" ? experiment.targetDurationSeconds : typeof strategy.durationSeconds === "number" ? strategy.durationSeconds : null;
+    const tolerance = typeof experiment.toleranceSeconds === "number" ? experiment.toleranceSeconds : 1;
+    const checkExperiment = (actual: number): void => {
+      if (typeof experiment.assignmentKey === "string" && (targetDuration === null || !durationCompliance(actual, targetDuration, tolerance))) throw new RenderQualityReviewError([{ code: "EXPERIMENT_FINAL_DURATION_MISMATCH", message: `Actual duration ${actual}s does not meet target ${targetDuration ?? "unknown"}s within ${tolerance}s. Regenerate within a new budget or review the assignment.` }]);
+    };
     let brandLogo: string | undefined;
     if (sceneDocument.style?.logoAssetId) {
       const logo = await this.prisma.asset.findFirst({ where: { id: sceneDocument.style.logoAssetId, channelId: input.channelId, kind: "GRAPHIC" } });
@@ -101,7 +114,6 @@ export class RenderProcessor {
         sceneDocument = retimeNarration(sceneDocument, captions, audio.durationSeconds, { min: profile?.minDurationSeconds ?? 0, max: profile?.maxDurationSeconds ?? 180 });
         expectedDuration = sceneDocument.durationInFrames / sceneDocument.fps;
       }
-      if (captions.some((caption) => caption.text.length > 160)) throw new Error("SUBTITLE_SAFE_AREA_OR_TIMING_INVALID");
       if (background && backgroundPath) await writeFile(backgroundPath, await this.storage.download(background.asset.storageKey));
       if (effects && effectsPath) await writeFile(effectsPath, await this.storage.download(effects.asset.storageKey));
       const sceneAssets: Record<string, string> = {};
@@ -111,22 +123,43 @@ export class RenderProcessor {
         const bytes = await this.storage.download(usage.asset.storageKey);
         sceneAssets[sceneId] = `data:${usage.asset.mimeType};base64,${Buffer.from(bytes).toString("base64")}`;
       }
-      await this.withTimeout(this.renderer.render({ sceneDocument, captions, sceneAssets, brandLogo, outputLocation: draftPath }));
+      checkExperiment(expectedDuration);
+      const displayCaptions = splitDisplayCaptions(captions);
+      const technicalQuality = inspectTechnicalQuality(sceneDocument, displayCaptions, sceneAssets);
+      if (!technicalQuality.pass) throw new RenderQualityReviewError(technicalQuality.findings);
+      const rendered = await this.withTimeout(this.renderer.render({ sceneDocument, captions: displayCaptions, sceneAssets, brandLogo, outputLocation: draftPath }));
       await this.withTimeout(this.postProcessor.postprocess({ videoInput: draftPath, output: outputPath, narrationInput: narrationPath, backgroundInput: backgroundPath, effectsInput: effectsPath, backgroundVolume: sceneDocument.audio?.bgmVolume ?? 0.2, effectsVolume: sceneDocument.audio?.sfxVolume ?? 0.2 }));
       await this.withTimeout(this.postProcessor.thumbnail(outputPath, thumbnailPath));
       const qa = await this.withTimeout(this.postProcessor.probe(outputPath));
       if (qa.width !== 1080 || qa.height !== 1920 || qa.durationSeconds <= 0 || Math.abs(qa.durationSeconds - expectedDuration) > 1 || (narration && qa.hasAudio === false) || (narration && qa.meanVolumeDb !== undefined && (qa.meanVolumeDb === null || qa.meanVolumeDb < -60)) || (qa.blackFrameRatio ?? 0) > 0.98) throw new Error("RENDER_QA_FAILED");
-      const videoKey = `renders/${input.contentItemId}/${jobId}.mp4`;
-      const thumbnailKey = `renders/${input.contentItemId}/${jobId}.jpg`;
+      checkExperiment(qa.durationSeconds);
+      const artifactId = jobExecution.getStore()?.token ?? jobId;
+      const videoKey = `renders/${input.contentItemId}/${jobId}/${artifactId}.mp4`;
+      const thumbnailKey = `renders/${input.contentItemId}/${jobId}/${artifactId}.jpg`;
       await this.storage.upload({ key: videoKey, body: await readFile(outputPath), mimeType: "video/mp4" });
       await this.storage.upload({ key: thumbnailKey, body: await readFile(thumbnailPath), mimeType: "image/jpeg" });
+      const styleSnapshot = VideoStyleSchema.parse(sceneDocument.style ?? {});
+      const voice = object(narration?.usageSnapshot);
+      const productionFeatures = {
+        version: "published-features-v1", sceneVersionId: sceneVersion.id, scriptVersionId: sceneVersion.scriptVersionId,
+        actualDurationSeconds: qa.durationSeconds, rendererVersion: rendered.rendererVersion,
+        hookType: script?.hook.includes("?") || script?.hook.includes("\uFF1F") ? "QUESTION" : script?.hook && /\d/.test(script.hook) ? "NUMERIC_RESULT" : "STATEMENT",
+        requestedHookStyle: generationContext.hookStyle ?? null,
+        sceneTemplates: sceneDocument.scenes.map((scene, index) => scene.role ?? (index === 0 ? "HOOK" : "REVEAL")),
+        sceneCount: sceneDocument.scenes.length, transitionsPerMinute: Math.max(0, sceneDocument.scenes.length - 1) * 60 / qa.durationSeconds,
+        subtitles: { enabled: displayCaptions.length > 0, fontSize: styleSnapshot.captionFontSize, fontFamily: styleSnapshot.fontFamily, unitsPerSecond: displayCaptions.reduce((sum, caption) => sum + textUnits(caption.text), 0) / qa.durationSeconds },
+        voice: { voice: voice.voice ?? null, provider: voice.provider ?? null, model: voice.model ?? null }, audio: sceneDocument.audio ?? null,
+        experiment: typeof experiment.assignmentKey === "string" ? { ...experiment, targetDurationSeconds: targetDuration, toleranceSeconds: tolerance, compliant: true } : null
+      };
       const manifest = {
         idempotencyKey: input.idempotencyKey,
-        rendererVersion: "1.1.0",
+        rendererVersion: rendered.rendererVersion,
+        technicalQuality,
+        productionFeatures,
         schemaVersion: sceneDocument.schemaVersion,
         videoKey,
         thumbnailKey,
-        captions: captions.length,
+        captions: displayCaptions.length,
         sceneAssets: Object.keys(sceneAssets),
         style: sceneDocument.style ?? null,
         qa
@@ -134,8 +167,11 @@ export class RenderProcessor {
       const config = loadConfig();
       const rate = config.RENDER_COST_MODE === "free" ? 0 : config.APP_ENV === "local" || config.APP_ENV === "test" ? 0.01 : config.RENDER_USD_PER_MINUTE;
       await audioAssets.recordProviderCost({ contentItemId: input.contentItemId, productionJobId: jobId, provider: "renderer", model: "remotion-ffmpeg", operation: "video-render", quantity: qa.durationSeconds / 60, unit: "minute", category: "render", estimatedCostUsd: (qa.durationSeconds / 60 * rate).toFixed(6), idempotencyKey: `render:${input.idempotencyKey}` });
-      await this.prisma.sceneVersion.update({ where: { id: sceneVersion.id }, data: { renderManifest: manifest, sceneDocument, durationSeconds: expectedDuration } });
-      if (sceneVersion.scriptVersionId) await this.prisma.scriptVersion.update({ where: { id: sceneVersion.scriptVersionId }, data: { durationSeconds: expectedDuration } });
+      await this.prisma.$transaction(async (tx) => {
+      await assertExecutionOwner(tx);
+      await tx.sceneVersion.update({ where: { id: sceneVersion.id }, data: { renderManifest: manifest, sceneDocument, durationSeconds: expectedDuration } });
+      if (sceneVersion.scriptVersionId) await tx.scriptVersion.update({ where: { id: sceneVersion.scriptVersionId }, data: { durationSeconds: expectedDuration } });
+      });
       return manifest;
     } finally {
       await rm(directory, { recursive: true, force: true });

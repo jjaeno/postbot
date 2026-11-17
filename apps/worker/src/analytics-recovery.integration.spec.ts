@@ -26,6 +26,7 @@ describe.skipIf(process.env.RUN_DB_INTEGRATION !== "1")("analytics batch recover
     const processor = new AnalyticsProcessor(prisma, { fetchPage });
     await expect(processor.process({ analytics: { syncId: sync.id } })).rejects.toThrow("PARTIAL");
     expect(await prisma.analyticsMetricSnapshot.count({ where: { analyticsSyncId: sync.id } })).toBe(500);
+    await prisma.analyticsSync.update({ where: { id: sync.id }, data: { nextAttemptAt: null } });
     await processor.process({ analytics: { syncId: sync.id } });
     expect(fetchPage.mock.calls.map(([input]) => input.postIds.length)).toEqual([500, 1, 1]);
     expect(await prisma.analyticsMetricSnapshot.count({ where: { analyticsSyncId: sync.id } })).toBe(501);

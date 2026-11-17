@@ -1,0 +1,9 @@
+ALTER TABLE `analytics_syncs` ADD COLUMN `collectionAttempts` INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN `nextAttemptAt` DATETIME(3) NULL;
+ALTER TABLE `analytics_metric_snapshots`
+  ADD COLUMN `collectedAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  ADD COLUMN `observationKind` VARCHAR(32) NOT NULL DEFAULT 'LEGACY_UNKNOWN',
+  ADD COLUMN `periodStart` DATETIME(3) NULL,
+  ADD COLUMN `periodEnd` DATETIME(3) NULL,
+  ADD COLUMN `sceneVersionId` VARCHAR(191) NULL,
+  ADD COLUMN `scriptVersionId` VARCHAR(191) NULL;

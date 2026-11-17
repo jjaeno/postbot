@@ -1,7 +1,7 @@
-import { AssetPreparationService, AssetRepository, sceneAssetUsageKey } from "@postbot/asset-library";
+import { scoreStockMatch, AssetPreparationService, AssetRepository, sceneAssetUsageKey } from "@postbot/asset-library";
 import { loadConfig } from "@postbot/config";
 import { AssetPreparationJobPayloadSchema, TtsPreparationJobPayloadSchema } from "@postbot/contracts";
-import type { Prisma, PrismaClient } from "@postbot/database";
+import { assertExecutionOwner, type Prisma, type PrismaClient } from "@postbot/database";
 import { FakeImageProvider, FakeStorageProvider, FakeTtsProvider, GoogleImageProvider, ElevenLabsTtsProvider, S3StorageProvider, resolveTtsVoice } from "@postbot/providers";
 import { SceneDocumentSchema, aiSceneCount } from "@postbot/scene-schema";
 
@@ -26,6 +26,7 @@ export class AssetPreparationProcessor {
 
   private async realMediaCall<Result>(jobId: string, key: string, operation: () => Promise<Result>, canReuse: () => Promise<boolean>): Promise<Result> {
     await this.prisma.$transaction(async (tx) => {
+      await assertExecutionOwner(tx);
       await tx.$queryRaw`SELECT id FROM production_jobs WHERE id = ${jobId} FOR UPDATE`;
       const job = await tx.productionJob.findUniqueOrThrow({ where: { id: jobId } });
       const payload: Prisma.JsonObject = job.payload && typeof job.payload === "object" && !Array.isArray(job.payload) ? job.payload : {};
@@ -58,13 +59,24 @@ export class AssetPreparationProcessor {
     const stock = aiCount < document.scenes.length ? await this.assets.selectLicensedStock(input.channelId) : [];
     // Validate stock availability before making any paid AI requests.
     if (aiCount < document.scenes.length && stock.length === 0) return { assets: [], needsReview: true, reviewCode: "STOCK_ASSET_REQUIRED", contentItemId: input.contentItemId };
+    const selections = new Map<string, typeof stock[number]>();
+    const uses = new Map<string, number>();
+    for (const scene of document.scenes.slice(aiCount)) {
+      const prepared = await this.assets.findPreparedImage({ channelId: input.channelId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose: `scene-image:${platformKey}:${scene.id}` });
+      const ranked = stock.map((asset) => ({ asset, score: scoreStockMatch(scene.visualPrompt, asset, uses.get(asset.assetId) ?? 0) }))
+        .filter((entry) => entry.score >= 0.25 && (!prepared || prepared.assetId === entry.asset.assetId))
+        .sort((left, right) => right.score - left.score || left.asset.assetId.localeCompare(right.asset.assetId));
+      const selected = ranked[0]?.asset;
+      if (!selected) return { assets: [], needsReview: true, reviewCode: "STOCK_MATCH_REQUIRED", sceneId: scene.id, metadataMissing: stock.every((asset) => !asset.description && !asset.tags.length), contentItemId: input.contentItemId };
+      selections.set(scene.id, selected); uses.set(selected.assetId, (uses.get(selected.assetId) ?? 0) + 1);
+    }
     for (const [index, scene] of document.scenes.entries()) {
       if (index >= aiCount) {
         const purpose = `scene-image:${platformKey}:${scene.id}`;
         const existing = await this.assets.findPreparedImage({ channelId: input.channelId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose });
         if (existing) { assets.push({ sceneId: scene.id, ...existing }); continue; }
-        const selected = stock[(index - aiCount) % stock.length]!;
-        await this.assets.attachUsage({ assetId: selected.assetId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose, snapshot: { stock: true, license: "verified" } });
+        const selected = selections.get(scene.id)!;
+        await this.assets.attachUsage({ assetId: selected.assetId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose, snapshot: { stock: true, license: "verified", matchScore: scoreStockMatch(scene.visualPrompt, selected), method: "LEXICAL_METADATA_V1" } });
         assets.push({ sceneId: scene.id, assetId: selected.assetId, fallback: false, needsReview: false });
         continue;
       }

@@ -1,3 +1,5 @@
+import { verifyFactEvidence, scriptEvidenceFingerprint } from "@postbot/policy-engine";
+import { FactSourceLinkSchema } from "@postbot/contracts";
 import { ConflictException, Inject, Injectable } from "@nestjs/common";
 import { Prisma, type PrismaClient } from "@postbot/database";
 import type { ContentReviewResponse, PolicyVerdict, UpdateReviewMetadataRequest, UpdateReviewScriptRequest, ReviewAssetLicenseRequest } from "@postbot/contracts";
@@ -144,7 +146,7 @@ export class PrismaReviewRepository implements ReviewRepository {
       const aligned = alignSceneNarration(document, text);
       document.scenes = aligned.scenes;
       SceneDocumentSchema.parse(document);
-      const nextScript = await tx.scriptVersion.create({ data: { contentItemId, platform: input.platform, version: script.version + 1, hook: input.hook, body: input.body, callToAction: input.callToAction, language: script.language, durationSeconds: script.durationSeconds, promptVersion: script.promptVersion, qualitySnapshot: { ...json(script.qualitySnapshot), reviewStatus: "REVIEW_REQUIRED", facts: [{ claim: text, sourceUrl: input.sourceUrl }], factsConfirmedBy: userId, editedBy: "owner-script-review" } } });
+      const nextScript = await tx.scriptVersion.create({ data: { contentItemId, platform: input.platform, version: script.version + 1, hook: input.hook, body: input.body, callToAction: input.callToAction, language: script.language, durationSeconds: script.durationSeconds, promptVersion: script.promptVersion, qualitySnapshot: { ...json(script.qualitySnapshot), reviewStatus: "REVIEW_REQUIRED", facts: [{ claim: text, sourceUrl: input.sourceUrl }], factsConfirmedBy: userId, factsConfirmedFingerprint: scriptEvidenceFingerprint([input.hook, input.body, input.callToAction].join("\n")), editedBy: "owner-script-review" } } });
       const nextScene = await tx.sceneVersion.create({ data: { contentItemId, scriptVersionId: nextScript.id, platform: input.platform, version: nextScript.version, schemaVersion: scene.schemaVersion, sceneDocument: document, durationSeconds: scene.durationSeconds } });
       const usages = await tx.assetUsage.findMany({ where: { sceneVersionId: scene.id } });
       for (const usage of usages) {
@@ -178,13 +180,19 @@ export class PrismaReviewRepository implements ReviewRepository {
       channel: { select: { contentItems: { where: { id: { not: contentItemId } }, include: { scriptVersions: { orderBy: { version: "desc" }, take: 1 } }, take: 50 } } }
     } });
     if (!item) return null;
-    const sourceUrls = new Set(item.sourceReferences.map((source) => source.url));
     const quality = json(item.scriptVersions[0]?.qualitySnapshot ?? null);
     const facts = Array.isArray(quality.facts) ? quality.facts as unknown[] : item.sourceReferences.flatMap((source) => {
       const snapshot = json(source.normalizedSnapshot);
       return Array.isArray(snapshot.facts) ? snapshot.facts as unknown[] : [];
     });
-    const linkedFacts = facts.filter((fact) => fact && typeof fact === "object" && !Array.isArray(fact) && typeof (fact as Record<string, unknown>).sourceUrl === "string" && sourceUrls.has(String((fact as Record<string, unknown>).sourceUrl)));
+    const parsedFacts = facts.flatMap((fact) => { const parsed = FactSourceLinkSchema.safeParse(fact); return parsed.success ? [parsed.data] : []; });
+    const scriptText = [item.scriptVersions[0]?.hook, item.scriptVersions[0]?.body, item.scriptVersions[0]?.callToAction].filter(Boolean).join("\n");
+    const evidence = verifyFactEvidence(parsedFacts, item.sourceReferences.map((source) => {
+      const snapshot = json(source.normalizedSnapshot);
+      return { url: source.url, text: `${source.title ?? ""}\n${typeof snapshot.body === "string" ? snapshot.body : ""}`, scope: snapshot.contentScope === "FULL_TEXT" ? "FULL_TEXT" as const : snapshot.contentScope === "SUMMARY" ? "SUMMARY" as const : "UNKNOWN" as const, conflicting: snapshot.conflicting === true || (Array.isArray(snapshot.conflictsWith) && snapshot.conflictsWith.length > 0) };
+    }), scriptText);
+    const humanConfirmed = typeof quality.factsConfirmedBy === "string" && quality.factsConfirmedFingerprint === scriptEvidenceFingerprint(scriptText);
+
     const conflictingSources = item.sourceReferences.some((source) => {
       const snapshot = json(source.normalizedSnapshot);
       return snapshot.conflicting === true || (Array.isArray(snapshot.conflictsWith) && snapshot.conflictsWith.length > 0);
@@ -196,7 +204,7 @@ export class PrismaReviewRepository implements ReviewRepository {
     const text = `${typeof quality.reviewTitle === "string" ? quality.reviewTitle : item.title} ${item.summary ?? ""} ${script?.hook ?? ""} ${currentBody} ${script?.callToAction ?? ""}`.toLowerCase();
     const licenses = item.assetUsages.map((usage) => usage.asset.licenses[0]);
     return {
-      factsHaveSources: facts.length > 0 && facts.length === linkedFacts.length,
+      factsHaveSources: facts.length > 0 && parsedFacts.length === facts.length && !evidence.sourceConflict && evidence.claims.every((claim) => claim.reason !== "SOURCE_NOT_COLLECTED") && (evidence.autoPass || humanConfirmed),
       sourceCount: item.sourceReferences.length,
       minimumSourceReliability: item.sourceReferences.length > 0 ? Math.min(...item.sourceReferences.map((source) => source.reliabilityScore?.toNumber() ?? 0)) : null,
       conflictingSources,

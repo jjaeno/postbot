@@ -16,6 +16,8 @@ suite("serialized platform slot reservations", () => {
     const youtube = await prisma.platformAccount.create({ data: { workspaceId: workspace.id, channelId: channel.id, platform: "YOUTUBE", externalAccountId: `${key}:yt`, status: "CONNECTED" } });
     const instagram = await prisma.platformAccount.create({ data: { workspaceId: workspace.id, channelId: channel.id, platform: "INSTAGRAM", externalAccountId: `${key}:ig`, status: "CONNECTED" } });
     const input = { contentItemId: content.id, platformAccountId: youtube.id, platform: "YOUTUBE" as const, status: "SCHEDULED" as const, scheduledAt: new Date("2099-01-01T01:00:00Z"), title: "Fixture" };
+    await expect(createScheduledPlan(prisma, channel.id, "Asia/Seoul", 1, { ...input, idempotencyKey: `${key}:rollback` }, () => Promise.reject(new Error("DURABLE_JOB_INSERT_FAILED")))).rejects.toThrow("DURABLE_JOB_INSERT_FAILED");
+    expect(await prisma.publishPlan.count({ where: { idempotencyKey: `${key}:rollback` } })).toBe(0);
     const reservations = await Promise.allSettled([createScheduledPlan(prisma, channel.id, "Asia/Seoul", 1, { ...input, idempotencyKey: `${key}:1` }), createScheduledPlan(prisma, channel.id, "Asia/Seoul", 1, { ...input, idempotencyKey: `${key}:2` })]);
     expect(reservations.filter((result) => result.status === "fulfilled")).toHaveLength(1);
     expect(reservations.filter((result) => result.status === "rejected")).toHaveLength(1);

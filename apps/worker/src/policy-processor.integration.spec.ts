@@ -1,3 +1,4 @@
+import { scriptEvidenceFingerprint } from "@postbot/policy-engine";
 import { PrismaClient } from "@postbot/database";
 import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
@@ -13,7 +14,7 @@ suite("current scene rights evidence", () => {
     const workspace = await prisma.workspace.create({ data: { ownerId: user.id, name: "Policy fixture", slug: key } });
     const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Policy fixture", slug: key, automationMode: "FULL_AUTO" } });
     const url = `https://example.com/${key}`;
-    const item = await prisma.contentItem.create({ data: { channelId: channel.id, title: key, topicKey: key, sourceReferences: { create: { kind: "OFFICIAL", title: "Source", url, urlHash: key, sourceName: "Fixture", reliabilityScore: 1, normalizedSnapshot: { facts: [{ claim: "Fact", sourceUrl: url }] } } }, scriptVersions: { create: { platform: "YOUTUBE", version: 2, hook: "Hook", body: key, language: "en", durationSeconds: 30, qualitySnapshot: { metadata: { description: "AI generated" } } } } } });
+    const item = await prisma.contentItem.create({ data: { channelId: channel.id, title: key, topicKey: key, sourceReferences: { create: { kind: "OFFICIAL", title: "Source", url, urlHash: key, sourceName: "Fixture", reliabilityScore: 1, normalizedSnapshot: { contentScope: "FULL_TEXT", body: `Hook ${key}`, facts: [{ claim: `Hook ${key}`, sourceUrl: url }] } } }, scriptVersions: { create: { platform: "YOUTUBE", version: 2, hook: "Hook", body: key, language: "en", durationSeconds: 30, qualitySnapshot: { metadata: { description: "AI generated" } } } } } });
     const oldScene = await prisma.sceneVersion.create({ data: { contentItemId: item.id, platform: "YOUTUBE", version: 1, schemaVersion: "1.0.0", sceneDocument: {} } });
     const currentScene = await prisma.sceneVersion.create({ data: { contentItemId: item.id, platform: "YOUTUBE", version: 2, schemaVersion: "1.0.0", sceneDocument: {} } });
     for (const [index, scene] of [oldScene, currentScene].entries()) {
@@ -23,7 +24,7 @@ suite("current scene rights evidence", () => {
     const result = await new PolicyProcessor(prisma).process({ automation: { runId: key, stage: "POLICY", platform: "YOUTUBE" }, policy: { contentItemId: item.id, platform: "YOUTUBE", region: key.slice(0, 32) } });
     expect(result.status).toBe("pass");
     await prisma.sourceReference.updateMany({ where: { contentItemId: item.id }, data: { normalizedSnapshot: { facts: [] } } });
-    await prisma.scriptVersion.updateMany({ where: { contentItemId: item.id }, data: { qualitySnapshot: { factsConfirmedBy: user.id, facts: [{ claim: "Owner confirmed", sourceUrl: url }], metadata: { description: "AI generated" } } } });
+    await prisma.scriptVersion.updateMany({ where: { contentItemId: item.id }, data: { qualitySnapshot: { factsConfirmedBy: user.id, factsConfirmedFingerprint: scriptEvidenceFingerprint(`Hook\n${key}`), facts: [{ claim: "Owner confirmed", sourceUrl: url }], metadata: { description: "AI generated" } } } });
     expect((await new PolicyProcessor(prisma).process({ automation: { runId: key, stage: "POLICY", platform: "YOUTUBE" }, policy: { contentItemId: item.id, platform: "YOUTUBE", region: key.slice(0, 32) } })).status).toBe("pass");
     await prisma.policyRule.updateMany({ where: { platform: "YOUTUBE", region: key.slice(0, 32) }, data: { restrictedTopics: ["restricted hook"] } });
     await prisma.scriptVersion.updateMany({ where: { contentItemId: item.id }, data: { hook: "restricted hook" } });

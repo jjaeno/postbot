@@ -1,3 +1,4 @@
+import { TopicSelectionPolicySchema } from "@postbot/contracts";
 import { Inject, Injectable } from "@nestjs/common";
 import type {
   ChannelResponse,
@@ -106,6 +107,7 @@ const toResponse = (channel: ChannelWithSettings): ChannelResponse => {
         "pause_channel"
     },
     collectionRule: {
+      selectionPolicy: TopicSelectionPolicySchema.parse(collectionRule?.selectionPolicy ?? {}),
       keywords: collectionRule ? jsonArray(collectionRule.keywords) : [],
       excludedKeywords: collectionRule ? jsonArray(collectionRule.excludedKeywords) : [],
       allowedSources: collectionRule ? jsonArray(collectionRule.allowedSources) : [],
@@ -312,6 +314,7 @@ export class PrismaChannelsRepository implements ChannelsRepository {
         allowedSources: input.collectionRule.allowedSources,
         excludedSources: input.collectionRule.excludedSources,
         recencyHours: input.collectionRule.recencyHours,
+        selectionPolicy: input.collectionRule.selectionPolicy ?? {},
         collectionFrequencyMinutes: input.collectionRule.collectionFrequencyMinutes,
         isActive: true
       }

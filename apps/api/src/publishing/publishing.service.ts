@@ -15,12 +15,13 @@ export class PublishingService {
   constructor(@Inject("PRISMA_CLIENT") private readonly prisma: PrismaClient, private readonly jobs: JobsService) {}
   async schedule(workspaceId: string, raw: unknown): Promise<PublishPlanResponse> {
     const input = this.parse(raw); const scheduledAt = new Date(input.scheduledAt);
-    if (scheduledAt <= new Date()) throw new BadRequestException({ code: "SCHEDULE_IN_PAST", message: "Schedule time must be in the future." });
+    if (!await this.prisma.publishPlan.findUnique({ where: { idempotencyKey: input.idempotencyKey } }) && scheduledAt <= new Date()) throw new BadRequestException({ code: "SCHEDULE_IN_PAST", message: "Schedule time must be in the future." });
     const existing = await this.prisma.publishPlan.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
     if (existing) {
       const owned = await this.prisma.contentItem.findFirst({ where: { id: existing.contentItemId, channel: { workspaceId } }, select: { id: true } });
       if (!owned) throw new NotFoundException({ code: "PUBLISH_PLAN_NOT_FOUND", message: "Publishing plan was not found." });
       if (existing.contentItemId !== input.contentItemId || existing.platformAccountId !== input.platformAccountId) throw new ConflictException({ code: "PUBLISH_IDEMPOTENCY_CONFLICT", message: "This request key already belongs to a different publishing plan." });
+      await this.ensureDispatch(workspaceId, existing);
       return { id: existing.id, contentItemId: existing.contentItemId, platformAccountId: existing.platformAccountId, platform: existing.platform, status: existing.status, scheduledAt: existing.scheduledAt.toISOString(), idempotencyKey: existing.idempotencyKey, title: existing.title, duplicate: true };
     }
     const account = await this.prisma.platformAccount.findFirst({ where: { id: input.platformAccountId, workspaceId, status: "CONNECTED" } });
@@ -44,10 +45,17 @@ export class PublishingService {
     const hashtags = Array.isArray(metadata.hashtags) ? metadata.hashtags.filter((tag): tag is string => typeof tag === "string") : [];
     const channel = await this.prisma.channel.findUniqueOrThrow({ where: { id: content.channelId }, include: { scheduleRules: { where: { isActive: true } }, outputProfiles: { where: { platform: account.platform, isActive: true } } } });
     const timezone = channel.scheduleRules.find((rule) => rule.platform === account.platform)?.timezone ?? channel.scheduleRules[0]?.timezone ?? "Asia/Seoul";
-    const plan = await createScheduledPlan(this.prisma, content.channelId, timezone, channel.dailyPublishLimit, { contentItemId: content.id, platform: account.platform, platformAccountId: account.id, sceneVersionId: scene.id, policySnapshotId: check.snapshots[0]?.id, status: "SCHEDULED", scheduledAt, idempotencyKey: input.idempotencyKey, title, description, hashtags, metadata: { publicSetting: channel.outputProfiles[0]?.publicSetting ?? "PUBLIC" } });
+    const plan = await createScheduledPlan(this.prisma, content.channelId, timezone, channel.dailyPublishLimit, { contentItemId: content.id, platform: account.platform, platformAccountId: account.id, sceneVersionId: scene.id, policySnapshotId: check.snapshots[0]?.id, status: "SCHEDULED", scheduledAt, idempotencyKey: input.idempotencyKey, title, description, hashtags, metadata: { publicSetting: channel.outputProfiles[0]?.publicSetting ?? "PUBLIC" } }, async (tx, plan) => {
+      await tx.productionJob.upsert({ where: { idempotencyKey: `publish:${plan.id}` }, update: {}, create: { channelId: content.channelId, contentItemId: content.id, type: "PUBLISH", queueName: "publish", idempotencyKey: `publish:${plan.id}`, runAfter: scheduledAt, payload: { publish: { publishPlanId: plan.id } } } });
+      await tx.contentItem.update({ where: { id: content.id }, data: { status: "SCHEDULED" } });
+    });
     await this.jobs.create(workspaceId, { type: "PUBLISH", channelId: content.channelId, contentItemId: content.id, idempotencyKey: `publish:${plan.id}`, runAfter: scheduledAt.toISOString(), payload: { publish: { publishPlanId: plan.id } } });
-    await this.prisma.contentItem.update({ where: { id: content.id }, data: { status: "SCHEDULED" } });
     return { id: plan.id, contentItemId: plan.contentItemId, platformAccountId: plan.platformAccountId, platform: plan.platform, status: plan.status, scheduledAt: plan.scheduledAt.toISOString(), idempotencyKey: plan.idempotencyKey, title: plan.title };
+  }
+  private async ensureDispatch(workspaceId: string, plan: { id: string; contentItemId: string; scheduledAt: Date; status: string }): Promise<void> {
+    if (plan.status !== "SCHEDULED") return;
+    const content = await this.prisma.contentItem.findUniqueOrThrow({ where: { id: plan.contentItemId } });
+    await this.jobs.create(workspaceId, { type: "PUBLISH", channelId: content.channelId, contentItemId: content.id, idempotencyKey: `publish:${plan.id}`, runAfter: plan.scheduledAt.toISOString(), payload: { publish: { publishPlanId: plan.id } } });
   }
   async list(workspaceId: string): Promise<PublishCalendarItem[]> {
     const plans = await this.prisma.publishPlan.findMany({ where: { contentItem: { channel: { workspaceId } } }, include: { contentItem: { select: { channelId: true } }, platformPost: true, attempts: { orderBy: { attemptNumber: "desc" }, take: 1 } }, orderBy: { scheduledAt: "asc" }, take: 200 });

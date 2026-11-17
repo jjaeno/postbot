@@ -1,4 +1,5 @@
 import type { SupportedPlatform } from "@postbot/publishers";
+export { verifyFactEvidence, scriptEvidenceFingerprint, type FactClaim, type EvidenceSource } from "./fact-evidence.js";
 
 export type PolicySeverity = "pass" | "warning" | "review" | "block";
 

@@ -1,4 +1,4 @@
-export { canonicalizeTopicUrl, scoreTopicCandidate } from "./topic-scoring.js";
+export { canonicalizeTopicUrl, scoreTopicCandidate, topicSimilarity, topicTokens, type TopicSelectionPolicy } from "./topic-scoring.js";
 
 export interface ProviderResult {
   readonly provider: string;
@@ -8,13 +8,14 @@ export interface ProviderResult {
 
 export type AnalyticsMetric = "views" | "impressions" | "reach" | "average_view_ratio" | "average_watch_seconds" | "completion_rate" | "engagement_rate";
 export type AnalyticsMetricValue = { metric: AnalyticsMetric; value: number | null; unit: "count" | "seconds" | "ratio" | null; aggregation: "sum" | "average" | "ratio" | null; unavailableReason: string | null };
-export type AnalyticsPostResult = { externalPostId: string; observedAt: string; raw: Record<string, unknown>; metrics: readonly AnalyticsMetricValue[] };
+export type AnalyticsObservation = { kind: "PERIOD_TOTAL" | "LIFETIME_SNAPSHOT"; periodStart?: string; periodEnd?: string };
+export type AnalyticsPostResult = { observation?: AnalyticsObservation; externalPostId: string; observedAt: string; raw: Record<string, unknown>; metrics: readonly AnalyticsMetricValue[] };
 export type AnalyticsPage = { posts: readonly AnalyticsPostResult[]; nextPageToken: string | null; dataDelayHours: number | null };
 export interface AnalyticsProvider { fetchPage(input: { platform: "YOUTUBE" | "INSTAGRAM" | "TIKTOK"; postIds: readonly string[]; periodStart: string; periodEnd: string; pageToken: string | null }): Promise<AnalyticsPage>; }
 
 export class FakeAnalyticsProvider implements AnalyticsProvider {
   fetchPage(input: { platform: "YOUTUBE" | "INSTAGRAM" | "TIKTOK"; postIds: readonly string[]; periodStart: string; periodEnd: string; pageToken: string | null }): Promise<AnalyticsPage> {
-    const posts = input.postIds.slice(Number(input.pageToken ?? 0), Number(input.pageToken ?? 0) + 1).map((externalPostId, index) => ({ externalPostId, observedAt: input.periodEnd, raw: { platform: input.platform, periodStart: input.periodStart, page: input.pageToken ?? "first" }, metrics: [
+    const posts = input.postIds.slice(Number(input.pageToken ?? 0), Number(input.pageToken ?? 0) + 1).map((externalPostId, index) => ({ externalPostId, observedAt: new Date().toISOString(), observation: { kind: "PERIOD_TOTAL" as const, periodStart: input.periodStart, periodEnd: input.periodEnd }, raw: { platform: input.platform, periodStart: input.periodStart, page: input.pageToken ?? "first" }, metrics: [
       { metric: "views" as const, value: 100 + index, unit: "count" as const, aggregation: "sum" as const, unavailableReason: null },
       { metric: "average_watch_seconds" as const, value: 12.5, unit: "seconds" as const, aggregation: "average" as const, unavailableReason: null },
       { metric: "completion_rate" as const, value: null, unit: null, aggregation: null, unavailableReason: "NOT_PROVIDED_BY_PLATFORM" }
@@ -39,11 +40,24 @@ const analyticsFetchJson = async <Body>(url: string, options: AnalyticsHttpOptio
 
 const unavailableMetric = (metric: AnalyticsMetric, reason: string): AnalyticsMetricValue => ({ metric, value: null, unit: null, aggregation: null, unavailableReason: reason });
 
+// YouTube report days are Pacific calendar days, including DST transitions.
+const pacificMidnight = (date: string): string => {
+  const target = new Date(`${date}T00:00:00.000Z`).getTime();
+  let instant = target;
+  const format = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+  for (let pass = 0; pass < 3; pass++) {
+    const parts = Object.fromEntries(format.formatToParts(instant).map((part) => [part.type, part.value]));
+    const local = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute), Number(parts.second));
+    instant += target - local;
+  }
+  return new Date(instant).toISOString();
+};
+
 export class YouTubeAnalyticsProvider implements AnalyticsProvider {
   constructor(private readonly options: AnalyticsHttpOptions) {}
 
   async fetchPage(input: Parameters<AnalyticsProvider["fetchPage"]>[0]): Promise<AnalyticsPage> {
-    if (input.pageToken || input.postIds.length === 0) return { posts: [], nextPageToken: null, dataDelayHours: 48 };
+    if (input.pageToken || input.postIds.length === 0) return { posts: [], nextPageToken: null, dataDelayHours: 72 };
     const url = new URL("https://youtubeanalytics.googleapis.com/v2/reports");
     url.searchParams.set("ids", "channel==MINE");
     url.searchParams.set("startDate", input.periodStart.slice(0, 10));
@@ -54,7 +68,7 @@ export class YouTubeAnalyticsProvider implements AnalyticsProvider {
     const raw = await analyticsFetchJson<{ columnHeaders?: Array<{ name?: string }>; rows?: Array<Array<string | number>> }>(url.toString(), this.options);
     const headers = raw.columnHeaders?.map((header) => header.name ?? "") ?? [];
     const index = (name: string): number => headers.indexOf(name);
-    const observedAt = input.periodEnd;
+    const observedAt = new Date().toISOString();
     const rows = new Map((raw.rows ?? []).map((row) => [String(row[index("video")]), row]));
     const posts = input.postIds.map((externalPostId): AnalyticsPostResult => {
       const row = rows.get(externalPostId);
@@ -62,14 +76,14 @@ export class YouTubeAnalyticsProvider implements AnalyticsProvider {
       const views = number("views");
       const averageSeconds = number("averageViewDuration");
       const completion = number("averageViewPercentage");
-      return { externalPostId, observedAt, raw: { headers, row: row ?? null }, metrics: [
+      return { externalPostId, observedAt, observation: { kind: "PERIOD_TOTAL", periodStart: pacificMidnight(input.periodStart.slice(0, 10)), periodEnd: pacificMidnight(new Date(new Date(`${input.periodEnd.slice(0, 10)}T00:00:00.000Z`).getTime() + 86_400_000).toISOString().slice(0, 10)) }, raw: { headers, row: row ?? null }, metrics: [
         views === null ? unavailableMetric("views", "NOT_RETURNED_BY_YOUTUBE") : { metric: "views", value: views, unit: "count", aggregation: "sum", unavailableReason: null },
         averageSeconds === null ? unavailableMetric("average_watch_seconds", "NOT_RETURNED_BY_YOUTUBE") : { metric: "average_watch_seconds", value: averageSeconds, unit: "seconds", aggregation: "average", unavailableReason: null },
         completion === null ? unavailableMetric("average_view_ratio", "NOT_RETURNED_BY_YOUTUBE") : { metric: "average_view_ratio", value: completion / 100, unit: "ratio", aggregation: "ratio", unavailableReason: null },
         unavailableMetric("completion_rate", "NOT_PROVIDED_BY_YOUTUBE"), unavailableMetric("impressions", "REQUIRES_SEPARATE_YOUTUBE_REPORT"), unavailableMetric("engagement_rate", "PLATFORM_METRIC_NOT_EQUIVALENT")
       ] };
     });
-    return { posts, nextPageToken: null, dataDelayHours: 48 };
+    return { posts, nextPageToken: null, dataDelayHours: 72 };
   }
 }
 
@@ -85,12 +99,12 @@ export class InstagramAnalyticsProvider implements AnalyticsProvider {
       const values = new Map((raw.data ?? []).map((entry) => [entry.name ?? "", entry.values?.[0]?.value ?? entry.total_value?.value ?? null]));
       const metric = (name: string): number | null => typeof values.get(name) === "number" ? values.get(name) as number : null;
       const views = metric("views"); const reach = metric("reach"); const interactions = metric("total_interactions"); const watchMs = metric("ig_reels_avg_watch_time");
-      return { externalPostId, observedAt: input.periodEnd, raw, metrics: [
+      return { externalPostId, observedAt: new Date().toISOString(), observation: { kind: "LIFETIME_SNAPSHOT" }, raw, metrics: [
         views === null ? unavailableMetric("views", "NOT_RETURNED_BY_INSTAGRAM") : { metric: "views", value: views, unit: "count", aggregation: "sum", unavailableReason: null },
         unavailableMetric("impressions", "NOT_PROVIDED_BY_INSTAGRAM"),
         reach === null ? unavailableMetric("reach", "NOT_RETURNED_BY_INSTAGRAM") : { metric: "reach", value: reach, unit: "count", aggregation: "sum", unavailableReason: null },
         watchMs === null ? unavailableMetric("average_watch_seconds", "NOT_RETURNED_BY_INSTAGRAM") : { metric: "average_watch_seconds", value: watchMs / 1_000, unit: "seconds", aggregation: "average", unavailableReason: null },
-        reach && interactions !== null ? { metric: "engagement_rate", value: interactions / reach, unit: "ratio", aggregation: "ratio", unavailableReason: null } : unavailableMetric("engagement_rate", "REACH_OR_INTERACTIONS_UNAVAILABLE"),
+        reach && interactions !== null ? { metric: "engagement_rate", value: interactions / reach, unit: "ratio", aggregation: "ratio", unavailableReason: null } : unavailableMetric("engagement_rate", reach === 0 ? "ZERO_DENOMINATOR" : "REACH_OR_INTERACTIONS_UNAVAILABLE"),
         unavailableMetric("completion_rate", "NOT_PROVIDED_BY_INSTAGRAM")
       ] };
     }));
@@ -109,9 +123,9 @@ export class TikTokAnalyticsProvider implements AnalyticsProvider {
     const posts = input.postIds.map((externalPostId): AnalyticsPostResult => {
       const video = rows.get(externalPostId); const views = video?.view_count;
       const engagement = views && video ? ((video.like_count ?? 0) + (video.comment_count ?? 0) + (video.share_count ?? 0)) / views : null;
-      return { externalPostId, observedAt: input.periodEnd, raw: video ? { ...video } : {}, metrics: [
+      return { externalPostId, observedAt: new Date().toISOString(), observation: { kind: "LIFETIME_SNAPSHOT" }, raw: video ? { ...video } : {}, metrics: [
         typeof views === "number" ? { metric: "views", value: views, unit: "count", aggregation: "sum", unavailableReason: null } : unavailableMetric("views", "NOT_RETURNED_BY_TIKTOK"),
-        engagement === null ? unavailableMetric("engagement_rate", "VIEWS_UNAVAILABLE") : { metric: "engagement_rate", value: engagement, unit: "ratio", aggregation: "ratio", unavailableReason: null },
+        engagement === null ? unavailableMetric("engagement_rate", views === 0 ? "ZERO_DENOMINATOR" : "VIEWS_UNAVAILABLE") : { metric: "engagement_rate", value: engagement, unit: "ratio", aggregation: "ratio", unavailableReason: null },
         unavailableMetric("impressions", "NOT_PROVIDED_BY_TIKTOK"), unavailableMetric("average_watch_seconds", "NOT_PROVIDED_BY_TIKTOK"), unavailableMetric("completion_rate", "NOT_PROVIDED_BY_TIKTOK")
       ] };
     });
@@ -161,7 +175,8 @@ const fixtureCandidates: readonly TopicSourceCandidate[] = [
     sourceName: "Example Science",
     sourceKind: "RSS",
     publishedAt: "2026-08-30T00:00:00.000Z",
-    body: "Reusable rocket test reaches new altitude with verified public telemetry and recovery footage.",
+    body: "Reusable rocket test reaches new altitude with verified public telemetry and recovery footage. A public aerospace test reported improved reusable booster recovery performance.",
+    reliabilityMetadata: { contentScope: "FULL_TEXT", fixture: true },
     reliabilityScore: 0.82
   },
   {
@@ -171,7 +186,8 @@ const fixtureCandidates: readonly TopicSourceCandidate[] = [
     sourceName: "Public Research Data",
     sourceKind: "PUBLIC_DATA",
     publishedAt: "2026-08-29T00:00:00.000Z",
-    body: "Ocean sensor network publishes open climate data with methodology notes and public license metadata.",
+    body: "Ocean sensor network publishes open climate data with methodology notes and public license metadata. A research group released public ocean sensor data for short-form explainers.",
+    reliabilityMetadata: { contentScope: "FULL_TEXT", fixture: true },
     reliabilityScore: 0.88
   },
   {
@@ -199,14 +215,14 @@ const sourceAllowed = (
 };
 
 export class FixtureTopicSourceProvider implements TopicSourceProvider {
-  constructor(private readonly candidates: readonly TopicSourceCandidate[] = fixtureCandidates) {}
+  constructor(private readonly candidates?: readonly TopicSourceCandidate[]) {}
 
   collect(request: TopicSourceRequest): Promise<TopicSourceResult> {
     if (request.keywords.includes("fixture-source-failure")) {
       return Promise.reject(new Error("Fixture source failure."));
     }
     const lowerTerms = [request.topic, ...request.keywords].map((term) => term.toLowerCase());
-    const candidates = this.candidates.filter((candidate) => {
+    const candidates = (this.candidates ?? fixtureCandidates.map((candidate) => ({ ...candidate, publishedAt: new Date().toISOString() }))).filter((candidate) => {
       const haystack = `${candidate.title} ${candidate.summary} ${candidate.body}`.toLowerCase();
       return lowerTerms.some((term) => haystack.includes(term)) && sourceAllowed(candidate, request.allowedSources, request.excludedSources);
     });
@@ -333,7 +349,7 @@ export class RssTopicSourceProvider implements TopicSourceProvider {
         eventAt: published?.toISOString() ?? null,
         reliabilityScore: request.allowedSources.length > 0 ? 0.9 : 0.75,
         contentHash: await sha256Text(`${title}\n${summary}\n${body}`.toLowerCase().trim()),
-        reliabilityMetadata: { transport: "https", feedUrl, allowlisted: request.allowedSources.length > 0 }
+        reliabilityMetadata: { transport: "https", contentScope: "SUMMARY", feedUrl, allowlisted: request.allowedSources.length > 0 }
       };
       if (sourceAllowed(candidate, request.allowedSources, request.excludedSources)) results.push(candidate);
     }
@@ -348,6 +364,7 @@ export type LlmGenerationSource = {
 };
 
 export type LlmGenerationRequest = {
+  readonly maxOutputTokens?: number;
   readonly model: string;
   readonly promptVersion: string;
   readonly idempotencyKey: string;
@@ -400,7 +417,7 @@ const fakeStructuredOutput = (request: LlmGenerationRequest): Record<string, unk
   const maximum = context?.maxDurationSeconds ?? 45;
   const strategyDuration = context?.strategy?.durationSeconds;
   const durationSeconds = Math.max(1, Math.round(typeof strategyDuration === "number" ? Math.max(minimum, Math.min(maximum, strategyDuration)) : (minimum + maximum) / 2));
-  const hook = context?.hookStyle ? `${context.hookStyle}: ${request.title}` : `What changed in ${request.title}?`;
+  const hook = !context?.hookStyle || context.hookStyle === "question" ? `What changed in ${request.title}?` : `${context.hookStyle}: ${request.title}`;
   const callToAction = context?.callToActionStyle ?? "Check the source before sharing.";
   return {
     planning: {
@@ -434,6 +451,7 @@ const fakeStructuredOutput = (request: LlmGenerationRequest): Record<string, unk
       scenes: [
         {
           id: "scene-1",
+          role: "HOOK",
           startFrame: 0,
           durationInFrames: durationSeconds * 30,
           visualPrompt: `Vertical short explainer about ${request.title}`,
@@ -444,7 +462,7 @@ const fakeStructuredOutput = (request: LlmGenerationRequest): Record<string, unk
           overlays: [
             {
               kind: "title",
-              text: request.title.slice(0, 120)
+              text: request.title
             },
             {
               kind: "fact",
@@ -551,8 +569,8 @@ const scriptSceneJsonSchema = {
     facts: {
       type: "array",
       items: {
-        type: "object", additionalProperties: false, required: ["claim", "sourceUrl"],
-        properties: { claim: { type: "string" }, sourceUrl: { type: "string" } }
+        type: "object", additionalProperties: false, required: ["claim", "sourceUrl", "kind", "evidenceQuote"],
+        properties: { claim: { type: "string" }, sourceUrl: { type: "string" }, kind: { type: "string", enum: ["FACT", "ASSUMPTION", "INFERENCE"] }, evidenceQuote: { type: "string" } }
       }
     },
     sceneDocument: {
@@ -566,9 +584,9 @@ const scriptSceneJsonSchema = {
           type: "array",
           items: {
             type: "object", additionalProperties: false,
-            required: ["id", "startFrame", "durationInFrames", "visualPrompt", "narration", "overlays"],
+            required: ["id", "role", "startFrame", "durationInFrames", "visualPrompt", "narration", "overlays"],
             properties: {
-              id: { type: "string" }, startFrame: { type: "integer" }, durationInFrames: { type: "integer" }, visualPrompt: { type: "string" },
+              role: { type: "string", enum: ["HOOK", "COMPARISON", "PROCESS", "METRIC", "REVEAL"] }, id: { type: "string" }, startFrame: { type: "integer" }, durationInFrames: { type: "integer" }, visualPrompt: { type: "string" },
               narration: {
                 type: "object", additionalProperties: false, required: ["text", "sourceUrl"],
                 properties: { text: { type: "string" }, sourceUrl: { type: "string" } }
@@ -587,6 +605,10 @@ const scriptSceneJsonSchema = {
     }
   }
 } as const;
+
+// A byte-based upper estimate deliberately includes schema/instruction overhead.
+// It is a reservation policy, not a prediction of provider tokenization or billing.
+export const estimateLlmInputTokens = (input: unknown): number => Buffer.byteLength(JSON.stringify(input), "utf8") + Buffer.byteLength(JSON.stringify(scriptSceneJsonSchema), "utf8") + 1024;
 
 const readResponseText = (response: OpenAiResponse): string => {
   if (response.status && response.status !== "completed") throw new Error("OPENAI_RESPONSE_INCOMPLETE");
@@ -607,6 +629,8 @@ export class OpenAiLlmProvider implements LlmProvider {
       throw new Error("OPENAI_API_KEY is required when LLM_PROVIDER=openai.");
     }
     if (!(this.options.inputUsdPerMillionTokens && this.options.inputUsdPerMillionTokens > 0 && this.options.outputUsdPerMillionTokens && this.options.outputUsdPerMillionTokens > 0)) throw new Error("LLM_PRICING_REQUIRED");
+    const outputLimit = request.maxOutputTokens ?? 4096;
+    if (!Number.isSafeInteger(outputLimit) || outputLimit < 256 || outputLimit > 32768) throw new Error("LLM_OUTPUT_LIMIT_INVALID");
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
@@ -621,8 +645,9 @@ export class OpenAiLlmProvider implements LlmProvider {
         body: JSON.stringify({
           model: request.model,
           store: false,
+          max_output_tokens: outputLimit,
           instructions:
-            "Generate a factual short-form script and scene document. Return only data that conforms to the supplied JSON Schema and cite only the supplied source URLs.",
+            "Generate a factual short-form script and scene document. Return only data that conforms to the supplied JSON Schema and cite only the supplied source URLs. For each claim provide its FACT, ASSUMPTION or INFERENCE kind and an exact evidenceQuote from the supplied text. Never treat a URL alone as evidence.",
           input: JSON.stringify({
             title: request.title,
             summary: request.summary,
@@ -651,6 +676,7 @@ export class OpenAiLlmProvider implements LlmProvider {
       const promptTokens = usage?.input_tokens;
       const completionTokens = usage?.output_tokens;
       if (promptTokens === undefined || completionTokens === undefined || !Number.isSafeInteger(promptTokens) || !Number.isSafeInteger(completionTokens) || promptTokens < 0 || completionTokens < 0) throw new Error("OPENAI_USAGE_MISSING_OR_INVALID");
+      if (completionTokens > outputLimit) throw new Error("OPENAI_OUTPUT_LIMIT_EXCEEDED");
       return {
         provider: "openai",
         idempotencyKey: request.idempotencyKey,
