@@ -53,6 +53,18 @@ Migration `202611170005_collection_profiles`: nullable profile 추가와 source_
 
 검증: Provider 계약/SSRF/RSS/점수 11개, API 질문 격리/멱등 1개, 실제 MySQL 호출 경쟁/캐시/기존 후보 재평가 2개 통과. Config 기존 10개 통과. 모바일 Playwright 프로필 초기값·다국어·여러 줄 주제 저장/플랫폼 설정 보존 통과. 첫 브라우저 검사에서 textarea의 명시적 접근성 이름 누락을 발견해 수정 후 통과했다. 변경 contracts/providers/config/database/API/worker/web lint·typecheck 통과. 실 API 호출·유료 호출·게시·외부 알림은 실행하지 않았다.
 
+## 20.3 기획 보존과 장면 의미
+
+기획 title/summary를 script qualitySnapshot과 content의 기획 제목에 저장한다. sourceReference 제목은 원본 제목, sceneDocument.title/screenTitle은 화면 제목, reviewTitle 및 version metadata는 게시 제목이다. 부분 재생성은 저장된 기획과 수동 게시 제목을 보존하며 metadata 재생성만 게시 메타데이터를 교체한다. 게시 메타데이터 편집은 원래 영상을 재사용하는 새 장면/대본 FK와 재사용 사유를 만들고 해당 플랫폼 예약을 HELD로 전환한다. 형제 플랫폼이나 이미 게시한 버전은 변경하지 않는다.
+
+`alignSceneNarration`은 균등 분할을 제거했다. 순서대로 정확히 대응하는 기존 낭독문을 고정하고 사이의 단일 변경 장면만 갱신한다. 여러 장면의 대응을 결정할 수 없으면 `SCENE_NARRATION_SEMANTIC_ALIGNMENT_REQUIRED`로 새 장면 기획을 요구한다. 한 장면 영상은 전체 낭독문을 그 장면에 배치한다. 정규화 대본 위치 scriptRange와 완전 결합 일치를 검사하며 실제 음성 정규화/시간 매핑은 20.5에서 확장한다.
+
+문장이 바뀐 장면은 시각 프롬프트/오버레이를 새 문장으로 교체하고 기존 이미지를 복사하지 않는다. 변경 없는 장면은 의미/시각 입력 비교와 사유를 저장해 재사용한다. 원래 음성과 설정이 확인되는 부분 작업에서는 음성도 재사용한다. 승인/정책 결과는 새 버전에서 재검사한다. 영향이 모호한 전체 수정에 기존 그림을 붙여 성공으로 처리하지 않는다.
+
+최대 3개 Hook 후보의 본문 연결/과장/길이를 평가해 기록하며 선택한 Hook이 실패하면 원인 코드를 다음 생성 입력에 전달한다. 한국어/CJK/영문 혼합 낭독량의 보수적 시간 추정으로 긴 대본을 제한한다. 이는 실제 TTS 길이나 성과 예측이 아니며 최종 음성 검사를 유지한다. 채널 상한과 기존 workflow 비용 예약으로 재생성 비용을 제한한다. 원문 수집 시각/fingerprint/근거 위치를 sourceReference로 전달한다.
+
+검증: scene-schema 16개, worker 생성/Hook unit 및 실제 MySQL·Redis 생성/중복 전달/취소 회귀 7개, API 권리·플랫폼 격리·메타데이터·변경 장면 이미지 무효화 회귀 6개 통과. 첫 worker integration 실행의 테스트 Redis 주소 누락을 중단하고 격리 16379 포트로 다시 실행했다. 변경 scene-schema/providers/API/worker lint·typecheck 통과. migration 없음. Provider의 이미지 참조·공유 캐시·실제 음성 시간·렌더 중단은 후속 단계 범위다.
+
 ## 공식 문서 확인
 
 확인일 2026-11-17. 구현 단계별로 해당 사양·정책을 다시 대조하며 고정 가격/과거 할당량을 근거 없이 넣지 않는다. 갱신 책임: 해당 Provider/connector 유지보수자.

@@ -3,7 +3,7 @@ import { FactSourceLinkSchema } from "@postbot/contracts";
 import { ConflictException, Inject, Injectable } from "@nestjs/common";
 import { Prisma, type PrismaClient } from "@postbot/database";
 import type { ContentReviewResponse, PolicyVerdict, UpdateReviewMetadataRequest, UpdateReviewScriptRequest, ReviewAssetLicenseRequest } from "@postbot/contracts";
-import { alignSceneNarration, SceneDocumentSchema } from "@postbot/scene-schema";
+import { alignSceneNarration, sceneReuseDecision, SceneDocumentSchema } from "@postbot/scene-schema";
 import { readAssetUsagePurpose, sceneAssetUsageKey } from "@postbot/asset-library";
 import type { PolicyEvidence, PolicyRuleRecord, ReviewRepository } from "./review.repository.js";
 
@@ -124,8 +124,20 @@ export class PrismaReviewRepository implements ReviewRepository {
       const script = await tx.scriptVersion.findFirstOrThrow({ where: { contentItemId, platform: input.platform }, orderBy: { version: "desc" } });
       const priorQuality = { ...json(script.qualitySnapshot), reviewStatus: "REVIEW_REQUIRED" };
       const nextVersion = script.version + 1;
-      await tx.scriptVersion.create({ data: { contentItemId, version: nextVersion, platform: input.platform, hook: script.hook, body: script.body, callToAction: script.callToAction, language: script.language, durationSeconds: script.durationSeconds, promptVersion: script.promptVersion, qualitySnapshot: { ...priorQuality, reviewTitle: input.title, metadata: { description: input.description, hashtags: input.hashtags }, editedBy: "review" } } });
+      const nextScript = await tx.scriptVersion.create({ data: { contentItemId, version: nextVersion, platform: input.platform, hook: script.hook, body: script.body, callToAction: script.callToAction, language: script.language, durationSeconds: script.durationSeconds, promptVersion: script.promptVersion, qualitySnapshot: { ...priorQuality, reviewTitle: input.title, metadata: { description: input.description, hashtags: input.hashtags }, editedBy: "review" } } });
       // Metadata edits reuse the rendered scene and its asset/license evidence.
+      const scene = await tx.sceneVersion.findFirst({ where: { contentItemId, platform: input.platform }, orderBy: { version: "desc" } });
+      if (scene) {
+        const manifest = json(scene.renderManifest); const features = manifest.productionFeatures && typeof manifest.productionFeatures === "object" && !Array.isArray(manifest.productionFeatures) ? manifest.productionFeatures : {};
+        const nextScene = await tx.sceneVersion.create({ data: { contentItemId, scriptVersionId: nextScript.id, platform: input.platform, version: nextVersion, schemaVersion: scene.schemaVersion, sceneDocument: scene.sceneDocument ?? Prisma.JsonNull, durationSeconds: scene.durationSeconds } });
+        if (scene.renderManifest) await tx.sceneVersion.update({ where: { id: nextScene.id }, data: { renderManifest: { ...manifest,
+          productionFeatures: { ...features, scriptVersionId: nextScript.id, sceneVersionId: nextScene.id }, reusedFromSceneVersionId: scene.id, reuseReason: "PUBLICATION_METADATA_ONLY_VIDEO_INPUT_UNCHANGED" } } });
+        const usages = await tx.assetUsage.findMany({ where: { sceneVersionId: scene.id } });
+        for (const usage of usages) {
+          const purpose = readAssetUsagePurpose(usage);
+          await tx.assetUsage.create({ data: { assetId: usage.assetId, contentItemId, sceneVersionId: nextScene.id, purpose: sceneAssetUsageKey(purpose, nextScene.id), usageSnapshot: { ...json(usage.usageSnapshot), originalPurpose: purpose, reusedFromSceneVersionId: scene.id, reuseReason: "PUBLICATION_METADATA_ONLY_VIDEO_INPUT_UNCHANGED" } } });
+        }
+      }
       if (input.platform) await tx.publishPlan.updateMany({ where: { contentItemId, platform: input.platform, status: "SCHEDULED" }, data: { status: "HELD" } });
       // Platform titles live in the version snapshot, not the shared planning title.
       await tx.contentItem.update({ where: { id: contentItemId }, data: { status: "REVIEW_REQUIRED", approvedAt: null } });
@@ -143,15 +155,26 @@ export class PrismaReviewRepository implements ReviewRepository {
       const scene = await tx.sceneVersion.findFirstOrThrow({ where: { contentItemId, platform: input.platform }, orderBy: { version: "desc" } });
       const document = SceneDocumentSchema.parse(scene.sceneDocument);
       const text = [input.hook, input.body, input.callToAction].join(" ");
-      const aligned = alignSceneNarration(document, text);
+      let aligned;
+      try { aligned = alignSceneNarration(document, text); } catch { throw new ConflictException("SCENE_NARRATION_SEMANTIC_ALIGNMENT_REQUIRED_REGENERATE_SCENES"); }
+      const decisions = aligned.scenes.map((next, index) => {
+        const previous = document.scenes[index]!; const decision = sceneReuseDecision(previous, next);
+        if (!decision.reusable) {
+          next.visualPrompt = next.narration.text;
+          next.overlays = [{ kind: previous.role === "HOOK" || index === 0 ? "title" : "fact", text: next.narration.text.slice(0, 150) }];
+        }
+        return { sceneId: next.id, ...decision };
+      });
       document.scenes = aligned.scenes;
       SceneDocumentSchema.parse(document);
-      const nextScript = await tx.scriptVersion.create({ data: { contentItemId, platform: input.platform, version: script.version + 1, hook: input.hook, body: input.body, callToAction: input.callToAction, language: script.language, durationSeconds: script.durationSeconds, promptVersion: script.promptVersion, qualitySnapshot: { ...json(script.qualitySnapshot), reviewStatus: "REVIEW_REQUIRED", facts: [{ claim: text, sourceUrl: input.sourceUrl }], factsConfirmedBy: userId, factsConfirmedFingerprint: scriptEvidenceFingerprint([input.hook, input.body, input.callToAction].join("\n")), editedBy: "owner-script-review" } } });
+      const nextScript = await tx.scriptVersion.create({ data: { contentItemId, platform: input.platform, version: script.version + 1, hook: input.hook, body: input.body, callToAction: input.callToAction, language: script.language, durationSeconds: script.durationSeconds, promptVersion: script.promptVersion, qualitySnapshot: { ...json(script.qualitySnapshot), factEvidence: null, assetReuse: decisions, reviewStatus: "REVIEW_REQUIRED", facts: [{ claim: text, sourceUrl: input.sourceUrl }], factsConfirmedBy: userId, factsConfirmedFingerprint: scriptEvidenceFingerprint([input.hook, input.body, input.callToAction].join("\n")), editedBy: "owner-script-review" } } });
       const nextScene = await tx.sceneVersion.create({ data: { contentItemId, scriptVersionId: nextScript.id, platform: input.platform, version: nextScript.version, schemaVersion: scene.schemaVersion, sceneDocument: document, durationSeconds: scene.durationSeconds } });
       const usages = await tx.assetUsage.findMany({ where: { sceneVersionId: scene.id } });
       for (const usage of usages) {
         const purpose = readAssetUsagePurpose(usage); if (!purpose.startsWith("scene-image:")) continue;
-        await tx.assetUsage.create({ data: { assetId: usage.assetId, contentItemId, sceneVersionId: nextScene.id, purpose: sceneAssetUsageKey(purpose, nextScene.id), usageSnapshot: { ...json(usage.usageSnapshot), originalPurpose: purpose } } });
+        const decision = decisions.find((entry) => purpose.endsWith(`:${entry.sceneId}`));
+        if (!decision?.reusable) continue;
+        await tx.assetUsage.create({ data: { assetId: usage.assetId, contentItemId, sceneVersionId: nextScene.id, purpose: sceneAssetUsageKey(purpose, nextScene.id), usageSnapshot: { ...json(usage.usageSnapshot), originalPurpose: purpose, reuseReason: decision.reason, reusedFromSceneVersionId: scene.id } } });
       }
       await tx.publishPlan.updateMany({ where: { contentItemId, platform: input.platform, status: "SCHEDULED" }, data: { status: "HELD" } });
       await tx.contentItem.update({ where: { id: contentItemId }, data: { status: "REVIEW_REQUIRED", approvedAt: null } });

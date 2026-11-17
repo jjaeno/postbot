@@ -20,8 +20,16 @@ describe("spoken Korean timeline", () => {
   it("rejects duplicate scene IDs, gaps and overlaps", () => {
     for (const patch of [{ id: "a" }, { startFrame: 451 }, { startFrame: 449 }]) expect(SceneDocumentSchema.safeParse({ ...document, scenes: [document.scenes[0], { ...document.scenes[1], ...patch }] }).success).toBe(false);
   });
-  it("aligns generated scene narration with the actual complete script", () => {
-    const result = alignSceneNarration(document, "수정한 한국어 대본 전체를 읽습니다");
-    expect(result.scenes.map((scene) => scene.narration.text).join(" ")).toBe("수정한 한국어 대본 전체를 읽습니다");
+  it("requires a new plan for ambiguous changes instead of evenly distributing words", () => {
+    expect(() => alignSceneNarration(document, "수정한 한국어 대본 전체를 읽습니다")).toThrow("SEMANTIC_ALIGNMENT_REQUIRED");
+  });
+  it("keeps unequal Rome and Egypt explanations and exact TTS offsets", () => {
+    const original = { ...document, scenes: document.scenes.map((scene, index) => ({ ...scene, narration: { ...scene.narration, text: index === 0 ? "Rome built roads." : "Egypt used the river." } })) };
+    const text = "Rome built roads. Egypt used the Nile river to move materials and irrigate farms over a long distance.";
+    const result = alignSceneNarration(original, text);
+    expect(result.scenes[0]?.narration.text).toBe("Rome built roads.");
+    expect(result.scenes[1]?.narration.text).toBe("Egypt used the Nile river to move materials and irrigate farms over a long distance.");
+    expect(result.scenes.map((scene) => scene.narration.text).join(" ")).toBe(text);
+    for (const scene of result.scenes) expect(text.slice(scene.narration.scriptRange?.start, scene.narration.scriptRange?.end)).toBe(scene.narration.text);
   });
 });

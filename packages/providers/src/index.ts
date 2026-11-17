@@ -375,6 +375,7 @@ export type LlmGenerationSource = {
 };
 
 export type LlmGenerationRequest = {
+  readonly validationFeedback?: string;
   readonly maxOutputTokens?: number;
   readonly model: string;
   readonly promptVersion: string;
@@ -665,6 +666,7 @@ export class OpenAiLlmProvider implements LlmProvider {
             topic: request.topic,
             platform: request.platform,
             partial: request.partial,
+            validationFeedback: request.validationFeedback ?? null,
             sources: request.sources,
             channelContext: request.channelContext
           }),
