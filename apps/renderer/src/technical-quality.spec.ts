@@ -4,6 +4,10 @@ import { inspectTechnicalQuality } from "./technical-quality.js";
 import { fittedFontSize, splitDisplayCaptions } from "./text-layout.js";
 const fixture = () => SceneDocumentSchema.parse({ schemaVersion: "1.0.0", title: "Why this result matters", width: 1080, height: 1920, fps: 30, durationInFrames: 240, scenes: [{ id: "one", role: "HOOK", visualMode: "IMAGE", startFrame: 0, durationInFrames: 240, visualPrompt: "rocket", narration: { text: "rocket", sourceUrl: "https://example.org" }, overlays: [{ kind: "title", text: "Immediate result" }, { kind: "fact", text: "The source reports 100 km." }] }] });
 describe("technical layout checks, without performance predictions", () => {
+  it("groups word alignments into readable phrases while preserving original number suffix spacing", () => {
+    const phrases = splitDisplayCaptions([{ text: "NASA", startSeconds: 0, endSeconds: 0.4 }, { text: "2026", joiner: " ", startSeconds: 0.4, endSeconds: 1 }, { text: "년", joiner: "", startSeconds: 1, endSeconds: 1.2 }, { text: "관측", joiner: " ", startSeconds: 1.2, endSeconds: 1.8 }]);
+    expect(phrases).toEqual([{ text: "NASA 2026년 관측", startSeconds: 0, endSeconds: 1.8 }]);
+  });
   it("preserves long Korean and English captions and the full TTS interval", () => {
     const text = "긴 한국어 자막과 English captions must retain every character. ".repeat(5);
     const chunks = splitDisplayCaptions([{ text, startSeconds: 1, endSeconds: 20 }]);

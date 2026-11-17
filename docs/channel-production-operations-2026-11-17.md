@@ -79,6 +79,18 @@ Migration `202611170006_generation_cache_rights`: generation cache와 versioned 
 
 검증: asset-library 10개(실제 DB 동시 선점, 플랫폼 간 이미지·음성 재사용, 음성 변경, 파일 누락 포함), API 권리/검수 회귀 7개, worker GRAPHIC·기존 불명확 호출 journal 회귀 5개, scene-schema 16개 통과. 변경 asset-library/config/database/scene-schema/API/worker lint·typecheck 통과. 실제 유료 호출이나 외부 게시 없음. 실제 시각 연속성은 이미지 참조 미지원 한계를 포함해 후속 renderer smoke와 외부 확인을 구분한다.
 
+## 20.5 발화·자막·오디오·렌더 중단
+
+대본 원문과 Provider에 전달하는 발화를 speech-v1으로 분리하고 UTF-16 위치 매핑을 보존한다. 한국어/영어의 숫자·날짜·단위와 한국어 약어, 명시적 고유명사 발음을 정규화한다. 다른 언어의 숫자는 원문을 유지한다. 자동 제작은 대본 언어를 전달한다. Provider의 실제 발화 alignment와 일치하는 타임스탬프만 원문 표시 자막으로 투영하며, 일치하지 않는 증거는 검토로 보낸다. 단어 내부 위치는 제공된 시간 구간의 선형 추정이며 음소 정렬을 보장하지 않는다. 음성 캐시는 원문 매핑과 정규화 버전을 포함한다.
+
+자막은 짧은 단어 단위 대신 읽을 수 있는 구절로 묶고 원문 숫자와 단위 사이의 공백을 보존한다. 최소 노출 0.3초와 최대 밀도 30 text units/초를 기술 QA로 검사한다. 한글 제목은 어절을 유지하고 균형 있게 줄바꿈한다. 실제 FFmpeg로 음성 -16 LUFS, BGM/SFX -23 LUFS 정규화 후 사용자 볼륨을 적용하고 혼합 피크를 제한한다. 동적 ducking은 지원하지 않는다. 짧은 음성의 loudness 수치는 자연 음성의 청감이나 장기 콘텐츠 품질 보장이 아니다.
+
+Remotion은 AbortSignal을 취소 신호와 직접 소유한 Chromium 종료에 연결한다. FFmpeg/ffprobe는 종료 요청 후 실제 close를 기다리고 지연 시 강제 종료한다. 작업 취소/시간 초과/소유권 상실은 하위 작업이 끝난 뒤 반환하고 임시 파일을 정리한다. bundle 도중 즉시 취소는 지원하지 않으며 bundle 완료를 기다린 뒤 중단한다. manifest 저장 전 취소와 실행 소유권을 재검사한다. rendererVersion은 1.3.0이다.
+
+검증: renderer lint/typecheck/build와 unit 9개, scene-schema unit 11개, providers unit 29개(자격 증명 필요 1개 skip), worker 관련 실제 MySQL/Redis 통합 14개 통과. 숫자 발화→원문 자막, 불일치 검토, 취소 중 shutdown 완료 전 임시 파일 보존, 오래된 소유권 차단을 포함한다. DB의 신규 FK cleanup 순서를 보완하고 기존 data-model 8개를 통과했다. 변경 packages/API lint/typecheck를 통과했다. scene-schema 테스트를 src에 한정해 dist의 중복 실행을 제거했다. 앞 단계 16개 표기는 당시 dist 중복을 포함한 실행 집계다.
+
+실제 Docker Chromium/FFmpeg의 1080×1920, 6초 영상과 HOOK/COMPARISON/PROCESS 대표 프레임 3장을 출력해 직접 확인했다. 합성 음성과 BGM fixture이며 실제 유료 TTS가 아니다. QA: audio=true, mean -15.3dB, peak -10.4dB, blackFrameRatio=0. 첫 프레임에서 발견한 한글 어절 분리를 수정하고 재출력해 확인했다. 산출물은 로컬 .artifacts/production-qa-2026-11-18에 있으며 Git에는 포함하지 않는다. 넓게 실행된 worker 검사에서 병렬 부하에 의한 5초 timeout과 서로 다른 메모리 저장소를 사용한 fixture 결함을 발견했다. 저장소를 주입해 동일 Fake 객체를 사용하도록 고친 뒤 관련 4파일 14개를 단일 worker로 재검증했다. 객체 누락 검사는 완화하지 않았다. migration 없음. 실제 Provider 청감/타임스탬프 검증은 외부 확인 필요다.
+
 ## 공식 문서 확인
 
 확인일 2026-11-17. 구현 단계별로 해당 사양·정책을 다시 대조하며 고정 가격/과거 할당량을 근거 없이 넣지 않는다. 갱신 책임: 해당 Provider/connector 유지보수자.

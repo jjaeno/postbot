@@ -12,7 +12,16 @@ export const fittedFontSize = (text: string, width: number, height: number, pref
 
 // Preserve all characters and proportional TTS time; never trim audio or text.
 export function splitDisplayCaptions(captions: readonly CaptionTiming[]): CaptionTiming[] {
-  return captions.flatMap((caption) => {
+  const phrases: CaptionTiming[] = [];
+  for (const caption of captions) {
+    const prior = phrases.at(-1);
+    const separator = caption.joiner ?? " ";
+    if (prior && caption.startSeconds - prior.endSeconds < 0.35 && caption.endSeconds - prior.startSeconds <= 3 && textUnits(prior.text + separator + caption.text) <= 48 &&
+      (!/[.!?。！？]\s*$/u.test(prior.text) || prior.endSeconds - prior.startSeconds < 0.8)) {
+      phrases[phrases.length - 1] = { text: prior.text + separator + caption.text, startSeconds: prior.startSeconds, endSeconds: caption.endSeconds };
+    } else phrases.push({ ...caption });
+  }
+  return phrases.flatMap((caption) => {
     const chars = Array.from(caption.text); const chunks: string[] = [];
     let start = 0;
     while (start < chars.length) {
@@ -29,7 +38,7 @@ export function splitDisplayCaptions(captions: readonly CaptionTiming[]): Captio
     return chunks.map((text) => {
       const startSeconds = caption.startSeconds + (caption.endSeconds - caption.startSeconds) * offset / chars.length;
       offset += Array.from(text).length;
-      return { text, startSeconds, endSeconds: caption.startSeconds + (caption.endSeconds - caption.startSeconds) * offset / chars.length };
+      return { text, startSeconds, endSeconds: offset === chars.length ? caption.endSeconds : caption.startSeconds + (caption.endSeconds - caption.startSeconds) * offset / chars.length };
     });
   });
 }

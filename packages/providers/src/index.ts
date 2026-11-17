@@ -836,7 +836,10 @@ export class ElevenLabsTtsProvider implements TtsProvider {
       if (!response.ok) throw new Error(`ElevenLabs TTS API failed with status ${response.status}.`);
       const body = await response.json() as { audio_base64?: string; alignment?: CharacterAlignment | null; normalized_alignment?: CharacterAlignment | null };
       if (!body.audio_base64) throw new Error("ElevenLabs TTS response did not include audio.");
-      const alignment = body.normalized_alignment ?? body.alignment;
+      const compact = (text: string) => text.replace(/\s/gu, "");
+      // Prefer provider alignment for the exact supplied speech text. Its
+      // normalized transcript may legitimately spell years/numbers differently.
+      const alignment = [body.alignment, body.normalized_alignment].find((alignment) => alignment && compact(alignment.characters.join("")) === compact(request.text));
       if (!alignment) throw new Error("ElevenLabs TTS response did not include timing alignment.");
       const timings = wordTimingsFromAlignment(alignment);
       if (timings.length === 0) throw new Error("ElevenLabs TTS alignment did not contain words.");

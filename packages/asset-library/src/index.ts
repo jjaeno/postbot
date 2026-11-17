@@ -180,15 +180,15 @@ export class AssetPreparationService {
     }
   }
   async prepareTts(input: { channelId: string; contentItemId: string; sceneVersionId?: string | null; productionJobId?: string; purpose?: string; key: string; text: string; voice: string; model: string; idempotencyKey: string;
-    inputVersions?: Prisma.InputJsonObject; skipSharedCache?: boolean; invoke?: (operation: () => Promise<TtsResult>) => Promise<TtsResult> }): Promise<{ assetId: string; timings: { text: string; startSeconds: number; endSeconds: number }[]; needsReview: boolean }> {
+    normalization?: Prisma.InputJsonObject; inputVersions?: Prisma.InputJsonObject; skipSharedCache?: boolean; invoke?: (operation: () => Promise<TtsResult>) => Promise<TtsResult> }): Promise<{ assetId: string; timings: { text: string; startSeconds: number; endSeconds: number }[]; needsReview: boolean }> {
     const existing = await this.assets.findPreparedTts({ contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose: input.purpose ?? "tts-narration" });
     if (existing) return { ...existing, needsReview: assetNeedsReview(await this.assets.getLicense(existing.assetId)) };
     if (this.options && !input.skipSharedCache) {
       const inputKey = generationInputKey({ kind: "TTS", provider: this.options.ttsProvider, model: input.model, voice: input.voice, text: input.text,
-        accountRef: this.options.ttsAccountRef, contractVersion: this.options.ttsContractVersion, inputVersions: input.inputVersions ?? {} });
+        accountRef: this.options.ttsAccountRef, contractVersion: this.options.ttsContractVersion, normalization: input.normalization ?? null, inputVersions: input.inputVersions ?? {} });
       const receipt = await this.assets.cachedGeneration({ channelId: input.channelId, inputKey, ownerKey: input.productionJobId ?? input.idempotencyKey }, async (providerKey) => {
         const result = await this.prepareTts({ ...input, idempotencyKey: providerKey, skipSharedCache: true });
-        return { assetId: result.assetId, snapshot: { inputKey, voice: input.voice, text: input.text, model: input.model, provider: this.options!.ttsProvider, timings: result.timings, durationSeconds: result.timings.at(-1)?.endSeconds ?? 0 } };
+        return { assetId: result.assetId, snapshot: { inputKey, voice: input.voice, text: input.text, normalization: input.normalization ?? null, model: input.model, provider: this.options!.ttsProvider, timings: result.timings, durationSeconds: result.timings.at(-1)?.endSeconds ?? 0 } };
       });
       await this.assets.attachUsage({ assetId: receipt.assetId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose: input.purpose ?? "tts-narration", snapshot: receipt.snapshot });
       const prepared = await this.assets.findPreparedTts({ contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose: input.purpose ?? "tts-narration" });
@@ -202,7 +202,7 @@ export class AssetPreparationService {
     const license = fake ? { status: "verified" as const, commercialUseAllowed: true, derivativeAllowed: true, attributionRequired: false, attributionText: null, proofUrl: null }
       : await this.assets.generationLicense({ channelId: input.channelId, provider: this.options?.ttsProvider ?? result.provider, model: result.model, accountRef: this.options?.ttsAccountRef ?? "", contractVersion: this.options?.ttsContractVersion ?? "" });
     const stored = await this.assets.store({ channelId: input.channelId, kind: "AUDIO", origin: "AI_GENERATED", key: input.key, body: result.bytes, mimeType: result.mimeType, source: { provider: result.provider, model: result.model, prompt: input.text }, license });
-    await this.assets.attachUsage({ assetId: stored.assetId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose: input.purpose ?? "tts-narration", snapshot: { voice: input.voice, text: input.text, durationSeconds: result.durationSeconds, timings: result.timings, provider: result.provider, model: result.model, license: "provider-generated" } });
+    await this.assets.attachUsage({ assetId: stored.assetId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose: input.purpose ?? "tts-narration", snapshot: { voice: input.voice, text: input.text, normalization: input.normalization ?? null, durationSeconds: result.durationSeconds, timings: result.timings, provider: result.provider, model: result.model, license: "provider-generated" } });
     return { assetId: stored.assetId, timings: result.timings, needsReview: assetNeedsReview(await this.assets.getLicense(stored.assetId)) };
   }
 }

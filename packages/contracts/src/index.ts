@@ -529,6 +529,8 @@ export const AssetPreparationJobPayloadSchema = z.object({
 
 export const TtsPreparationJobPayloadSchema = z.object({
   ttsPreparation: z.object({
+    language: z.string().min(2).max(16).optional(),
+    pronunciations: z.record(z.string().min(1).max(80), z.string().min(1).max(200)).refine((entries) => Object.keys(entries).length <= 100).optional(),
     channelId: z.string().min(1),
     contentItemId: z.string().min(1),
     sceneVersionId: z.string().min(1).nullable().default(null),

@@ -37,7 +37,7 @@ export function inspectTechnicalQuality(document: SceneDocument, captions: reado
   }
   for (const caption of splitDisplayCaptions(captions)) {
     const duration = caption.endSeconds - caption.startSeconds;
-    if (duration <= 0 || caption.startSeconds < 0 || caption.endSeconds > document.durationInFrames / document.fps + 0.1 || duration < 1 / document.fps || textUnits(caption.text) / duration > 45) findings.push({ code: "CAPTION_DENSITY_OR_TIMING", message: "Regenerate caption timing or shorten the narration; text cannot be hidden." });
+    if (duration <= 0 || caption.startSeconds < 0 || caption.endSeconds > document.durationInFrames / document.fps + 0.1 || duration < 0.3 - 0.001 || textUnits(caption.text) / duration > 30) findings.push({ code: "CAPTION_DENSITY_OR_TIMING", message: "Regenerate caption timing or shorten the narration; text cannot be hidden." });
     if (fittedFontSize(caption.text, width - 48, 300, document.style?.captionFontSize ?? 52, 32) === null) findings.push({ code: "CAPTION_OVERFLOW", message: "Split the caption into readable timed segments." });
   }
   return { version: "technical-layout-v1", findings, pass: findings.length === 0, performancePrediction: false };

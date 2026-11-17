@@ -771,6 +771,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
             sceneVersionId,
             platform,
             text: [script.hook, script.body, script.callToAction].filter(Boolean).join(" "),
+            language: script.language,
             voice: channel.templates[0]?.voiceProfile ?? "default",
             idempotencyKey: `automation:${runId}:${platform.toLowerCase()}:tts`
           }

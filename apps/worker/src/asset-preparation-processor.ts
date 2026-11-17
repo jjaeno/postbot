@@ -3,7 +3,8 @@ import { loadConfig } from "@postbot/config";
 import { AssetPreparationJobPayloadSchema, TtsPreparationJobPayloadSchema } from "@postbot/contracts";
 import { assertExecutionOwner, type Prisma, type PrismaClient } from "@postbot/database";
 import { FakeImageProvider, FakeStorageProvider, FakeTtsProvider, GoogleImageProvider, ElevenLabsTtsProvider, S3StorageProvider, resolveTtsVoice } from "@postbot/providers";
-import { SceneDocumentSchema, aiSceneCount } from "@postbot/scene-schema";
+import type { StorageProvider } from "@postbot/providers";
+import { SceneDocumentSchema, aiSceneCount, normalizeNarration } from "@postbot/scene-schema";
 import { createHash } from "node:crypto";
 
 export class AssetPreparationProcessor {
@@ -11,10 +12,10 @@ export class AssetPreparationProcessor {
   private readonly assets: AssetRepository;
   private readonly config = loadConfig();
 
-  constructor(private readonly prisma: PrismaClient) {
-    const storage = this.config.STORAGE_PROVIDER === "s3"
+  constructor(private readonly prisma: PrismaClient, options: { storage?: StorageProvider } = {}) {
+    const storage = options.storage ?? (this.config.STORAGE_PROVIDER === "s3"
       ? new S3StorageProvider({ endpoint: this.config.S3_ENDPOINT, region: this.config.S3_REGION, bucket: this.config.S3_BUCKET, accessKeyId: this.config.S3_ACCESS_KEY_ID, secretAccessKey: this.config.S3_SECRET_ACCESS_KEY })
-      : new FakeStorageProvider();
+      : new FakeStorageProvider());
     const image = this.config.IMAGE_PROVIDER === "google"
       ? new GoogleImageProvider({ apiKey: this.config.GOOGLE_API_KEY, timeoutMs: this.config.IMAGE_TIMEOUT_MS, usdPerOutput: this.config.IMAGE_USD_PER_OUTPUT })
       : new FakeImageProvider();
@@ -116,9 +117,11 @@ export class AssetPreparationProcessor {
     }
     if (this.config.TTS_PROVIDER === "elevenlabs" && !(this.config.TTS_USD_PER_THOUSAND_CHARACTERS > 0)) throw new Error("TTS_PRICING_REQUIRED");
     const voice = resolveTtsVoice(this.config.TTS_PROVIDER, input.voice, this.config.ELEVENLABS_VOICE_ID);
+    const linked = input.sceneVersionId ? await this.prisma.sceneVersion.findUnique({ where: { id: input.sceneVersionId }, include: { scriptVersion: true } }) : null;
+    const normalization = normalizeNarration(input.text, input.language ?? linked?.scriptVersion?.language ?? "en", input.pronunciations);
     if (this.config.TTS_PROVIDER === "elevenlabs" && !jobId) throw new Error("REAL_PROVIDER_JOB_REQUIRED");
-    const result = await this.preparation.prepareTts({ channelId: input.channelId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, productionJobId: jobId, purpose: input.platform ? `tts-narration:${input.platform}` : undefined, key: `audio/${jobId}`, text: input.text, voice, model: this.config.TTS_MODEL, idempotencyKey: input.idempotencyKey,
-      inputVersions: { normalizationVersion: "raw-v1", settingsVersion: "tts-settings-v1" },
+    const result = await this.preparation.prepareTts({ channelId: input.channelId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, productionJobId: jobId, purpose: input.platform ? `tts-narration:${input.platform}` : undefined, key: `audio/${jobId}`, text: normalization.speech, normalization, voice, model: this.config.TTS_MODEL, idempotencyKey: input.idempotencyKey,
+      inputVersions: { normalizationVersion: normalization.version, settingsVersion: "tts-settings-v1" },
       ...(this.config.TTS_PROVIDER === "elevenlabs" ? { invoke: (operation) => this.realMediaCall(jobId, "tts", operation, () => Promise.resolve(false)) } : {}) });
     return result;
   }

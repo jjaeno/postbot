@@ -255,6 +255,7 @@ export class DeterministicJobProcessor {
         await this.succeed(input.id, attemptNumber, await this.render.process(input.payload, input.id));
         return;
       } catch (error) {
+        if (error instanceof Error && error.message === "RENDER_CANCELLED") { await this.cancel(input.id, attemptNumber); return; }
         if (error instanceof RenderQualityReviewError) { await this.needsReview(input.id, attemptNumber, { findings: [...error.findings], reason: "Adjust the scene layout or narration timing before rendering." }, "RENDER_TECHNICAL_REVIEW_REQUIRED"); return; }
         const message = error instanceof Error ? error.message : "RENDER_FAILED";
         await this.fail(input.id, attemptNumber, "RENDER_FAILED", message);

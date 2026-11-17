@@ -10,12 +10,12 @@ import { readFile, rm, writeFile, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CaptionTiming } from "@postbot/renderer";
-import { retimeNarration, SceneDocumentSchema, VideoStyleSchema } from "@postbot/scene-schema";
+import { retimeNarration, SceneDocumentSchema, VideoStyleSchema, SpeechNormalizationSchema, displayTimingsFromSpeech } from "@postbot/scene-schema";
 
 export interface MediaPostProcessor {
-  postprocess(input: { videoInput: string; output: string; narrationInput?: string; backgroundInput?: string; effectsInput?: string; backgroundVolume?: number; effectsVolume?: number }): Promise<void>;
-  thumbnail(videoInput: string, output: string): Promise<void>;
-  probe(videoInput: string): Promise<FfprobeResult>;
+  postprocess(input: { videoInput: string; output: string; narrationInput?: string; backgroundInput?: string; effectsInput?: string; backgroundVolume?: number; effectsVolume?: number; signal?: AbortSignal }): Promise<void>;
+  thumbnail(videoInput: string, output: string, signal?: AbortSignal): Promise<void>;
+  probe(videoInput: string, signal?: AbortSignal): Promise<FfprobeResult>;
 }
 
 const readCaptions = (snapshot: Prisma.JsonValue | null): CaptionTiming[] => {
@@ -97,7 +97,13 @@ export class RenderProcessor {
     const narration = usages.find((usage) => readAssetUsagePurpose(usage) === `tts-narration:${platformKey}`) ?? usages.find((usage) => readAssetUsagePurpose(usage) === "tts-narration");
     const background = usages.find((usage) => readAssetUsagePurpose(usage) === "bgm");
     const effects = usages.find((usage) => readAssetUsagePurpose(usage) === "sfx");
-    const captions = narration ? readCaptions(narration.usageSnapshot) : [];
+    const speechCaptions = narration ? readCaptions(narration.usageSnapshot) : [];
+    const normalizationInput = object(narration?.usageSnapshot).normalization;
+    let captions = speechCaptions;
+    if (normalizationInput !== undefined && normalizationInput !== null) {
+      try { captions = displayTimingsFromSpeech(SpeechNormalizationSchema.parse(normalizationInput), speechCaptions); }
+      catch { throw new RenderQualityReviewError([{ code: "SPEECH_ALIGNMENT_REVIEW_REQUIRED", message: "Stored speech normalization and provider timings do not align with the display text." }]); }
+    }
     let expectedDuration = sceneDocument.durationInFrames / sceneDocument.fps;
     const directory = await mkdtemp(join(tmpdir(), `postbot-render-${jobId}-`));
     try {
@@ -109,7 +115,7 @@ export class RenderProcessor {
       const effectsPath = effects ? join(directory, "effects.audio") : undefined;
       if (narration && narrationPath) await writeFile(narrationPath, await this.storage.download(narration.asset.storageKey));
       if (narration && narrationPath) {
-        const audio = await this.postProcessor.probe(narrationPath);
+        const audio = await this.withTimeout((signal) => this.postProcessor.probe(narrationPath, signal), jobId);
         const profile = sceneVersion.platform ? await this.prisma.platformOutputProfile.findFirst({ where: { channelId: input.channelId, platform: sceneVersion.platform, isActive: true }, orderBy: { version: "desc" } }) : null;
         sceneDocument = retimeNarration(sceneDocument, captions, audio.durationSeconds, { min: profile?.minDurationSeconds ?? 0, max: profile?.maxDurationSeconds ?? 180 });
         expectedDuration = sceneDocument.durationInFrames / sceneDocument.fps;
@@ -127,10 +133,11 @@ export class RenderProcessor {
       const displayCaptions = splitDisplayCaptions(captions);
       const technicalQuality = inspectTechnicalQuality(sceneDocument, displayCaptions, sceneAssets);
       if (!technicalQuality.pass) throw new RenderQualityReviewError(technicalQuality.findings);
-      const rendered = await this.withTimeout(this.renderer.render({ sceneDocument, captions: displayCaptions, sceneAssets, brandLogo, outputLocation: draftPath }));
-      await this.withTimeout(this.postProcessor.postprocess({ videoInput: draftPath, output: outputPath, narrationInput: narrationPath, backgroundInput: backgroundPath, effectsInput: effectsPath, backgroundVolume: sceneDocument.audio?.bgmVolume ?? 0.2, effectsVolume: sceneDocument.audio?.sfxVolume ?? 0.2 }));
-      await this.withTimeout(this.postProcessor.thumbnail(outputPath, thumbnailPath));
-      const qa = await this.withTimeout(this.postProcessor.probe(outputPath));
+      const rendered = await this.withTimeout((signal) => this.renderer.render({ sceneDocument, captions: displayCaptions, sceneAssets, brandLogo, outputLocation: draftPath, signal }), jobId);
+      await this.withTimeout((signal) => this.postProcessor.postprocess({ videoInput: draftPath, output: outputPath, narrationInput: narrationPath, backgroundInput: backgroundPath, effectsInput: effectsPath, backgroundVolume: sceneDocument.audio?.bgmVolume ?? 0.2, effectsVolume: sceneDocument.audio?.sfxVolume ?? 0.2, signal }), jobId);
+      await this.withTimeout((signal) => this.postProcessor.thumbnail(outputPath, thumbnailPath, signal), jobId);
+      const qa = await this.withTimeout((signal) => this.postProcessor.probe(outputPath, signal), jobId);
+      if (qa.maxVolumeDb !== undefined && qa.maxVolumeDb !== null && qa.maxVolumeDb > -0.2) throw new RenderQualityReviewError([{ code: "AUDIO_PEAK_TOO_HIGH", message: "The mixed audio exceeds the permitted peak level." }]);
       if (qa.width !== 1080 || qa.height !== 1920 || qa.durationSeconds <= 0 || Math.abs(qa.durationSeconds - expectedDuration) > 1 || (narration && qa.hasAudio === false) || (narration && qa.meanVolumeDb !== undefined && (qa.meanVolumeDb === null || qa.meanVolumeDb < -60)) || (qa.blackFrameRatio ?? 0) > 0.98) throw new Error("RENDER_QA_FAILED");
       checkExperiment(qa.durationSeconds);
       const artifactId = jobExecution.getStore()?.token ?? jobId;
@@ -169,6 +176,8 @@ export class RenderProcessor {
       await audioAssets.recordProviderCost({ contentItemId: input.contentItemId, productionJobId: jobId, provider: "renderer", model: "remotion-ffmpeg", operation: "video-render", quantity: qa.durationSeconds / 60, unit: "minute", category: "render", estimatedCostUsd: (qa.durationSeconds / 60 * rate).toFixed(6), idempotencyKey: `render:${input.idempotencyKey}` });
       await this.prisma.$transaction(async (tx) => {
       await assertExecutionOwner(tx);
+      const currentJob = await tx.productionJob.findUnique({ where: { id: jobId }, select: { status: true } });
+      if (currentJob?.status === "CANCEL_REQUESTED" || currentJob?.status === "CANCELLED") throw new Error("RENDER_CANCELLED");
       await tx.sceneVersion.update({ where: { id: sceneVersion.id }, data: { renderManifest: manifest, sceneDocument, durationSeconds: expectedDuration } });
       if (sceneVersion.scriptVersionId) await tx.scriptVersion.update({ where: { id: sceneVersion.scriptVersionId }, data: { durationSeconds: expectedDuration } });
       });
@@ -178,17 +187,26 @@ export class RenderProcessor {
     }
   }
 
-  private async withTimeout<Result>(operation: Promise<Result>): Promise<Result> {
-    let timer: NodeJS.Timeout | undefined;
+  private async withTimeout<Result>(operation: (signal: AbortSignal) => Promise<Result>, jobId: string): Promise<Result> {
+    const controller = new AbortController(); const owner = jobExecution.getStore();
+    const timer = setTimeout(() => controller.abort(new Error("RENDER_TIMEOUT")), this.timeoutMs);
+    const monitor: { pending: Promise<void> | null } = { pending: null };
+    const check = async () => {
+      const job = await this.prisma.productionJob.findUnique({ where: { id: jobId }, select: { status: true, executionToken: true } });
+      if (job?.status === "CANCEL_REQUESTED" || job?.status === "CANCELLED") controller.abort(new Error("RENDER_CANCELLED"));
+      else if (owner && (!job || job.executionToken !== owner.token)) controller.abort(new Error("JOB_EXECUTION_SUPERSEDED"));
+    };
+    const poll = setInterval(() => { if (!monitor.pending) monitor.pending = check().catch(() => { controller.abort(new Error("RENDER_OWNERSHIP_CHECK_FAILED")); }).finally(() => { monitor.pending = null; }); }, 500);
     try {
-      return await Promise.race([
-        operation,
-        new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error("RENDER_TIMEOUT")), this.timeoutMs);
-        })
-      ]);
+      await check(); controller.signal.throwIfAborted();
+      const result = await operation(controller.signal);
+      controller.signal.throwIfAborted(); return result;
+    } catch (error) {
+      if (controller.signal.aborted) controller.signal.throwIfAborted();
+      throw error;
     } finally {
-      if (timer) clearTimeout(timer);
+      clearTimeout(timer); clearInterval(poll); if (monitor.pending) await monitor.pending;
+      controller.signal.throwIfAborted();
     }
   }
 }

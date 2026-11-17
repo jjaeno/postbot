@@ -1,4 +1,5 @@
 import { z } from "zod";
+export { normalizeNarration, displayTimingsFromSpeech, SpeechNormalizationSchema, type SpeechNormalization } from "./speech-normalization.js";
 
 export const SceneNarrationSchema = z.object({
   text: z.string().min(1).max(500),
