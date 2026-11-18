@@ -650,3 +650,16 @@ test("distinguishes per-video snapshots, native metrics and collection failure",
   await expect(panel).toContainText("이전 스냅샷"); await expect(panel).toContainText("post-two");
   await expect(panel).toContainText("ANALYTICS_SYNC_FAILED"); await expect(panel).toContainText("완주율·노출 수와 다릅니다");
 });
+
+test("shows the next analysis condition and policy boundary on mobile", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockApi(page);
+  await page.route("**/optimization/channels/channel-1/analysis-status", (route) => route.fulfill({ json: { status: "WAITING_FOR_FRESH_COMPARABLE_DATA", requiredDistinctPosts: 4, maximumComparablePosts: 2, nextCheckAt: "2026-11-19T00:00:00Z" } }));
+  await page.goto("/#insights");
+  await page.getByLabel("분석할 채널", { exact: true }).selectOption("channel-1");
+  const panel = page.getByTestId("optimization-panel");
+  await expect(panel).toContainText("비교 가능 2편 · 필요 4편");
+  await expect(panel).toContainText("다음 확인");
+  await expect(panel).toContainText("정책상 제한되는 파생 분석은 보류");
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+});

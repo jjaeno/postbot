@@ -13,7 +13,7 @@ export interface ProviderResult {
 
 export type AnalyticsMetric = "views" | "impressions" | "reach" | "average_view_ratio" | "average_watch_seconds" | "completion_rate" | "engagement_rate";
 export type AnalyticsMetricValue = { metric: AnalyticsMetric; value: number | null; unit: "count" | "seconds" | "ratio" | null; aggregation: "sum" | "average" | "ratio" | null; unavailableReason: string | null };
-export type AnalyticsObservation = { kind: "PERIOD_TOTAL" | "LIFETIME_SNAPSHOT"; periodStart?: string; periodEnd?: string };
+export type AnalyticsObservation = { reportingTimezone?: string; coverageVerified?: boolean; kind: "PERIOD_TOTAL" | "LIFETIME_SNAPSHOT"; periodStart?: string; periodEnd?: string };
 export type AnalyticsPostResult = { observation?: AnalyticsObservation; externalPostId: string; observedAt: string; raw: Record<string, unknown>; metrics: readonly AnalyticsMetricValue[] };
 export type AnalyticsPage = { posts: readonly AnalyticsPostResult[]; nextPageToken: string | null; dataDelayHours: number | null };
 export interface AnalyticsProvider { fetchPage(input: { platform: "YOUTUBE" | "INSTAGRAM" | "TIKTOK"; postIds: readonly string[]; periodStart: string; periodEnd: string; pageToken: string | null }): Promise<AnalyticsPage>; }
@@ -46,7 +46,7 @@ const analyticsFetchJson = async <Body>(url: string, options: AnalyticsHttpOptio
 const unavailableMetric = (metric: AnalyticsMetric, reason: string): AnalyticsMetricValue => ({ metric, value: null, unit: null, aggregation: null, unavailableReason: reason });
 
 // YouTube report days are Pacific calendar days, including DST transitions.
-const pacificMidnight = (date: string): string => {
+export const pacificMidnight = (date: string): string => {
   const target = new Date(`${date}T00:00:00.000Z`).getTime();
   let instant = target;
   const format = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
@@ -58,6 +58,15 @@ const pacificMidnight = (date: string): string => {
   return new Date(instant).toISOString();
 };
 
+export const pacificDate = (instant: string | Date): string => {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(instant)).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+};
+export function completePostPublicationDay(publishedAt: Date, day: number): { start: Date; end: Date } {
+  const origin = Date.parse(`${pacificDate(publishedAt)}T00:00:00Z`);
+  return { start: new Date(pacificMidnight(new Date(origin + day * 86400000).toISOString().slice(0, 10))), end: new Date(pacificMidnight(new Date(origin + (day + 1) * 86400000).toISOString().slice(0, 10))) };
+}
+
 export class YouTubeAnalyticsProvider implements AnalyticsProvider {
   constructor(private readonly options: AnalyticsHttpOptions) {}
 
@@ -65,8 +74,8 @@ export class YouTubeAnalyticsProvider implements AnalyticsProvider {
     if (input.pageToken || input.postIds.length === 0) return { posts: [], nextPageToken: null, dataDelayHours: 72 };
     const url = new URL("https://youtubeanalytics.googleapis.com/v2/reports");
     url.searchParams.set("ids", "channel==MINE");
-    url.searchParams.set("startDate", input.periodStart.slice(0, 10));
-    url.searchParams.set("endDate", input.periodEnd.slice(0, 10));
+    url.searchParams.set("startDate", pacificDate(input.periodStart));
+    url.searchParams.set("endDate", pacificDate(new Date(new Date(input.periodEnd).getTime() - 1)));
     url.searchParams.set("metrics", "views,averageViewDuration,averageViewPercentage");
     url.searchParams.set("dimensions", "video");
     url.searchParams.set("filters", `video==${input.postIds.join(",")}`);
@@ -81,7 +90,7 @@ export class YouTubeAnalyticsProvider implements AnalyticsProvider {
       const views = number("views");
       const averageSeconds = number("averageViewDuration");
       const completion = number("averageViewPercentage");
-      return { externalPostId, observedAt, observation: { kind: "PERIOD_TOTAL", periodStart: pacificMidnight(input.periodStart.slice(0, 10)), periodEnd: pacificMidnight(new Date(new Date(`${input.periodEnd.slice(0, 10)}T00:00:00.000Z`).getTime() + 86_400_000).toISOString().slice(0, 10)) }, raw: { headers, row: row ?? null }, metrics: [
+      return { externalPostId, observedAt, observation: { kind: "PERIOD_TOTAL", reportingTimezone: "America/Los_Angeles", coverageVerified: Boolean(row) && pacificDate(input.periodStart) === pacificDate(new Date(new Date(input.periodEnd).getTime() - 1)), periodStart: pacificMidnight(pacificDate(input.periodStart)), periodEnd: pacificMidnight(new Date(new Date(`${pacificDate(new Date(new Date(input.periodEnd).getTime() - 1))}T00:00:00Z`).getTime() + 86400000).toISOString().slice(0, 10)) }, raw: { headers, row: row ?? null }, metrics: [
         views === null ? unavailableMetric("views", "NOT_RETURNED_BY_YOUTUBE") : { metric: "views", value: views, unit: "count", aggregation: "sum", unavailableReason: null },
         averageSeconds === null ? unavailableMetric("average_watch_seconds", "NOT_RETURNED_BY_YOUTUBE") : { metric: "average_watch_seconds", value: averageSeconds, unit: "seconds", aggregation: "average", unavailableReason: null },
         completion === null ? unavailableMetric("average_view_ratio", "NOT_RETURNED_BY_YOUTUBE") : { metric: "average_view_ratio", value: completion / 100, unit: "ratio", aggregation: "ratio", unavailableReason: null },

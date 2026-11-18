@@ -21,6 +21,17 @@ describe.skipIf(process.env.RUN_DB_INTEGRATION !== "1")("analytics availability 
     const page = (value: number | null, reason: string | null = null): AnalyticsPage => ({ posts: [{ externalPostId: key, observedAt: new Date().toISOString(), observation: { kind: "LIFETIME_SNAPSHOT" }, raw: {}, metrics: [{ metric: "views", value, unit: "count", aggregation: "sum", unavailableReason: reason }] }], nextPageToken: null, dataDelayHours: 24 });
     return { sync, post, script, scene, content, page };
   }
+  it("executes queued analysis independently from collection and keeps policy restrictions", async () => {
+    const f = await fixture();
+    const channelId = f.content.channelId;
+    const input = { channelId, platform: "YOUTUBE", metric: "views", periodStart: "2026-01-01T00:00:00Z", periodEnd: "2027-01-01T00:00:00Z", idempotencyKey: randomUUID() };
+    const fetchPage = vi.fn<AnalyticsProvider["fetchPage"]>();
+    const processor = new AnalyticsProcessor(prisma, { fetchPage });
+    const first = await processor.process({ analysis: input });
+    expect(first).toMatchObject({ status: "HELD" });
+    expect(await processor.process({ analysis: input })).toEqual(first);
+    expect(fetchPage).not.toHaveBeenCalled();
+  });
   it("recollects an empty page with backoff, then uses the published branch rather than later edits", async () => {
     const f = await fixture();
     await prisma.scriptVersion.create({ data: { contentItemId: f.content.id, platform: "INSTAGRAM", version: 2, hook: "Later", body: "Edited", language: "ko", durationSeconds: 60 } });

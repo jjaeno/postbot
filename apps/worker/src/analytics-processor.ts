@@ -1,3 +1,5 @@
+import { GenerateSuggestionsRequestSchema, OptimizationSettingsSchema } from "@postbot/contracts";
+import { generateOptimization } from "@postbot/optimization";
 import { assertExecutionOwner, type Prisma, type PrismaClient } from "@postbot/database";
 import { assertPlatformEnabled, loadConfig } from "@postbot/config";
 import { FakeAnalyticsProvider, InstagramAnalyticsProvider, TikTokAnalyticsProvider, YouTubeAnalyticsProvider, type AnalyticsProvider } from "@postbot/providers";
@@ -11,6 +13,13 @@ const syncIdFromPayload = (payload: Record<string, unknown>): string | null => {
 export class AnalyticsProcessor {
   constructor(private readonly prisma: PrismaClient, private readonly providerOverride?: AnalyticsProvider) {}
   async process(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (payload.analysis) {
+      const input = GenerateSuggestionsRequestSchema.parse(payload.analysis);
+      const channel = await this.prisma.channel.findUniqueOrThrow({ where: { id: input.channelId } });
+      const settings = OptimizationSettingsSchema.parse(channel.optimizationSettings ?? {});
+      const suggestion = await generateOptimization(this.prisma, channel, input, settings);
+      return { analysisId: suggestion.id, status: suggestion.status };
+    }
     const syncId = syncIdFromPayload(payload);
     if (!syncId) return { skipped: true };
     const sync = await this.prisma.analyticsSync.findUnique({ where: { id: syncId } });
@@ -67,7 +76,7 @@ export class AnalyticsProcessor {
                 for (const metric of post.metrics) {
                   const revisionKey = `${target.id}:${metric.metric}`;
                   const revision = (latest.get(revisionKey) ?? 0) + 1; latest.set(revisionKey, revision);
-                  data.push({ analyticsSyncId: sync.id, platformPostId: target.id, metric: metric.metric, mappingVersion: "v3", status: metric.value === null ? "UNAVAILABLE" : "AVAILABLE", value: metric.value, unit: metric.unit, aggregation: metric.aggregation, unavailableReason: metric.unavailableReason, rawSnapshot: { ...post.raw, collectionPending: delayed, actualAgeSeconds: Math.max(0, (collectedAt.getTime() - target.publishedAt.getTime()) / 1000) }, observedAt: new Date(post.observedAt), collectedAt, observationKind: observation?.kind ?? "LEGACY_UNKNOWN", periodStart: observation?.periodStart ? new Date(observation.periodStart) : null, periodEnd: end, sceneVersionId: target.publishPlan.sceneVersionId, scriptVersionId: target.publishPlan.sceneVersion?.scriptVersionId, revision });
+                  data.push({ analyticsSyncId: sync.id, platformPostId: target.id, metric: metric.metric, mappingVersion: "v3", status: metric.value === null ? "UNAVAILABLE" : "AVAILABLE", value: metric.value, unit: metric.unit, aggregation: metric.aggregation, unavailableReason: metric.unavailableReason, rawSnapshot: { ...post.raw, ...(observation?.reportingTimezone ? { reportingTimezone: observation.reportingTimezone, coverageVerified: observation.coverageVerified === true } : {}), collectionPending: delayed, actualAgeSeconds: Math.max(0, (collectedAt.getTime() - target.publishedAt.getTime()) / 1000) }, observedAt: new Date(post.observedAt), collectedAt, observationKind: observation?.kind ?? "LEGACY_UNKNOWN", periodStart: observation?.periodStart ? new Date(observation.periodStart) : null, periodEnd: end, sceneVersionId: target.publishPlan.sceneVersionId, scriptVersionId: target.publishPlan.sceneVersion?.scriptVersionId, revision });
                 }
                 count++;
               }

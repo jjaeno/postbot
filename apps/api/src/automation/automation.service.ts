@@ -1,3 +1,4 @@
+import { scheduleAnalysis } from "../optimization/schedule-analysis.js";
 import { estimateLlmInputTokens } from "@postbot/providers";
 import { normalizeNarration } from "@postbot/scene-schema";
 import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
@@ -1108,6 +1109,8 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     ]);
   }
 
+  private analysisCursor: string | null = null;
+
   private async scheduleDueRuns(): Promise<void> {
     if (this.scheduling) return;
     this.scheduling = true;
@@ -1116,6 +1119,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     await this.settleKnownReservations();
     this.publicationCursor = await schedulePublicationConfirmations(this.prisma, this.jobs, now, this.publicationCursor);
     await scheduleAnalytics(this.prisma, this.jobs, now);
+    this.analysisCursor = await scheduleAnalysis(this.prisma, this.jobs, now, this.analysisCursor);
     const channels = await this.prisma.channel.findMany({
       where: { status: "ACTIVE" },
       select: {

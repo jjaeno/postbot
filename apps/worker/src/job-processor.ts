@@ -323,6 +323,8 @@ export class DeterministicJobProcessor {
       }
     }
     if (input.type === "ANALYTICS") {
+      const analysis = input.payload.analysis;
+      if (analysis && typeof analysis === "object" && "channelId" in analysis && analysis.channelId !== persisted.channelId) throw new Error("ANALYSIS_CHANNEL_MISMATCH");
       try { await this.succeed(input.id, attemptNumber, await this.analytics.process(input.payload)); return; } catch (error) { const message = error instanceof Error ? error.message : "ANALYTICS_SYNC_FAILED"; await this.fail(input.id, attemptNumber, "ANALYTICS_SYNC_FAILED", message); throw error; }
     }
 
@@ -340,10 +342,7 @@ export class DeterministicJobProcessor {
     const plan = await this.prisma.publishPlan.findUniqueOrThrow({ where: { id: String((publish as Record<string, unknown>).publishPlanId) }, select: { platform: true, contentItem: { select: { channelId: true } } } });
     const runId = automationRunId(payload);
     if (!runId) return { skipped: true };
-    const now = new Date(); const periodStart = new Date(now.getTime() - 7 * 24 * 60 * 60_000);
-    const key = `automation:${runId}:${plan.platform.toLowerCase()}:analytics`;
-    const sync = await this.prisma.analyticsSync.upsert({ where: { idempotencyKey: key }, update: {}, create: { channelId: plan.contentItem.channelId, platform: plan.platform, status: "RUNNING", idempotencyKey: key, periodStart, periodEnd: now, timezone: "UTC" } });
-    return this.analytics.process({ analytics: { syncId: sync.id } });
+    return { scheduled: true, channelId: plan.contentItem.channelId, reason: "WAIT_FOR_DURABLE_POST_AGE_COLLECTION" };
   }
 
   private async start(jobId: string): Promise<number | "completed" | null> {

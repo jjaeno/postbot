@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { FakeAnalyticsProvider, InstagramAnalyticsProvider, TikTokAnalyticsProvider, YouTubeAnalyticsProvider } from "./index.js";
+import { completePostPublicationDay, FakeAnalyticsProvider, InstagramAnalyticsProvider, TikTokAnalyticsProvider, YouTubeAnalyticsProvider } from "./index.js";
 
 describe("FakeAnalyticsProvider", () => {
   it("paginates posts and keeps unavailable distinct from zero", async () => {
@@ -15,10 +15,21 @@ describe("FakeAnalyticsProvider", () => {
 const input = { platform: "YOUTUBE" as const, postIds: ["post-1"], periodStart: "2026-01-01T00:00:00.000Z", periodEnd: "2026-01-02T00:00:00.000Z", pageToken: null };
 
 describe("platform analytics providers", () => {
+  it("requests the full day after publication across the 25-hour DST day", async () => {
+    const period = completePostPublicationDay(new Date("2026-10-31T19:00:00Z"), 1);
+    expect(period.end.getTime() - period.start.getTime()).toBe(25 * 3600000);
+    const fetchImplementation = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ columnHeaders: [{ name: "video" }, { name: "views" }], rows: [["post-1", 12]] }));
+    const page = await new YouTubeAnalyticsProvider({ accessToken: "fixture", fetchImplementation }).fetchPage({ ...input, periodStart: period.start.toISOString(), periodEnd: period.end.toISOString() });
+    const request = fetchImplementation.mock.calls[0]?.[0];
+    const url = new URL(typeof request === "string" ? request : request instanceof URL ? request.href : request?.url ?? "https://invalid.test");
+    expect(url.searchParams.get("startDate")).toBe("2026-11-01");
+    expect(url.searchParams.get("endDate")).toBe("2026-11-01");
+    expect(page.posts[0]?.observation).toMatchObject({ coverageVerified: true, periodStart: period.start.toISOString(), periodEnd: period.end.toISOString() });
+  });
   it("normalizes YouTube Analytics without inventing unavailable metrics", async () => {
     const fetchImplementation = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ columnHeaders: [{ name: "video" }, { name: "views" }, { name: "averageViewDuration" }, { name: "averageViewPercentage" }], rows: [["post-1", 12, 4.5, 50]] }));
     const page = await new YouTubeAnalyticsProvider({ accessToken: "token", fetchImplementation }).fetchPage(input);
-    expect(page.posts[0]?.observation).toEqual({ kind: "PERIOD_TOTAL", periodStart: "2026-01-01T08:00:00.000Z", periodEnd: "2026-01-03T08:00:00.000Z" });
+    expect(page.posts[0]?.observation).toEqual({ kind: "PERIOD_TOTAL", reportingTimezone: "America/Los_Angeles", coverageVerified: false, periodStart: "2025-12-31T08:00:00.000Z", periodEnd: "2026-01-02T08:00:00.000Z" });
     expect(page.posts[0]?.observedAt).not.toBe(input.periodEnd);
     expect(page.posts[0]?.metrics.find((metric) => metric.metric === "average_view_ratio")?.value).toBe(0.5);
     expect(page.posts[0]?.metrics.find((metric) => metric.metric === "completion_rate")?.value).toBeNull();

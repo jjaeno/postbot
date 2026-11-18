@@ -133,6 +133,16 @@ Migration 202611180004~006: 갱신 fencing, nullable 실제 게시 시각·확�
 
 공식 계약 확인일 2026-11-18: [YouTube videos](https://developers.google.com/youtube/data/reference/rest/v3/videos), [videos.list](https://developers.google.com/youtube/data/reference/rest/v3/videos/list), [OAuth 갱신](https://developers.google.com/identity/protocols/oauth2/web-server). 갱신 책임은 플랫폼 어댑터 유지보수자다. 실제 계정의 처리 지연·게시 시각·권한 철회 응답은 외부 확인 필요다.
 
+## 20.9 관측 목적과 정기 분석
+
+비교 요청은 RELATIVE_AGE/CALENDAR_PERIOD를 구분한다. YouTube 자동 관측은 게시 당일의 부분일을 제외한 태평양 시간대 전체 달력 하루이며, API의 inclusive endDate와 내부 exclusive end를 변환한다. 일광절약 전환의 23/25시간을 정확한 24시간 관측이라고 표시하지 않는다. 서로 다른 게시일이라도 확인된 전체 상대 달력 일과 플랫폼·지표·mapping·단위·집계 정의가 같으면 같은 cohort로 묶는다. 달력 기간 비교는 절대 기간을 유지한다. 누적 snapshot은 실제 수집 경과시간의 제한된 오차 범위만 비교하며 달력 기간 값과 섞지 않는다. 여러 날 native 합계의 실제 일별 coverage를 확인하지 못하면 상대 비교에서 제외한다. 원래 수집 직후 7일 보고서를 요청하던 게시 완료 부수 작업은 제거하고 durable 게시 후 관측 스케줄러가 수집을 담당한다.
+
+활성 채널 cursor/batch 50, 최근 유효 snapshot 최대 1000개에서 버전 고정·관측 정의가 같은 서로 다른 게시물 4개 이상의 새 증거가 모이면 ANALYTICS 큐의 analysis 작업을 예약한다. 동시 스케줄러는 증거 ID fingerprint와 기존 DB 멱등 키로 하나의 작업을 만든다. 공통 packages/optimization 엔진을 API·worker가 함께 사용하며 중복 생성·소비된 증거의 반복 예약을 막는다. 표본 부족 제안은 증거를 소비하지 않는다. GET /optimization/channels/:id/analysis-status와 모바일 화면에 필요한 표본·현재 비교 가능 수·다음 확인 시각을 표시한다. bounded 최근 1000개/90일 범위 밖의 과거 전체 데이터 분석은 이 자동 경로의 대상이 아니다.
+
+2026-11-18 [YouTube Developer Policies III.E.4.h](https://developers.google.com/youtube/terms/developer-policies), [Analytics day 정의](https://developers.google.com/youtube/analytics/dimensions#day)를 확인했다. 현재 정책에 따라 YouTube API 관측으로 평균·자체 점수·효과·실험 승자·자동 전략을 계산하지 않는다. 원래 native 관측과 Postbot의 불변 제작 특성·자체 사용량 비용 영수증은 출처를 구분해 기록한다. YouTube 제안은 YOUTUBE_DERIVED_DATA_RESTRICTED/HELD, baseline/변경안/예상 효과 없음으로 남기며 과거 제안 승인·적용과 실험 완료 계산도 차단한다. 범용 비 YouTube 비교의 훅·장면·자막·음성 분석은 설명적 가설이며 신뢰도·인과·성과 향상을 보장하지 않는다. 기존 명시 허용 필드·변경 폭·종료 기준·rollback을 유지한다. 주제·비용을 포함한 추가 편집 전략의 효과 검증은 원래 지표와 혼합하지 않으며, 정책상 미지원 기능을 완료한 것으로 표시하지 않는다. 갱신 책임은 분석/플랫폼 어댑터 유지보수자다.
+
+검증: optimization unit 8개, Provider Mock 4개(25시간 DST·inclusive 날짜 포함), API MySQL/Redis·scope 회귀 7개, worker 수집/분석 dispatch·멱등 회귀 5개와 기존 복구 회귀 통과. 모바일 표본/다음 확인/정책 경계 Playwright 통과. 변경 packages/API/worker/web lint·typecheck/build 통과. 비용 증거의 실제 DB 필드 operation과 불필요 import를 수정해 재검증했다. 기존 YouTube 승자 계산 fixture는 제한을 회피하지 않고 Instagram 기반 범용 계산 회귀로 옮겼으며, 별도 YouTube 정책 차단 테스트를 추가했다. migration 없음. 실제 API 수집·권한 승인·법률상 해석·성과 개선 효과는 외부 확인 필요다.
+
 ## 공식 문서 확인
 
 확인일 2026-11-17. 구현 단계별로 해당 사양·정책을 다시 대조하며 고정 가격/과거 할당량을 근거 없이 넣지 않는다. 갱신 책임: 해당 Provider/connector 유지보수자.

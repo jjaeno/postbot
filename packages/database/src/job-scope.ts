@@ -9,6 +9,10 @@ export async function assertJobScope(db: PrismaClient | Prisma.TransactionClient
 }): Promise<void> {
   const payload = object(job.payload);
   const fail = (): never => { throw new Error("JOB_SCOPE_MISMATCH"); };
+  if ("analysis" in payload) {
+    const analysis = object(payload.analysis);
+    if (job.type !== "ANALYTICS" || "analytics" in payload || !job.channelId || analysis.channelId !== job.channelId || !await db.channel.findUnique({ where: { id: job.channelId } })) fail();
+  }
   if (job.contentItemId && (!job.channelId || !await db.contentItem.findFirst({ where: { id: job.contentItemId, channelId: job.channelId } }))) fail();
   const expected: Record<string, string> = { COLLECT: "collect", SCRIPT: "generation", ASSET: "assetPreparation", TTS: "ttsPreparation", RENDER: "render", POLICY: "policy", PUBLISH: "publish", ANALYTICS: "analytics" };
   for (const key of Object.values(expected)) if (key in payload && key !== expected[job.type]) fail();
@@ -35,7 +39,7 @@ export async function assertJobScope(db: PrismaClient | Prisma.TransactionClient
     const plan = await db.publishPlan.findFirst({ where: { id: domain.publishPlanId as string, contentItemId: job.contentItemId ?? "", contentItem: { channelId: job.channelId ?? "" } }, include: { platformAccount: true, contentItem: { include: { channel: true } } } });
     if (!plan || plan.platformAccount.channelId !== job.channelId || plan.platformAccount.workspaceId !== plan.contentItem.channel.workspaceId || plan.platformAccount.platform !== plan.platform) fail();
   }
-  if (job.type === "ANALYTICS") {
+  if (job.type === "ANALYTICS" && !("analysis" in payload)) {
     if (typeof domain.syncId !== "string" || !await db.analyticsSync.findFirst({ where: { id: domain.syncId, channelId: job.channelId ?? "" } })) fail();
     if (domain.platformPostId !== undefined && (typeof domain.platformPostId !== "string" || !await db.platformPost.findFirst({ where: { id: domain.platformPostId, publishPlan: { contentItem: { channelId: job.channelId ?? "", ...(job.contentItemId ? { id: job.contentItemId } : {}) } } } }))) fail();
   }
