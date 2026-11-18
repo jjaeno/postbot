@@ -130,20 +130,21 @@ export class OperationsService implements OnModuleDestroy {
     await this.prisma.auditLog.create({ data: { workspaceId, userId, action, targetType, targetId, metadata } });
   }
 
-  async rotateOAuthKeys(workspaceId: string, userId: string, role: string): Promise<{ rotated: number }> {
+  async rotateOAuthKeys(workspaceId: string, userId: string, role: string): Promise<{ rotated: number; skipped: number }> {
     if (role !== "OWNER") throw new ForbiddenException("OWNER_ROLE_REQUIRED");
     const credentials = await this.prisma.oAuthCredential.findMany({ where: { platformAccount: { workspaceId } } });
-    let rotated = 0;
+    let rotated = 0; let skipped = 0;
     for (const credential of credentials) {
       if (credential.tokenKeyVersion === this.crypto.keyVersion) continue;
       const access = this.crypto.decrypt({ cipherText: credential.encryptedAccessToken, cipher: credential.tokenCipher as "aes-256-gcm", keyVersion: credential.tokenKeyVersion });
       const refresh = credential.encryptedRefreshToken ? this.crypto.decrypt({ cipherText: credential.encryptedRefreshToken, cipher: credential.tokenCipher as "aes-256-gcm", keyVersion: credential.tokenKeyVersion }) : null;
       const encryptedAccess = this.crypto.encrypt(access); const encryptedRefresh = refresh ? this.crypto.encrypt(refresh) : null;
-      await this.prisma.oAuthCredential.update({ where: { id: credential.id }, data: { encryptedAccessToken: encryptedAccess.cipherText, encryptedRefreshToken: encryptedRefresh?.cipherText ?? null, tokenCipher: encryptedAccess.cipher, tokenKeyVersion: encryptedAccess.keyVersion } });
-      rotated += 1;
+      const changed = await this.prisma.oAuthCredential.updateMany({ where: { id: credential.id, credentialVersion: credential.credentialVersion, OR: [{ refreshLeaseUntil: null }, { refreshLeaseUntil: { lte: new Date() } }] }, data: { encryptedAccessToken: encryptedAccess.cipherText, encryptedRefreshToken: encryptedRefresh?.cipherText ?? null, tokenCipher: encryptedAccess.cipher, tokenKeyVersion: encryptedAccess.keyVersion, credentialVersion: { increment: 1 } } });
+      rotated += changed.count;
+      skipped += 1 - changed.count;
     }
-    await this.audit(workspaceId, userId, "oauth.key_rotation", "oauth_credential", null, { rotated });
-    return { rotated };
+    await this.audit(workspaceId, userId, "oauth.key_rotation", "oauth_credential", null, { rotated, skipped });
+    return { rotated, skipped };
   }
 
   async createLifecycleRequest(workspaceId: string, userId: string, role: string, raw: unknown): Promise<DataLifecycleRequestResponse> {

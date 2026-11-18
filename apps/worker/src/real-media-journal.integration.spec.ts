@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { AssetPreparationProcessor } from "./asset-preparation-processor.js";
 import { DeterministicJobProcessor } from "./job-processor.js";
+import { encryptOAuthToken, youtubeAnalyticsScope, youtubeReadonlyScope, youtubeUploadScope } from "@postbot/publishers";
 
 const enabled = process.env.RUN_DB_INTEGRATION === "1" && new URL(process.env.DATABASE_URL ?? "mysql://invalid/").pathname.endsWith("_test");
 const prisma = new PrismaClient();
@@ -22,6 +23,18 @@ describe.skipIf(!enabled).sequential("real media journal (mock HTTP, no paid cal
     const job = await prisma.productionJob.create({ data: { channelId: channel.id, contentItemId: content.id, type: "TTS", queueName: "tts", idempotencyKey: key, payload } });
     return { job, payload, run };
   };
+  it("detects a revoked selected account before calling paid synthesis", async () => {
+    const item = await fixture(); const channel = await prisma.channel.findUniqueOrThrow({ where: { id: item.run.channelId } });
+    const key = "fixture-oauth-key"; vi.stubEnv("YOUTUBE_OAUTH_PROVIDER", "google"); vi.stubEnv("OAUTH_ENCRYPTION_KEY", key);
+    const account = await prisma.platformAccount.create({ data: { workspaceId: channel.workspaceId, channelId: channel.id, platform: "YOUTUBE", externalAccountId: randomUUID(), credential: { create: { encryptedAccessToken: encryptOAuthToken("fixture-access", key), encryptedRefreshToken: encryptOAuthToken("fixture-refresh", key), tokenCipher: "aes-256-gcm", tokenKeyVersion: 1, scopeHash: "fixture", scopes: [youtubeAnalyticsScope, youtubeReadonlyScope, youtubeUploadScope], expiresAt: new Date(0) } } } });
+    const network = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ error: "invalid_grant" }, { status: 400 })); vi.stubGlobal("fetch", network);
+    await new DeterministicJobProcessor(prisma).process({ id: item.job.id, type: "TTS", queueName: "tts", runAfter: null, payload: item.payload });
+    expect((await prisma.platformAccount.findUniqueOrThrow({ where: { id: account.id } })).status).toBe("EXPIRED");
+    expect(await prisma.productionJob.findUniqueOrThrow({ where: { id: item.job.id } })).toMatchObject({ status: "NEEDS_REVIEW", errorCode: "ACCOUNT_REAUTH_REQUIRED" });
+    expect(await prisma.providerUsage.count({ where: { productionJobId: item.job.id } })).toBe(0);
+    expect((await prisma.productionJob.findUniqueOrThrow({ where: { id: item.job.id } })).payload).not.toHaveProperty("_mediaCalls");
+    expect(network).toHaveBeenCalledTimes(1);
+  });
   it.each([400, 429, 503])("keeps confirmed HTTP %s rejection separate from uncertain billing", async (status) => {
     const item = await fixture();
     const network = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}", { status, headers: { "retry-after": "120" } })); vi.stubGlobal("fetch", network);

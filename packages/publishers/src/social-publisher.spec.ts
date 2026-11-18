@@ -5,6 +5,12 @@ const upload = { title: "Postbot", description: "AI generated explainer", privac
 const requestUrl = (input: URL | RequestInfo): string => typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
 
 describe("MetaInstagramPublisherProvider", () => {
+  it("rejects visibility settings the adapter cannot honor before sending HTTP", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>();
+    const provider = new MetaInstagramPublisherProvider({ clientId: "fixture", clientSecret: "fixture", fetchImplementation });
+    await expect(provider.upload(upload, "fixture")).rejects.toThrow("INSTAGRAM_VISIBILITY_SETTING_UNSUPPORTED");
+    expect(fetchImplementation).not.toHaveBeenCalled();
+  });
   it("never invents granted permissions when the token response omits them", async () => {
     const fetchImplementation = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(Response.json({ access_token: "short" }))
@@ -29,7 +35,7 @@ describe("MetaInstagramPublisherProvider", () => {
     const authorization = new URL(provider.createAuthorizationUrl({ state: "state", codeChallenge: "challenge", redirectUri: "https://app.example/callback", scopes: provider.capabilities.requiredScopes }));
     expect(authorization.hostname).toBe("www.instagram.com");
     expect(authorization.searchParams.get("scope")).toContain(instagramPublishScope);
-    await expect(provider.upload(upload, "token")).resolves.toMatchObject({ externalVideoId: "media-1", status: "published" });
+    await expect(provider.upload({ ...upload, privacyStatus: "public" }, "token")).resolves.toMatchObject({ externalVideoId: "media-1", status: "published" });
   });
 });
 

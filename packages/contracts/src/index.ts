@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ChannelCollectionProfileSchema } from "./collection-profile.js";
+export { nextZonedSchedule, localPublishDay, type RecurringSchedule } from "./schedule.js";
 export { ChannelCollectionProfileSchema, collectionProfilePreset, ResearchQuestionInputSchema, type ChannelCollectionProfile } from "./collection-profile.js";
 
 export const HealthStatusSchema = z.enum(["ok"]);
@@ -609,7 +610,7 @@ export const ContentReviewResponseSchema = z.object({
     durationSeconds: z.number().positive().nullable().default(null),
     reviewStatus: z.enum(["REVIEW_REQUIRED", "APPROVED", "HELD", "DISCARDED"]).default("REVIEW_REQUIRED"),
     policy: z.object({ status: PolicyVerdictSchema, findings: z.array(PolicyFindingSchema), snapshotId: z.string().nullable() }).nullable().default(null),
-    publishStatus: z.enum(["DRAFT", "SCHEDULED", "PUBLISHING", "PUBLISHED", "FAILED", "HELD", "CANCELLED"]).nullable().default(null)
+    publishStatus: z.enum(["DRAFT", "SCHEDULED", "PUBLISHING", "UPLOADED", "PROCESSING", "PUBLISHED", "FAILED", "HELD", "CANCELLED"]).nullable().default(null)
   })).default([])
 });
 export const ReviewPreviewResponseSchema = z.object({ url: z.string().url(), expiresInSeconds: z.number().int().positive() });
@@ -630,13 +631,16 @@ export type ContentItemSummary = z.infer<typeof ContentItemSummarySchema>;
 export type ContentItemListResponse = z.infer<typeof ContentItemListResponseSchema>;
 
 export const CreatePublishPlanRequestSchema = z.object({ contentItemId: z.string().min(1), platformAccountId: z.string().min(1), scheduledAt: z.string().datetime(), idempotencyKey: z.string().min(8).max(191) });
-export const PublishPlanResponseSchema = z.object({ id: z.string(), contentItemId: z.string(), platformAccountId: z.string(), platform: PlatformSchema, status: z.enum(["DRAFT", "SCHEDULED", "PUBLISHING", "PUBLISHED", "FAILED", "HELD", "CANCELLED"]), scheduledAt: z.string().datetime(), idempotencyKey: z.string(), title: z.string(), duplicate: z.boolean().optional() });
+export const ReconcilePublicationRequestSchema = z.object({ idempotencyKey: z.string().min(8).max(128), externalVideoId: z.string().regex(/^[A-Za-z0-9_-]{1,191}$/).optional(), evidenceHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict().refine((value) => !value.externalVideoId || value.evidenceHash, "EXTERNAL_RESULT_EVIDENCE_REQUIRED");
+export const PublishPlanResponseSchema = z.object({ id: z.string(), contentItemId: z.string(), platformAccountId: z.string(), platform: PlatformSchema, status: z.enum(["DRAFT", "SCHEDULED", "PUBLISHING", "UPLOADED", "PROCESSING", "PUBLISHED", "FAILED", "HELD", "CANCELLED"]), scheduledAt: z.string().datetime(), idempotencyKey: z.string(), title: z.string(), duplicate: z.boolean().optional() });
 export type CreatePublishPlanRequest = z.infer<typeof CreatePublishPlanRequestSchema>;
 export type PublishPlanResponse = z.infer<typeof PublishPlanResponseSchema>;
 export const PublishCalendarItemSchema = z.object({
   id: z.string(), contentItemId: z.string(), channelId: z.string(), platform: PlatformSchema,
-  status: z.enum(["DRAFT", "SCHEDULED", "PUBLISHING", "PUBLISHED", "FAILED", "HELD", "CANCELLED"]),
+  status: z.enum(["DRAFT", "SCHEDULED", "PUBLISHING", "UPLOADED", "PROCESSING", "PUBLISHED", "FAILED", "HELD", "CANCELLED"]),
   scheduledAt: z.string().datetime(), title: z.string(), postUrl: z.string().url().nullable(),
+  publicationState: z.string().nullable().optional(), publicationCheckedAt: z.string().datetime().nullable().optional(),
+  visibility: z.string().nullable().optional(),
   publishedAt: z.string().datetime().nullable(), failureReason: z.string().nullable(), reconciliationRequired: z.boolean().optional()
 });
 export type PublishCalendarItem = z.infer<typeof PublishCalendarItemSchema>;

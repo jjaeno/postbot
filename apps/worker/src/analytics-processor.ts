@@ -31,7 +31,7 @@ export class AnalyticsProcessor {
     try {
       const provider = this.providerOverride ?? await this.provider(sync.channelId, sync.platform);
       const domain = payload.analytics && typeof payload.analytics === "object" ? payload.analytics as Record<string, unknown> : {};
-      const posts = await this.prisma.platformPost.findMany({ where: { ...(typeof domain.platformPostId === "string" ? { id: domain.platformPostId } : {}), platform: sync.platform, publishPlan: { contentItem: { channelId: sync.channelId } } }, include: { publishPlan: { include: { sceneVersion: true } }, analyticsSnapshots: { where: { analyticsSyncId: sync.id }, orderBy: { revision: "desc" } } } });
+      const posts = await this.prisma.platformPost.findMany({ where: { publicationState: "PUBLISHED", publishedAt: { not: null }, ...(typeof domain.platformPostId === "string" ? { id: domain.platformPostId } : {}), platform: sync.platform, publishPlan: { contentItem: { channelId: sync.channelId } } }, include: { publishPlan: { include: { sceneVersion: true } }, analyticsSnapshots: { where: { analyticsSyncId: sync.id }, orderBy: { revision: "desc" } } } });
       const transient = (reason: string | null): boolean => reason !== null && /NOT_RETURNED|UNAVAILABLE|PENDING|DELAY/.test(reason) && !/NOT_PROVIDED|NOT_SUPPORTED|SEPARATE|NOT_EQUIVALENT|ZERO_DENOMINATOR/.test(reason);
       const currentMetrics = (post: typeof posts[number]) => [...new Map([...post.analyticsSnapshots].reverse().map((metric) => [metric.metric, metric])).values()];
       const pending = posts.filter((post) => !post.analyticsSnapshots.length || currentMetrics(post).some((metric) => transient(metric.unavailableReason) || (metric.rawSnapshot && typeof metric.rawSnapshot === "object" && !Array.isArray(metric.rawSnapshot) && metric.rawSnapshot.collectionPending === true)));
@@ -57,7 +57,7 @@ export class AnalyticsProcessor {
               const data: Prisma.AnalyticsMetricSnapshotCreateManyInput[] = [];
               for (const post of page.posts) {
                 const target = batch.find((item) => item.externalPostId === post.externalPostId);
-                if (!target) continue;
+                if (!target?.publishedAt) continue;
                 received.add(post.externalPostId);
                 const collectedAt = new Date(); const observation = post.observation;
                 const end = observation?.periodEnd ? new Date(observation.periodEnd) : null;

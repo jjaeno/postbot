@@ -616,6 +616,30 @@ test("recovers a held plan from the calendar without typing an internal identifi
   await expect(page.getByLabel("검토할 콘텐츠")).toHaveValue("content-1");
 });
 
+test("confirms an ambiguous publication with local evidence on mobile", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockApi(page);
+  await page.route("**/publishing/plans", (route) => route.fulfill({ json: [{ id: "held-plan", contentItemId: "content-1", channelId: "channel-1", platform: "YOUTUBE", status: "HELD", scheduledAt: "2026-11-01T00:00:00.000Z", title: "확인이 필요한 게시", postUrl: null, publishedAt: null, failureReason: null, reconciliationRequired: true }] }));
+  let submitted: { externalVideoId: string; evidenceHash: string; idempotencyKey: string } | undefined;
+  await page.route("**/publishing/plans/held-plan/reconcile", (route) => {
+    submitted = route.request().postDataJSON() as typeof submitted;
+    return route.fulfill({ json: { jobId: "confirmation-job", publishPlanId: "held-plan" } });
+  });
+  await page.goto("/#calendar");
+  await expect(page.getByTestId("calendar-panel")).toContainText("공개 완료 미확인");
+  const button = page.getByRole("button", { name: "플랫폼 상태 확인", exact: true });
+  await expect(button).toBeDisabled();
+  await page.getByLabel("확인한 게시물 ID", { exact: true }).fill("verified-video-id");
+  await page.getByLabel("게시 결과 확인 자료").setInputFiles({ name: "proof.txt", mimeType: "text/plain", buffer: Buffer.from("local-proof") });
+  await expect(button).toBeEnabled();
+  await button.click();
+  await expect(page.getByRole("status")).toContainText("상태 확인 작업을 등록했습니다.");
+  expect(submitted?.externalVideoId).toBe("verified-video-id");
+  expect(submitted?.evidenceHash).toMatch(/^[a-f0-9]{64}$/);
+  expect(submitted?.idempotencyKey).toBeTruthy();
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+});
+
 test("distinguishes per-video snapshots, native metrics and collection failure", async ({ page }) => {
   await mockApi(page);
   const base = { metric: "average_view_ratio", status: "AVAILABLE", value: 0.5, unit: "ratio", aggregation: "average", unavailableReason: null, observedAt: "2026-10-05T00:00:00.000Z", revision: 1, mappingVersion: "v2", platform: "YOUTUBE", periodStart: "2026-10-01", periodEnd: "2026-10-05" };

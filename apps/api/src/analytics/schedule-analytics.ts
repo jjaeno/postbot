@@ -17,8 +17,9 @@ export async function scheduleAnalytics(prisma: PrismaClient, jobs: JobsService,
       await jobs.create(sync.channel.workspaceId, { type: "ANALYTICS", channelId: sync.channelId, contentItemId: original?.contentItemId ?? undefined, idempotencyKey: `analytics:${sync.id}:collection:${sync.collectionAttempts}`, payload: { analytics: { syncId: sync.id, ...(typeof analytics.platformPostId === "string" ? { platformPostId: analytics.platformPostId } : {}) } } });
     } catch { /* Durable sync remains due; publishing is never retried here. */ }
   }
-  const posts = await prisma.platformPost.findMany({ where: { publishedAt: { lte: now } }, include: { publishPlan: { include: { contentItem: { include: { channel: true } } } } } });
+  const posts = await prisma.platformPost.findMany({ where: { publicationState: "PUBLISHED", publishedAt: { lte: now } }, include: { publishPlan: { include: { contentItem: { include: { channel: true } } } } } });
   for (const post of posts) {
+    if (!post.publishedAt) continue;
     try {
       assertPlatformEnabled(config, post.platform);
       const content = post.publishPlan.contentItem;

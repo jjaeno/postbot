@@ -119,6 +119,20 @@ Migration `202611180001_billing_reconciliation`, `202611180002_generation_call_s
 
 오류 계약 확인일 2026-11-18: [Gemini API errors](https://ai.google.dev/gemini-api/docs/api-errors?hl=en), [ElevenLabs errors](https://elevenlabs.io/docs/eleven-api/resources/errors), [ElevenLabs 429](https://elevenlabs.io/docs/help-center/technical/api-error-code-429). 갱신 책임은 Provider 어댑터 유지보수자다.
 
+## 20.8 계정 갱신과 게시 결과 확인
+
+OAuth 갱신은 DB lease와 credentialVersion 비교로 프로세스 간 단일 실행한다. 갱신 중 연결 해제·새 인증·키 교체가 발생하면 이전 응답은 저장하지 않는다. 확정 권한 철회는 EXPIRED로 반영하며 일시 오류와 구분한다. 제작 전 알려진 계정 장애는 해당 플랫폼만 보류한다.
+
+게시 결과는 UPLOADED/PROCESSING/SCHEDULED/PUBLISHED/FAILED와 결과 불명확 검토를 구분한다. 외부 ID 수신만으로 공개 완료나 현재 시각을 기록하지 않는다. YouTube의 native 처리 상태·공개 설정·실제 시각을 조회하고, 확인된 공개 결과만 분석 대상으로 삼는다. 의도한 비공개 업로드는 비공개 완료로 표시한다. Instagram 어댑터가 지원하지 않는 비공개 설정과 TikTok 보류는 유지한다. 상태 조회는 재업로드하지 않으며 실패·재인증·조회 미지원은 검토로 남긴다. resumable session은 키 버전과 함께 암호화해 비공개 attempt 증거로 보관하고 조회 응답에서 제외한다.
+
+OWNER의 POST /publishing/plans/:id/reconcile은 알려진 외부 ID와 증빙 SHA-256을 원래 계획에 연결하는 조회 작업을 만든다. 모바일 화면은 증빙을 로컬에서 해시하며 파일 내용은 전송하지 않는다. 자동 재확인 outbox는 cursor/batch 100개로 복구된다. 외부 게시가 시작된 계획을 로컬 취소만으로 취소 완료로 표시하지 않는다. 놓친 시각 정책은 IMMEDIATE/NEXT_SLOT/REVIEW와 유예 시간을 지원하며 다음 슬롯은 시간대·채널 상한·슬롯 충돌을 검사한다. durable 멱등 키는 원래 요청 fingerprint를 보존해 runtime journal이나 재시도 시각 변경이 동일 요청을 충돌시키지 않게 했다.
+
+Migration 202611180004~006: 갱신 fencing, nullable 실제 게시 시각·확인 상태·비공개 증거, 과거 게시 상태 backfill을 추가한다. 과거 시각은 보존하되 LEGACY_UNCONFIRMED로 표시하고 PUBLISHED 계획/콘텐츠를 HELD로 전환하며 이전 상태와 시각을 감사 기록에 보존한다. 기존 24개 migration 데이터 DB와 빈 DB에서 시작한 검증 DB 모두 27개까지 적용 성공. 기존 credentialVersion=0/lease=NULL, 과거 시각 보존·HELD 전환 확인. rollback은 제작·게시를 중지한 뒤 확장 schema와 증거를 유지해야 하며 이전의 업로드=공개 완료 로직으로 되돌리는 down migration은 제공하지 않는다.
+
+검증: 실제 두 OS 프로세스 OAuth 경쟁·늦은 응답 fencing·권한 철회 4개, publishers Mock 계약 18개, worker 게시/미디어 journal/Redis 복구 24개, API 확인 outbox·권한·멱등 2개와 자동화 시작 10개 통과. 관련 API 예약·분석 회귀와 변경 package/app lint·typecheck 통과. 모바일 Playwright 운영 설정 저장·보류 예약 복구·외부 ID/증빙 해시 확인 3개 통과. Fake 비공개 업로드를 공개 완료로 잘못 표시하던 계약을 수정했고, 격리 acceptance 환경만 공개 Fake 설정을 명시했다. 실제 SNS 공개 설정 기본값을 변경하지 않았다. 추가 transaction에 맞춰 DB 실패 주입 지점을 PUBLISHING 단계로 지정하고 반복 DB fixture의 외부 ID를 유일하게 수정했으며 실패·중복 업로드 검증은 유지했다. 실제 SNS/OAuth/유료 호출은 하지 않았다.
+
+공식 계약 확인일 2026-11-18: [YouTube videos](https://developers.google.com/youtube/data/reference/rest/v3/videos), [videos.list](https://developers.google.com/youtube/data/reference/rest/v3/videos/list), [OAuth 갱신](https://developers.google.com/identity/protocols/oauth2/web-server). 갱신 책임은 플랫폼 어댑터 유지보수자다. 실제 계정의 처리 지연·게시 시각·권한 철회 응답은 외부 확인 필요다.
+
 ## 공식 문서 확인
 
 확인일 2026-11-17. 구현 단계별로 해당 사양·정책을 다시 대조하며 고정 가격/과거 할당량을 근거 없이 넣지 않는다. 갱신 책임: 해당 Provider/connector 유지보수자.

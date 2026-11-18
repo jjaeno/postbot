@@ -1,7 +1,7 @@
 import { RenderQualityReviewError } from "@postbot/renderer";
 import { randomUUID } from "node:crypto";
 import { AmbiguousPublishError } from "@postbot/publishers";
-import { settleJobReservation, assertExecutionOwner, jobExecution, assertJobScope, type Prisma, type PrismaClient } from "@postbot/database";
+import { OAuthReauthenticationRequired, settleJobReservation, assertExecutionOwner, jobExecution, assertJobScope, type Prisma, type PrismaClient } from "@postbot/database";
 import type { EnqueueJobInput } from "@postbot/jobs";
 import { AssetPreparationJobPayloadSchema, ChannelCollectionProfileSchema, CollectAutomationJobPayloadSchema, PolicyAutomationJobPayloadSchema, RenderJobPayloadSchema, ScriptGenerationJobPayloadSchema, TtsPreparationJobPayloadSchema } from "@postbot/contracts";
 import { ScriptGenerationProcessor } from "./script-generation-processor.js";
@@ -13,6 +13,7 @@ import { CollectProcessor } from "./collect-processor.js";
 import { PolicyProcessor } from "./policy-processor.js";
 import { loadConfig } from "@postbot/config";
 import { ProviderCallError } from "@postbot/providers";
+import { resolveOAuthAccessToken } from "./oauth-token.js";
 
 type ProductionJobStatus =
   | "QUEUED"
@@ -133,7 +134,10 @@ export class DeterministicJobProcessor {
     if (persisted.channelId) {
       const channel = await this.prisma.channel.findUnique({ where: { id: persisted.channelId }, select: { status: true } });
       const sample = run?.checkpoint && typeof run.checkpoint === "object" && !Array.isArray(run.checkpoint) && run.checkpoint.sample === true;
-      if (channel && channel.status !== "ACTIVE" && !(sample && channel.status === "PAUSED")) {
+      const publish = input.payload.publish;
+      const planId = publish && typeof publish === "object" && !Array.isArray(publish) && "publishPlanId" in publish ? publish.publishPlanId : null;
+      const readOnlyConfirmation = input.type === "PUBLISH" && typeof planId === "string" && (await this.prisma.platformPost.count({ where: { publishPlanId: planId } }) > 0 || Boolean(publish && typeof publish === "object" && "externalVideoId" in publish));
+      if (channel && channel.status !== "ACTIVE" && !(sample && channel.status === "PAUSED") && !readOnlyConfirmation) {
         await this.prisma.productionJob.update({ where: { id: input.id }, data: { status: "NEEDS_REVIEW", errorCode: "CHANNEL_NOT_ACTIVE" } });
         if (runId) await this.prisma.$transaction([
           this.prisma.automationStep.updateMany({ where: { automationRunId: runId, productionJobId: input.id }, data: { status: "HELD", errorCode: "CHANNEL_NOT_ACTIVE" } }),
@@ -155,6 +159,17 @@ export class DeterministicJobProcessor {
     const config = loadConfig();
     const realPaid = (input.type === "SCRIPT" && config.LLM_PROVIDER === "openai") || (input.type === "ASSET" && config.IMAGE_PROVIDER === "google") || (input.type === "TTS" && config.TTS_PROVIDER === "elevenlabs");
     if (realPaid) {
+      const platform = automationPlatform(input.payload);
+      if (platform && persisted.channelId) {
+        const account = await this.prisma.platformAccount.findFirst({ where: { channelId: persisted.channelId, platform }, include: { credential: true } });
+        if (account) {
+          try { await resolveOAuthAccessToken(this.prisma, account); }
+          catch (error) {
+            if (error instanceof Error && ["OAUTH_REFRESH_IN_PROGRESS", "OAUTH_REFRESH_TRANSIENT", "OAUTH_REFRESH_SUPERSEDED"].includes(error.message)) { await this.handleProviderError(input.id, attemptNumber, new ProviderCallError("TRANSIENT", true, true)); return; }
+            await this.needsReview(input.id, attemptNumber, { failureKind: error instanceof OAuthReauthenticationRequired ? "AUTH" : "VALIDATION", platform }, error instanceof OAuthReauthenticationRequired ? "ACCOUNT_REAUTH_REQUIRED" : "OAUTH_CONFIGURATION_REVIEW_REQUIRED"); return;
+          }
+        }
+      }
       const reservation = runId ? await this.prisma.automationCostReservation.findUnique({ where: { idempotencyKey: `automation:${runId}:${input.type.toLowerCase()}:${automationPlatform(input.payload)?.toLowerCase()}:cost` } }) : null;
       if (!reservation) { await this.needsReview(input.id, attemptNumber, { reason: "Start a budgeted production workflow." }, "BUDGET_WORKFLOW_REQUIRED"); return; }
       const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
@@ -291,9 +306,18 @@ export class DeterministicJobProcessor {
     if (input.type === "PUBLISH") {
       try {
         const published = await this.publish.process(input.payload);
-        const analytics = automationRunId(input.payload) ? await this.syncAnalyticsAfterPublish(input.payload).catch((error: unknown) => ({ error: error instanceof Error ? error.message : "ANALYTICS_SYNC_FAILED" })) : null;
+        if (published.reviewRequired === true) { await this.needsReview(input.id, attemptNumber, published, typeof published.reason === "string" ? published.reason : "PUBLICATION_CONFIRMATION_REVIEW_REQUIRED"); return; }
+        if (published.pending === true) {
+          await this.retry(input.id, attemptNumber, published.rescheduled === true ? "PUBLISH_RESCHEDULED" : "PUBLICATION_CONFIRMATION_PENDING", published.rescheduled === true ? "Wait for the reserved publishing slot." : "Upload is recorded; only read the platform status on retry.");
+          await this.prisma.productionJob.update({ where: { id: input.id }, data: { runAfter: typeof published.nextCheckAt === "string" ? new Date(published.nextCheckAt) : new Date(Date.now() + 60000), result: published as Prisma.InputJsonObject } });
+          throw new Error("PUBLICATION_CONFIRMATION_PENDING");
+        }
+        const analytics = published.published === true && automationRunId(input.payload) ? await this.syncAnalyticsAfterPublish(input.payload).catch((error: unknown) => ({ error: error instanceof Error ? error.message : "ANALYTICS_SYNC_FAILED" })) : null;
         await this.succeed(input.id, attemptNumber, { ...published, ...(analytics ? { analytics } : {}) }); return;
        } catch (error) {
+        if (error instanceof Error && error.message === "PUBLICATION_CONFIRMATION_PENDING") throw error;
+        if (error instanceof OAuthReauthenticationRequired) { await this.needsReview(input.id, attemptNumber, { failureKind: "AUTH" }, "ACCOUNT_REAUTH_REQUIRED"); return; }
+        if (error instanceof Error && ["OAUTH_REFRESH_IN_PROGRESS", "OAUTH_REFRESH_TRANSIENT", "OAUTH_REFRESH_SUPERSEDED"].includes(error.message)) { await this.handleProviderError(input.id, attemptNumber, new ProviderCallError("TRANSIENT", true, true)); return; }
         if (error instanceof AmbiguousPublishError) { await this.needsReview(input.id, attemptNumber, { reconciliationRequired: true, externalOperationId: error.externalOperationId }, "AMBIGUOUS_PUBLISH_RECONCILIATION_REQUIRED"); return; }
         const message = error instanceof Error ? error.message : "PUBLISH_FAILED"; await this.fail(input.id, attemptNumber, "PUBLISH_FAILED", message); throw error;
       }

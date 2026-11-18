@@ -2,6 +2,7 @@ import { Queue, Worker, type JobsOptions, type Processor } from "bullmq";
 import { Redis } from "ioredis";
 import { z } from "zod";
 export { DelayedError } from "bullmq";
+export { productionJobRequestIntent, jobDomainPayload } from "./intent.js";
 
 export const jobQueueNames = ["collect", "script", "asset", "tts", "render", "policy", "publish", "analytics"] as const;
 export const jobTypes = ["COLLECT", "SCRIPT", "ASSET", "TTS", "RENDER", "POLICY", "PUBLISH", "ANALYTICS"] as const;

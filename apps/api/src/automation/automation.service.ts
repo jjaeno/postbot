@@ -24,6 +24,7 @@ import { estimateAutomationStageCost, type AutomationCostUsage } from "./automat
 import { nextZonedSchedule } from "./schedule-time.js";
 import { createScheduledPlan, localPublishDay } from "../publishing/publish-slots.js";
 import { scheduleAnalytics } from "../analytics/schedule-analytics.js";
+import { schedulePublicationConfirmations } from "../publishing/schedule-publication-confirmation.js";
 import { readAssetUsagePurpose } from "@postbot/asset-library";
 
 export const automationStages = ["COLLECT", "SCRIPT", "ASSET", "TTS", "RENDER", "POLICY", "PUBLISH"] as const satisfies readonly AutomationStage[];
@@ -106,6 +107,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
   private scheduler: NodeJS.Timeout | null = null;
   private scheduling = false;
   private settlementCursor: string | null = null;
+  private publicationCursor: string | null = null;
 
   constructor(
     @Inject("PRISMA_CLIENT") private readonly prisma: PrismaClient,
@@ -141,7 +143,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     const channel = await this.prisma.channel.findFirst({
       where: { id: input.channelId, workspaceId, status: input.sample ? { in: ["ACTIVE", "PAUSED"] } : "ACTIVE" },
       include: {
-        platformAccounts: true,
+        platformAccounts: { include: { credential: true } },
         collectionRules: { where: { isActive: true }, orderBy: { version: "desc" }, take: 1 },
         scheduleRules: { where: { isActive: true } },
         outputProfiles: { where: { isActive: true } },
@@ -175,11 +177,14 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     const selectedIdea = input.ideaId ? await this.prisma.contentIdea.findFirst({ where: { id: input.ideaId, channelId: channel.id, channel: { workspaceId } } }) : null;
     if (input.ideaId && !selectedIdea) throw new NotFoundException("CONTENT_IDEA_NOT_FOUND");
 
-    const missingFullAutoSetup = !input.sample && channel.automationMode === "FULL_AUTO" && platforms.some((platform) =>
-      !channel.platformAccounts.some((account) => account.status === "CONNECTED" && account.platform === platform)
-      || !channel.scheduleRules.some((rule) => rule.platform === null || rule.platform === platform)
-    );
-    const heldReason = missingFullAutoSetup ? "NO_CONNECTED_ACCOUNT_OR_SCHEDULE" : null;
+    const blockedPlatforms = new Map<Platform, string>();
+    if (!input.sample) for (const platform of platforms) {
+      const account = channel.platformAccounts.find((account) => account.platform === platform);
+      if (platform === "INSTAGRAM" && channel.outputProfiles.find((profile) => profile.platform === platform)?.publicSetting !== "PUBLIC") { blockedPlatforms.set(platform, "INSTAGRAM_VISIBILITY_SETTING_UNSUPPORTED"); continue; }
+      if (account && (account.status !== "CONNECTED" || account.credential?.expiresAt && account.credential.expiresAt <= new Date() && !account.credential.encryptedRefreshToken)) blockedPlatforms.set(platform, "ACCOUNT_REAUTH_REQUIRED");
+      else if (channel.automationMode === "FULL_AUTO" && (!account || !channel.scheduleRules.some((rule) => rule.platform === null || rule.platform === platform))) blockedPlatforms.set(platform, "NO_CONNECTED_ACCOUNT_OR_SCHEDULE");
+    }
+    const heldReason = platforms.every((platform) => blockedPlatforms.has(platform)) ? blockedPlatforms.values().next().value ?? null : null;
     const ideaSnapshot = selectedIdea ? {
       id: selectedIdea.id, channelId: selectedIdea.channelId, title: selectedIdea.title, summary: selectedIdea.summary ?? "",
       canonicalUrl: selectedIdea.canonicalUrl, sourceName: selectedIdea.sourceName, sourceKind: selectedIdea.sourceKind,
@@ -218,7 +223,8 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
           stage,
           platform,
           branchKey: platform,
-          status: initialStatus
+          status: initialStatus === "SKIPPED" ? initialStatus : blockedPlatforms.has(platform) && stage === "SCRIPT" ? "HELD" as const : initialStatus,
+          ...(blockedPlatforms.has(platform) && stage === "SCRIPT" ? { errorCode: blockedPlatforms.get(platform) } : {})
         })))
       ];
       const created = await tx.automationRun.create({
@@ -1108,6 +1114,7 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     try {
     const now = new Date();
     await this.settleKnownReservations();
+    this.publicationCursor = await schedulePublicationConfirmations(this.prisma, this.jobs, now, this.publicationCursor);
     await scheduleAnalytics(this.prisma, this.jobs, now);
     const channels = await this.prisma.channel.findMany({
       where: { status: "ACTIVE" },

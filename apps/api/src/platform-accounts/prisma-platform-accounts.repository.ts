@@ -180,6 +180,7 @@ export class PrismaPlatformAccountsRepository implements PlatformAccountsReposit
         },
         update: {
           encryptedAccessToken: input.encryptedAccessToken,
+          credentialVersion: { increment: 1 }, refreshLeaseToken: null, refreshLeaseUntil: null,
           encryptedRefreshToken: input.encryptedRefreshToken,
           tokenCipher: input.tokenCipher,
           tokenKeyVersion: input.tokenKeyVersion,

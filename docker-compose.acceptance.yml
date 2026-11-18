@@ -14,6 +14,7 @@ x-environment: &environment
     IMAGE_PROVIDER: fake
     TTS_PROVIDER: fake
     YOUTUBE_OAUTH_PROVIDER: fake
+    YOUTUBE_UPLOAD_PRIVACY: public
     INSTAGRAM_OAUTH_PROVIDER: fake
     TIKTOK_OAUTH_PROVIDER: fake
     JWT_ACCESS_SECRET: acceptance-only-access-secret

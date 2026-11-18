@@ -122,6 +122,8 @@ enum PublishPlanStatus {
   DRAFT
   SCHEDULED
   PUBLISHING
+  UPLOADED
+  PROCESSING
   PUBLISHED
   FAILED
   HELD
@@ -495,6 +497,9 @@ model OAuthCredential {
   scopes                Json
   expiresAt             DateTime?       @db.DateTime(3)
   lastRefreshedAt       DateTime?       @db.DateTime(3)
+  credentialVersion     Int             @default(0)
+  refreshLeaseToken     String?         @db.VarChar(64)
+  refreshLeaseUntil     DateTime?       @db.DateTime(3)
   createdAt             DateTime        @default(now()) @db.DateTime(3)
   updatedAt             DateTime        @updatedAt @db.DateTime(3)
   platformAccount       PlatformAccount @relation(fields: [platformAccountId], references: [id], onDelete: Restrict)
@@ -1115,6 +1120,7 @@ model PublishAttempt {
   idempotencyKey   String               @unique @db.VarChar(191)
   requestSnapshot  Json?
   responseSnapshot Json?
+  protectedProviderEvidence Json?
   errorCode        String?              @db.VarChar(80)
   errorMessage     String?              @db.Text
   startedAt        DateTime?            @db.DateTime(3)
@@ -1134,7 +1140,13 @@ model PlatformPost {
   platform           Platform
   externalPostId     String                    @db.VarChar(191)
   postUrl            String                    @db.Text
-  publishedAt        DateTime                  @db.DateTime(3)
+  publishedAt        DateTime?                 @db.DateTime(3)
+  publicationState   String                    @default("UPLOADED") @db.VarChar(32)
+  publicationCheckedAt DateTime?               @db.DateTime(3)
+  nextPublicationCheckAt DateTime?             @db.DateTime(3)
+  publicationCheckCount Int                    @default(0)
+  publicationFailureCode String?               @db.VarChar(80)
+  visibility          String?                  @db.VarChar(16)
   policyVersion      Int
   productionSnapshot Json?
   createdAt          DateTime                  @default(now()) @db.DateTime(3)
@@ -1144,6 +1156,7 @@ model PlatformPost {
 
   @@unique([platform, externalPostId])
   @@index([platformAccountId, publishedAt])
+  @@index([publicationState, nextPublicationCheckAt])
   @@map("platform_posts")
 }
 

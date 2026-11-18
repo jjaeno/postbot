@@ -1,4 +1,5 @@
 import { FirstChannelWelcome, WorkspaceShell, WorkspaceView, useWorkspacePage } from "./workspace-shell";
+import { PublicationReconciliation } from "./publication-reconciliation";
 import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -216,6 +217,8 @@ const statusLabels: Record<string, string> = {
   PROPOSED: "제안됨",
   PUBLISHED: "게시됨",
   PUBLISHING: "게시 중",
+  UPLOADED: "업로드 완료 · 공개 확인 대기",
+  PROCESSING: "플랫폼 처리 중",
   QUEUED: "대기열 등록",
   REJECTED: "제외됨",
   RETRY_WAIT: "재시도 대기",
@@ -636,7 +639,7 @@ const Dashboard = ({ session }: { session: AuthSession }): ReactElement => {
         <ReviewPanel owner={session.workspace.role === "OWNER"} channels={channels.data ?? []} platform={selectedReviewPlatform} setPlatform={selectReviewPlatform} accounts={platformAccounts.data ?? []} content={content.data ?? []} contentItemId={selectedContentId} onSelectContent={(id) => { setSelectedContentId(id); const url = new URL(window.location.href); url.searchParams.set("content", id); window.history.replaceState({}, "", url); }} onError={setError} />
         </WorkspaceView>
         <WorkspaceView active={page} page="calendar">
-        <div id="calendar"><CalendarPanel channels={channels.data ?? []} plans={publishPlans.data ?? []} onSelect={(id, platform) => { window.location.hash = "content"; selectReviewPlatform(platform); setSelectedContentId(id); const url = new URL(window.location.href); url.searchParams.set("content", id); window.history.replaceState({}, "", url); }} /></div>
+        <div id="calendar"><CalendarPanel owner={session.workspace.role === "OWNER"} channels={channels.data ?? []} plans={publishPlans.data ?? []} onSelect={(id, platform) => { window.location.hash = "content"; selectReviewPlatform(platform); setSelectedContentId(id); const url = new URL(window.location.href); url.searchParams.set("content", id); window.history.replaceState({}, "", url); }} /></div>
         </WorkspaceView>
       {wizardOpen ? <ChannelWizard onClose={() => setWizardOpen(false)} onError={setError} /> : null}
     </WorkspaceShell>
@@ -755,13 +758,24 @@ const ContentPanel = ({ channels, content, isLoading, onError, selectedId, onSel
 };
 
 const weekdayLabels = ["일", "월", "화", "수", "목", "금", "토"] as const;
-const CalendarPanel = ({ channels, plans, onSelect }: { channels: ChannelResponse[]; plans: PublishCalendarItem[]; onSelect: (id: string, platform: Platform) => void }): ReactElement => {
+const CalendarPanel = ({ channels, plans, onSelect, owner }: { channels: ChannelResponse[]; plans: PublishCalendarItem[]; onSelect: (id: string, platform: Platform) => void; owner: boolean }): ReactElement => {
   const cache = useQueryClient();
   const change = useMutation({ mutationFn: (plan: PublishCalendarItem) => request(`/publishing/plans/${plan.id}/cancel`, { method: "POST", body: "{}" }, { parse: () => ({ ok: true }) }), onSuccess: (_, plan) => { void cache.invalidateQueries({ queryKey: ["publish-plans"] }); void cache.invalidateQueries({ queryKey: ["content"] }); onSelect(plan.contentItemId, plan.platform); document.getElementById("content")?.scrollIntoView({ block: "start" }); } });
   return <section className="rounded-md border border-border bg-white p-5 shadow-sm" data-testid="calendar-panel">
     <h2 className="text-lg font-semibold">게시 캘린더</h2><p className="mt-1 text-sm text-muted-foreground">반복 슬롯과 실제 예약·게시 결과를 구분합니다. 예약 변경은 기존 예약을 취소한 뒤 검수 화면에서 새 시간으로 예약합니다.</p>
     {change.error ? <p role="alert" className="mt-2 text-sm text-red-700">{change.error.message}</p> : null}
-    {plans.length > 0 ? <div className="mt-4 grid gap-2">{plans.map((plan) => <article className="rounded border border-primary/30 bg-primary/5 p-3 text-sm" key={plan.id}><div className="flex items-center justify-between gap-3"><button type="button" className="font-medium underline" onClick={() => { onSelect(plan.contentItemId, plan.platform); document.getElementById("content")?.scrollIntoView({ block: "start" }); }}>{plan.title} · {platformLabel(plan.platform)}</button><span>{statusLabel(plan.status)}</span></div><p className="mt-1 text-xs text-muted-foreground">예약: {new Date(plan.scheduledAt).toLocaleString()} · 게시: {plan.publishedAt ? new Date(plan.publishedAt).toLocaleString() : "아직 게시되지 않음"}</p>{plan.failureReason ? <p role="alert">{plan.failureReason}</p> : null}{plan.postUrl ? <a className="mt-1 block text-primary" href={plan.postUrl} rel="noreferrer" target="_blank">게시물 열기</a> : null}{["SCHEDULED", "HELD", "FAILED"].includes(plan.status) ? <Button className="mt-2" disabled={change.isPending || plan.reconciliationRequired === true} onClick={() => { if (window.confirm("기존 예약을 취소하고 검수 화면에서 새 시간을 선택할까요? 새 예약을 저장하기 전까지 게시되지 않습니다.")) change.mutate(plan); }}>예약 변경</Button> : null}</article>)}</div> : <p className="mt-4 text-sm text-muted-foreground">아직 실제 예약 게시물이 없습니다.</p>}
+    {plans.length > 0 ? <div className="mt-4 grid gap-2">{plans.map((plan) => <article className="rounded border border-primary/30 bg-primary/5 p-3 text-sm" key={plan.id}>
+      <div className="flex items-center justify-between gap-3"><button type="button" className="font-medium underline" onClick={() => { onSelect(plan.contentItemId, plan.platform); document.getElementById("content")?.scrollIntoView({ block: "start" }); }}>{plan.title} · {platformLabel(plan.platform)}</button><span>{plan.visibility === "private" && plan.status === "UPLOADED" ? "비공개 업로드 완료" : statusLabel(plan.status)}</span></div>
+      <p className="mt-1 text-xs text-muted-foreground">예약: {new Date(plan.scheduledAt).toLocaleString()} · 게시: {plan.publishedAt ? new Date(plan.publishedAt).toLocaleString() : plan.status === "PUBLISHED" ? "게시 확인 · 시각 미제공" : "공개 완료 미확인"}</p>
+      {plan.failureReason ? <p role="alert">{plan.failureReason}</p> : null}
+      {plan.publicationState === "LEGACY_UNCONFIRMED" ? <p>플랫폼에서 공개 상태를 다시 확인해야 합니다.</p> : null}
+      {plan.postUrl ? <a className="mt-1 block text-primary" href={plan.postUrl} rel="noreferrer" target="_blank">게시물 열기</a> : null}
+      {owner && (plan.publicationState || plan.reconciliationRequired) ? <PublicationReconciliation plan={plan} submit={async (input) => {
+        await request(`/publishing/plans/${plan.id}/reconcile`, { method: "POST", body: JSON.stringify(input) }, { parse: (value: unknown) => z.object({ jobId: z.string(), publishPlanId: z.string() }).parse(value) });
+        await cache.invalidateQueries({ queryKey: ["publish-plans"] }); await cache.invalidateQueries({ queryKey: ["content"] });
+      }} /> : null}
+      {["SCHEDULED", "HELD", "FAILED"].includes(plan.status) && (!plan.publicationState || plan.publicationState === "FAILED") ? <Button className="mt-2" disabled={change.isPending || plan.reconciliationRequired === true} onClick={() => { if (window.confirm("기존 예약을 취소하고 검수 화면에서 새 시간을 선택할까요? 새 예약을 저장하기 전까지 게시되지 않습니다.")) change.mutate(plan); }}>예약 변경</Button> : null}
+    </article>)}</div> : <p className="mt-4 text-sm text-muted-foreground">아직 실제 예약 게시물이 없습니다.</p>}
     <h3 className="mt-5 text-sm font-semibold">반복 게시 슬롯</h3>
     <div className="mt-4 grid gap-3 md:grid-cols-7">{weekdayLabels.map((day, index) => <article className="min-h-32 rounded-md border border-border p-3" key={day}><h3 className="text-sm font-semibold">{day}</h3><div className="mt-3 space-y-2">{channels.flatMap((channel) => channel.scheduleRules.filter((rule) => rule.dayOfWeek === index).map((rule) => ({ channel, rule }))).map(({ channel, rule }) => <div className="rounded bg-muted p-2 text-xs" key={`${channel.id}-${rule.platform}-${rule.timeOfDayLocal}`}><p className="font-medium">{rule.timeOfDayLocal} · {rule.timezone}</p><p className="mt-1">{channel.name}</p><p>{platformLabel(rule.platform)} · 최대 {rule.maxPosts}개</p></div>)}</div></article>)}</div>
   </section>;

@@ -54,6 +54,7 @@ export class OptimizationService {
     });
     const usable = snapshots.flatMap((snapshot) => {
       const post = snapshot.platformPost; const features = publishedFeatures(post.productionSnapshot);
+      if (!post.publishedAt || post.publicationState !== "PUBLISHED") return [];
       const cohort = observationCohortKey({ ...snapshot, platform: post.platform, publishedAt: post.publishedAt });
       if (!features || !cohort || features.sceneVersionId !== snapshot.sceneVersionId || features.scriptVersionId !== snapshot.scriptVersionId || isProtected(post.publishPlan.contentItem, settings)) return [];
       return [{ snapshot, features, cohort }];
@@ -174,7 +175,7 @@ export class OptimizationService {
         for (const plan of assignment.contentItem.publishPlans) {
           const post = plan.platformPost; const features = post ? publishedFeatures(post.productionSnapshot) : null;
           const featureExperiment = asRecord(features?.experiment ?? null);
-          if (!post || !features || features.platform !== platform || features.sceneVersionId !== plan.sceneVersionId || featureExperiment.assignmentKey !== assignment.assignmentKey || featureExperiment.compliant !== true || typeof target !== "number" || !durationCompliance(features.actualDurationSeconds, target, tolerance) || post.publishedAt < assignment.assignedAt || post.publishedAt > end) continue;
+          if (!post?.publishedAt || post.publicationState !== "PUBLISHED" || !features || features.platform !== platform || features.sceneVersionId !== plan.sceneVersionId || featureExperiment.assignmentKey !== assignment.assignmentKey || featureExperiment.compliant !== true || typeof target !== "number" || !durationCompliance(features.actualDurationSeconds, target, tolerance) || post.publishedAt < assignment.assignedAt || post.publishedAt > end) continue;
           for (const snapshot of post.analyticsSnapshots) {
             const cohort = observationCohortKey({ ...snapshot, platform: post.platform, publishedAt: post.publishedAt });
             if (cohort && snapshot.sceneVersionId === features.sceneVersionId && snapshot.scriptVersionId === features.scriptVersionId) records.push({ assignment, snapshot, features, cohort });

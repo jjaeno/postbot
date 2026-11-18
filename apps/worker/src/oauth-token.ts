@@ -1,9 +1,10 @@
 import { loadConfig } from "@postbot/config";
-import type { PrismaClient } from "@postbot/database";
-import { assertRequiredScopes, decryptOAuthToken, encryptOAuthToken, FakeInstagramPublisherProvider, FakeTikTokPublisherProvider, FakeYouTubePublisherProvider, GoogleYouTubePublisherProvider, MetaInstagramPublisherProvider, TikTokPublisherProvider, type PublisherProvider } from "@postbot/publishers";
+import { resolveSharedOAuthCredential, OAuthReauthenticationRequired, type PrismaClient } from "@postbot/database";
+import { OAuthRefreshError, OAuthScopeError, assertRequiredScopes, decryptOAuthToken, encryptOAuthToken, FakeInstagramPublisherProvider, FakeTikTokPublisherProvider, FakeYouTubePublisherProvider, GoogleYouTubePublisherProvider, MetaInstagramPublisherProvider, TikTokPublisherProvider, type PublisherProvider } from "@postbot/publishers";
 import { createHash } from "node:crypto";
 
 type AccountWithCredential = {
+  id: string;
   platform: "YOUTUBE" | "INSTAGRAM" | "TIKTOK";
   credential: {
     id: string;
@@ -33,34 +34,34 @@ const providerFor = (platform: AccountWithCredential["platform"]): PublisherProv
 export const resolveOAuthAccessToken = async (prisma: PrismaClient, account: AccountWithCredential): Promise<string> => {
   const config = loadConfig();
   const provider = providerFor(account.platform);
-  if (!account.credential) {
+  const latest = await prisma.platformAccount.findUnique({ where: { id: account.id }, include: { credential: true } });
+  if (!latest || latest.status !== "CONNECTED") throw new OAuthReauthenticationRequired();
+  if (!latest.credential) {
     if (provider.capabilities.provider === "fake") return "fake-access-token";
-    throw new Error("OAUTH_CREDENTIAL_REQUIRED");
+    await prisma.platformAccount.updateMany({ where: { id: account.id, status: "CONNECTED" }, data: { status: "EXPIRED" } });
+    throw new OAuthReauthenticationRequired();
   }
-  assertRequiredScopes(stringList(account.credential.scopes), provider.capabilities.requiredScopes);
   const previousKeys = config.OAUTH_ENCRYPTION_PREVIOUS_KEYS.split(",").map((key) => key.trim()).filter(Boolean);
-  const accessToken = decryptOAuthToken(account.credential.encryptedAccessToken, account.credential.tokenCipher, config.OAUTH_ENCRYPTION_KEY, previousKeys);
-  if (!account.credential.expiresAt || account.credential.expiresAt.getTime() > Date.now() + 5 * 60_000) return accessToken;
-  if (!account.credential.encryptedRefreshToken) throw new Error("OAUTH_REFRESH_TOKEN_MISSING");
-  if (!provider.refreshAccessToken) throw new Error("OAUTH_REFRESH_NOT_SUPPORTED");
-  const refreshToken = decryptOAuthToken(account.credential.encryptedRefreshToken, account.credential.tokenCipher, config.OAUTH_ENCRYPTION_KEY, previousKeys);
-  const refreshed = await provider.refreshAccessToken(refreshToken);
-  const scopes = refreshed.scopes.length > 0 || provider.capabilities.provider !== "google" ? refreshed.scopes : stringList(account.credential.scopes);
-  assertRequiredScopes(scopes, provider.capabilities.requiredScopes);
-  await prisma.oAuthCredential.update({
-    where: { id: account.credential.id },
-    data: {
-      encryptedAccessToken: encryptOAuthToken(refreshed.accessToken, config.OAUTH_ENCRYPTION_KEY),
-      encryptedRefreshToken: refreshed.refreshToken ? encryptOAuthToken(refreshed.refreshToken, config.OAUTH_ENCRYPTION_KEY) : account.credential.encryptedRefreshToken,
-      tokenCipher: "aes-256-gcm",
-      tokenKeyVersion: config.OAUTH_ENCRYPTION_KEY_VERSION,
-      scopes,
-      scopeHash: createScopeHash(scopes),
-      expiresAt: refreshed.expiresAt,
-      lastRefreshedAt: new Date()
+  const credential = await resolveSharedOAuthCredential(prisma, account.id, async (current) => {
+    if (!provider.refreshAccessToken || !current.encryptedRefreshToken) throw new OAuthReauthenticationRequired();
+    const refreshToken = decryptOAuthToken(current.encryptedRefreshToken, current.tokenCipher, config.OAUTH_ENCRYPTION_KEY, previousKeys);
+    try {
+      const refreshed = await provider.refreshAccessToken(refreshToken);
+      const scopes = refreshed.scopes.length > 0 || provider.capabilities.provider !== "google" ? refreshed.scopes : stringList(current.scopes);
+      assertRequiredScopes(scopes, provider.capabilities.requiredScopes);
+      return { encryptedAccessToken: encryptOAuthToken(refreshed.accessToken, config.OAUTH_ENCRYPTION_KEY), encryptedRefreshToken: refreshed.refreshToken ? encryptOAuthToken(refreshed.refreshToken, config.OAUTH_ENCRYPTION_KEY) : current.encryptedRefreshToken,
+        tokenCipher: "aes-256-gcm", tokenKeyVersion: config.OAUTH_ENCRYPTION_KEY_VERSION, scopes, scopeHash: createScopeHash(scopes), expiresAt: refreshed.expiresAt };
+    } catch (error) {
+      if (error instanceof OAuthScopeError || error instanceof OAuthRefreshError && error.reauthenticationRequired) throw new OAuthReauthenticationRequired();
+      throw new Error("OAUTH_REFRESH_TRANSIENT");
     }
-  });
-  return refreshed.accessToken;
+  }, { leaseMs: Math.max(60000, config.PROVIDER_HTTP_TIMEOUT_MS + 30000) });
+  try { assertRequiredScopes(stringList(credential.scopes), provider.capabilities.requiredScopes); }
+  catch {
+    await prisma.platformAccount.updateMany({ where: { id: account.id, status: "CONNECTED", credential: { credentialVersion: credential.credentialVersion } }, data: { status: "EXPIRED" } });
+    throw new OAuthReauthenticationRequired();
+  }
+  return decryptOAuthToken(credential.encryptedAccessToken, credential.tokenCipher, config.OAUTH_ENCRYPTION_KEY, previousKeys);
 };
 
 const createScopeHash = (scopes: readonly string[]): string => {
