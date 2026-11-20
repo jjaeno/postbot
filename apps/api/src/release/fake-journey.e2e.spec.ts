@@ -195,7 +195,7 @@ describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, 
     // Preserve their values, schedule recollection, and exclude them from advice.
     expect(suggestion).toMatchObject({ sampleSize: 0, status: "HELD", confidenceScore: null });
     expect(suggestion.targetStrategy).toBeNull();
-    expect(suggestion.evidence).toMatchObject({ excludedUnknownOrUnbound: 1, conclusion: "insufficient_comparable_sample_or_variation" });
+    expect(suggestion.evidence).toMatchObject({ excludedUnknownOrUnbound: 1, conclusion: "YOUTUBE_DERIVED_DATA_RESTRICTED", policyStatus: "YOUTUBE_DERIVED_DATA_RESTRICTED" });
 
     const stranger = new Session();
     AuthResponseSchema.parse(await stranger.json("/auth/register", { ...accountInput, email: `other-${suffix}@acceptance.test` }));
@@ -281,12 +281,17 @@ describe.skipIf(!enabled)("release: real HTTP + MySQL + BullMQ + S3 + renderer, 
     const posts = await prisma.platformPost.findMany({ where: { publishPlan: { contentItemId } } });
     expect(posts).toHaveLength(3);
     expect(new Set(posts.map((post) => post.externalPostId)).size).toBe(3);
-    expect(await prisma.analyticsSync.count({ where: { channelId: channel.id, idempotencyKey: { startsWith: `automation:${started.id}:` }, status: "PARTIAL", nextAttemptAt: { not: null } } })).toBe(3);
+    // Collection waits for an actual observation age. Advance isolated fixture
+    // publication times; the production scheduler must rebuild due work itself.
+    expect(await prisma.analyticsSync.count({ where: { channelId: channel.id, idempotencyKey: { startsWith: `automation:${started.id}:` } } })).toBe(0);
+    await prisma.platformPost.updateMany({ where: { id: { in: posts.map((post) => post.id) } }, data: { publishedAt: new Date(Date.now() - 8 * 86400000) } });
+    await expect.poll(() => prisma.analyticsSync.count({ where: { channelId: channel.id, OR: posts.map((post) => ({ idempotencyKey: { startsWith: `post:${post.id}:` } })) } }), { timeout: 30000 }).toBe(9);
+    await expect.poll(() => prisma.productionJob.count({ where: { channelId: channel.id, type: "ANALYTICS", status: "SUCCEEDED" } }), { timeout: 30000 }).toBe(9);
     expect(AutomationRunResponseSchema.parse(await session.json("/automation/runs", input)).id).toBe(started.id);
     expect(await prisma.platformPost.count({ where: { publishPlan: { contentItemId } } })).toBe(3);
     const period = { periodStart: new Date(Date.now() - 86_400_000).toISOString(), periodEnd: new Date(Date.now() + 86_400_000).toISOString() };
     const suggestion = OptimizationSuggestionResponseSchema.parse(await session.json("/optimization/suggestions/generate", { channelId: channel.id, platform: "YOUTUBE", metric: "views", ...period, idempotencyKey: `optimization:${started.id}` }));
-    expect(suggestion).toMatchObject({ sampleSize: 0, status: "HELD", targetStrategy: null, confidenceScore: null });
+    expect(suggestion).toMatchObject({ sampleSize: 1, status: "HELD", targetStrategy: null, confidenceScore: null, evidence: { policyStatus: "YOUTUBE_DERIVED_DATA_RESTRICTED" } });
     process.stdout.write(`LOCAL_BASELINE ${JSON.stringify({ flow: mode.toLowerCase(), timings: { schedulerObservedMs: await schedulerObservation, totalMs: Math.round(performance.now() - flowStartedAt) } })}\n`);
   }, 900_000);
 });

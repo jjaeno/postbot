@@ -1,0 +1,11 @@
+[Unit]
+Description=Postbot daily encrypted backup
+
+[Timer]
+OnCalendar=*-*-* 02:10:00 UTC
+RandomizedDelaySec=10m
+Persistent=true
+Unit=postbot-backup.service
+
+[Install]
+WantedBy=timers.target

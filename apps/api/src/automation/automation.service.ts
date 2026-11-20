@@ -1,3 +1,5 @@
+import { hasHttpsVisualReference } from "@postbot/contracts";
+import { monitorOperations } from "../operations/business-health.js";
 import { scheduleAnalysis } from "../optimization/schedule-analysis.js";
 import { estimateLlmInputTokens } from "@postbot/providers";
 import { normalizeNarration } from "@postbot/scene-schema";
@@ -177,6 +179,8 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     }
     const selectedIdea = input.ideaId ? await this.prisma.contentIdea.findFirst({ where: { id: input.ideaId, channelId: channel.id, channel: { workspaceId } } }) : null;
     if (input.ideaId && !selectedIdea) throw new NotFoundException("CONTENT_IDEA_NOT_FOUND");
+    const selectionProfile = ChannelCollectionProfileSchema.safeParse(channel.collectionRules[0]?.profile);
+    if (selectedIdea && selectionProfile.success && selectionProfile.data.production.requireVisualEvidence && !hasHttpsVisualReference(selectedIdea.rawSnapshot)) throw new ConflictException("VISUAL_REFERENCE_REQUIRED");
 
     const blockedPlatforms = new Map<Platform, string>();
     if (!input.sample) for (const platform of platforms) {
@@ -1109,6 +1113,8 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     ]);
   }
 
+  private monitorCursor: string | null = null;
+  private nextMonitorAt = 0;
   private analysisCursor: string | null = null;
 
   private async scheduleDueRuns(): Promise<void> {
@@ -1116,6 +1122,10 @@ export class AutomationService implements OnModuleInit, OnModuleDestroy {
     this.scheduling = true;
     try {
     const now = new Date();
+    if (Date.now() >= this.nextMonitorAt) {
+      this.nextMonitorAt = Date.now() + 60000;
+      this.monitorCursor = await monitorOperations(this.prisma, this.operations, now, this.monitorCursor);
+    }
     await this.settleKnownReservations();
     this.publicationCursor = await schedulePublicationConfirmations(this.prisma, this.jobs, now, this.publicationCursor);
     await scheduleAnalytics(this.prisma, this.jobs, now);

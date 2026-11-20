@@ -30,6 +30,7 @@ export type JobsRepository = JobWorkerRepository & {
   createOrFind(workspaceId: string, input: CreateJobRecordInput): Promise<CreateJobRecordResult>;
   findForWorkspace(workspaceId: string, jobId: string): Promise<ProductionJobResponse | null>;
   requestCancel(workspaceId: string, jobId: string): Promise<ProductionJobResponse | null>;
+  canRecoverKnownResult?(workspaceId: string, jobId: string): Promise<boolean>;
   recover(workspaceId: string, jobId: string, runAfter: Date | null): Promise<ProductionJobResponse | null>;
   toProgressEvent(job: ProductionJobResponse): JobProgressEvent;
 };

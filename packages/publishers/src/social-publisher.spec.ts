@@ -5,6 +5,20 @@ const upload = { title: "Postbot", description: "AI generated explainer", privac
 const requestUrl = (input: URL | RequestInfo): string => typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
 
 describe("MetaInstagramPublisherProvider", () => {
+  it("verifies native ownership and keeps tokens out of lookup URLs", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ id: "media-1", owner: { id: "account-1" }, timestamp: "2026-11-18T00:00:00Z" }));
+    const provider = new MetaInstagramPublisherProvider({ clientId: "fixture", clientSecret: "fixture", fetchImplementation });
+    expect(await provider.getPublicationStatus("media-1", "fixture-token", "account-1")).toMatchObject({ status: "published", publishedAt: "2026-11-18T00:00:00Z" });
+    const call = fetchImplementation.mock.calls[0];
+    expect(requestUrl(call?.[0] ?? "")).not.toContain("fixture-token");
+    expect(new Headers(call?.[1]?.headers).get("authorization")).toBe("OAuth fixture-token");
+    fetchImplementation.mockResolvedValueOnce(Response.json({ id: "media-1", owner: { id: "foreign" } }));
+    await expect(provider.getPublicationStatus("media-1", "fixture-token", "account-1")).rejects.toThrow("PUBLICATION_ACCOUNT_OR_ID_MISMATCH");
+    fetchImplementation.mockResolvedValueOnce(Response.json({ id: "media-1" }));
+    await expect(provider.getPublicationStatus("media-1", "fixture-token", "account-1")).rejects.toThrow("PUBLICATION_ACCOUNT_OR_ID_MISMATCH");
+    fetchImplementation.mockResolvedValueOnce(Response.json({}, { status: 401 }));
+    await expect(provider.getPublicationStatus("media-1", "fixture-token", "account-1")).rejects.toMatchObject({ reauthenticationRequired: true });
+  });
   it("rejects visibility settings the adapter cannot honor before sending HTTP", async () => {
     const fetchImplementation = vi.fn<typeof fetch>();
     const provider = new MetaInstagramPublisherProvider({ clientId: "fixture", clientSecret: "fixture", fetchImplementation });
@@ -28,7 +42,7 @@ describe("MetaInstagramPublisherProvider", () => {
       if (url.includes("rupload.facebook.com")) return Promise.resolve(Response.json({ success: true }));
       if (url.includes("container-1?")) return Promise.resolve(Response.json({ status_code: "FINISHED" }));
       if (url.endsWith("/media_publish")) return Promise.resolve(Response.json({ id: "media-1" }));
-      if (url.includes("/media-1?")) return Promise.resolve(Response.json({ id: "media-1", permalink: "https://www.instagram.com/reel/example", timestamp: "2026-09-29T00:00:00Z" }));
+      if (url.includes("/media-1?")) return Promise.resolve(Response.json({ id: "media-1", owner: { id: "account-1" }, permalink: "https://www.instagram.com/reel/example", timestamp: "2026-09-29T00:00:00Z" }));
       throw new Error(`Unexpected request: ${url}`);
     });
     const provider = new MetaInstagramPublisherProvider({ clientId: "client", clientSecret: "secret", fetchImplementation, pollIntervalMs: 1 });

@@ -47,6 +47,10 @@ describe("YouTube upload safety", () => {
     const fetchImplementation = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ items: [{ id: "video-1", snippet: { channelId: "foreign" }, status: { uploadStatus: "processed", privacyStatus: "public" } }] }));
     await expect(new GoogleYouTubePublisherProvider("fixture", "fixture", { fetchImplementation }).getPublicationStatus("video-1", "fixture", "owner")).rejects.toThrow("PUBLICATION_ACCOUNT_OR_ID_MISMATCH");
   });
+  it("does not confirm an upcoming premiere as already public", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ items: [{ id: "video-1", snippet: { channelId: "owner", publishedAt: "2099-01-01T00:00:00Z", liveBroadcastContent: "upcoming" }, status: { uploadStatus: "processed", privacyStatus: "public" }, processingDetails: { processingStatus: "succeeded" } }] }));
+    expect(await new GoogleYouTubePublisherProvider("fixture", "fixture", { fetchImplementation }).getPublicationStatus("video-1", "fixture", "owner")).toMatchObject({ status: "processing", publishedAt: null });
+  });
 });
 
 describe.each([["Instagram", new FakeInstagramPublisherProvider(), instagramPublishScope], ["TikTok", new FakeTikTokPublisherProvider(), tiktokPublishScope]] as const)("%s Fake Publisher", (_name, provider, scope) => {

@@ -1,3 +1,4 @@
+import { collectionProfilePreset } from "@postbot/contracts";
 import { PrismaClient } from "@postbot/database";
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -22,6 +23,18 @@ suite("scheduler and manual start concurrency", () => {
     });
   });
   afterAll(() => prisma.$disconnect());
+  it("enforces visual evidence for manually selected profile ideas before paid work", async () => {
+    vi.stubEnv("ENABLED_PLATFORMS", "youtube"); const key = randomUUID();
+    const user = await prisma.user.create({ data: { email: `${key}@manual-visual.test`, displayName: "Fixture", passwordHash: "fixture" } });
+    const workspace = await prisma.workspace.create({ data: { ownerId: user.id, name: "Fixture", slug: key } });
+    const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Fixture", slug: key, outputProfiles: { create: { platform: "YOUTUBE", minDurationSeconds: 35, maxDurationSeconds: 55 } }, collectionRules: { create: { profile: collectionProfilePreset("SCIENCE", "en"), recencyHours: 72, collectionFrequencyMinutes: 360, keywords: [], excludedKeywords: [], allowedSources: [], excludedSources: [] } } } });
+    const idea = await prisma.contentIdea.create({ data: { channelId: channel.id, title: "Fixture", canonicalUrl: "https://example.com/fixture", urlHash: key, contentHash: key, sourceName: "Fixture", sourceKind: "OFFICIAL", provider: "fixture", suitabilityScore: 1, freshnessScore: 1, reliabilityScore: 1, expectedValueScore: 1, rawSnapshot: { body: "Fixture without visual evidence" } } });
+    const queue: QueueAdapter = { enqueue: () => Promise.resolve(), cancel: () => Promise.resolve(), close: () => Promise.resolve() };
+    const service = new AutomationService(prisma, new JobsService(new PrismaJobsRepository(prisma), queue), {} as OperationsService);
+    await expect(service.start(workspace.id, { channelId: channel.id, ideaId: idea.id, idempotencyKey: key })).rejects.toThrow("VISUAL_REFERENCE_REQUIRED");
+    expect(await prisma.productionJob.count({ where: { channelId: channel.id } })).toBe(0);
+    expect(await prisma.providerUsage.count({ where: { contentItem: { channelId: channel.id } } })).toBe(0);
+  });
   it("holds only the affected account branch before paid production", async () => {
     vi.stubEnv("ENABLED_PLATFORMS", "youtube,instagram");
     const key = randomUUID();

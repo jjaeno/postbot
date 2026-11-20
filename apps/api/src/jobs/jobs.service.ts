@@ -79,7 +79,7 @@ export class JobsService {
   async recover(workspaceId: string, jobId: string, rawInput: unknown): Promise<ProductionJobResponse> {
     const input = RecoverProductionJobRequestSchema.parse(rawInput) satisfies RecoverProductionJobRequest;
     const previous = await this.get(workspaceId, jobId);
-    if (previous.result?.reconciliationRequired === true || previous.errorCode?.includes("RECONCILIATION_REQUIRED")) {
+    if ((previous.result?.reconciliationRequired === true || previous.errorCode?.includes("RECONCILIATION_REQUIRED")) && !await this.repository.canRecoverKnownResult?.(workspaceId, jobId)) {
       throw new ConflictException({ code: "RECONCILIATION_REQUIRED", message: "Confirm the provider outcome and billing or published post before recovery. Ordinary retry is blocked." });
     }
     const job = await this.repository.recover(workspaceId, jobId, parseRunAfter(input.runAfter));

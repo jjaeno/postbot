@@ -1,3 +1,4 @@
+import { channelBusinessHealth } from "./business-health.js";
 import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, OnModuleDestroy } from "@nestjs/common";
 import { Prisma, type PrismaClient } from "@postbot/database";
 import { AuditLogResponseSchema, CostReportQuerySchema, CostReportResponseSchema, CreateDataLifecycleRequestSchema, DataLifecycleRequestResponseSchema, NotificationResponseSchema, type AuditLogResponse, type CostReportResponse, type DataLifecycleRequestResponse, type NotificationResponse } from "@postbot/contracts";
@@ -35,6 +36,11 @@ export class OperationsService implements OnModuleDestroy {
 
   onModuleDestroy(): Promise<void> {
     return this.maintenanceQueue.close();
+  }
+
+  async businessHealth(workspaceId: string, channelId: string) {
+    try { return await channelBusinessHealth(this.prisma, workspaceId, channelId); }
+    catch (error) { if (error instanceof Error && error.message === "CHANNEL_NOT_FOUND") throw new NotFoundException("CHANNEL_NOT_FOUND"); throw error; }
   }
 
   async costReport(workspaceId: string, raw: unknown): Promise<CostReportResponse> {
@@ -155,6 +161,12 @@ export class OperationsService implements OnModuleDestroy {
       const sameIntent = existing.workspaceId === workspaceId && existing.requestedByUserId === userId && existing.type === input.type &&
         (existing.retentionBefore?.toISOString() ?? null) === (input.retentionBefore ?? null);
       if (!sameIntent) throw new ConflictException("IDEMPOTENCY_CONFLICT");
+      if (existing.status === "FAILED") {
+        await this.prisma.dataLifecycleRequest.updateMany({ where: { id: existing.id, status: "FAILED" }, data: { status: "QUEUED", errorCode: null, errorMessage: null, finishedAt: null } });
+        try { await this.maintenanceQueue.enqueue({ requestId: existing.id }); }
+        catch (error) { await this.prisma.dataLifecycleRequest.updateMany({ where: { id: existing.id, status: "QUEUED" }, data: { status: "FAILED", errorCode: "QUEUE_UNAVAILABLE" } }); throw error; }
+        return lifecycleResponse(await this.prisma.dataLifecycleRequest.findUniqueOrThrow({ where: { id: existing.id } }), true);
+      }
       return lifecycleResponse(existing, true);
     }
     const request = await this.prisma.dataLifecycleRequest.create({

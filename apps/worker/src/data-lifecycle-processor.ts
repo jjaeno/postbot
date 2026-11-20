@@ -1,3 +1,6 @@
+import { auditStorage } from "./storage-audit.js";
+import { cleanupRenderTemps } from "./temp-cleanup.js";
+import { applySafeRetention } from "./retention.js";
 import { loadConfig } from "@postbot/config";
 import { Prisma, type PrismaClient } from "@postbot/database";
 import { FakeStorageProvider, S3StorageProvider, type StorageProvider } from "@postbot/providers";
@@ -37,35 +40,12 @@ export class DataLifecycleProcessor {
     }
   }
 
-  private async applyRetention(workspaceId: string | null, before: Date | null): Promise<Record<string, number>> {
+  private async applyRetention(workspaceId: string | null, before: Date | null): Promise<Prisma.InputJsonObject> {
     if (!workspaceId || !before) throw new Error("RETENTION_SCOPE_REQUIRED");
-    const channels = await this.prisma.channel.findMany({ where: { workspaceId }, select: { id: true } });
-    const channelIds = channels.map(({ id }) => id);
-    const [scenes, assets, oldJobs] = await Promise.all([
-      this.prisma.sceneVersion.findMany({ where: { contentItem: { channelId: { in: channelIds } }, createdAt: { lt: before }, renderManifest: { not: Prisma.DbNull } }, select: { id: true, renderManifest: true } }),
-      this.prisma.asset.findMany({ where: { channelId: { in: channelIds }, createdAt: { lt: before }, usages: { none: {} } }, select: { id: true, storageKey: true } }),
-      this.prisma.productionJob.findMany({ where: { channelId: { in: channelIds }, status: { in: ["SUCCEEDED", "FAILED", "CANCELLED"] }, finishedAt: { lt: before } }, select: { id: true } })
-    ]);
-    const storageKeys = unique([...assets.map(({ storageKey }) => storageKey), ...scenes.flatMap(({ renderManifest }) => objectKeysFromManifest(renderManifest))]);
-    for (const key of storageKeys) await this.storage.delete(key);
-    const jobIds = oldJobs.map(({ id }) => id);
-    const result = await this.prisma.$transaction(async (tx) => {
-      const attempts = await tx.jobAttempt.deleteMany({ where: { productionJobId: { in: jobIds } } });
-      const jobs = await tx.productionJob.deleteMany({ where: { id: { in: jobIds } } });
-      const assetIds = assets.map(({ id }) => id);
-      await tx.assetSource.deleteMany({ where: { assetId: { in: assetIds } } });
-      await tx.assetLicense.deleteMany({ where: { assetId: { in: assetIds } } });
-      await tx.assetGenerationCache.deleteMany({ where: { OR: [{ channelId: { in: channelIds } }, { assetId: { in: assetIds } }] } });
-      await tx.providerRightsPolicy.deleteMany({ where: { channelId: { in: channelIds } } });
-      const removedAssets = await tx.asset.deleteMany({ where: { id: { in: assetIds } } });
-      const renderManifests = await tx.sceneVersion.updateMany({ where: { id: { in: scenes.map(({ id }) => id) } }, data: { renderManifest: Prisma.DbNull } });
-      const oauthStates = await tx.oAuthConnectionState.deleteMany({ where: { workspaceId, expiresAt: { lt: before } } });
-      const authSessions = await tx.authSession.deleteMany({ where: { workspaceId, expiresAt: { lt: before } } });
-      const notifications = await tx.notification.deleteMany({ where: { workspaceId, acknowledgedAt: { not: null, lt: before } } });
-      const ideaSnapshots = await tx.contentIdea.updateMany({ where: { channelId: { in: channelIds }, collectedAt: { lt: before } }, data: { rawSnapshot: Prisma.DbNull } });
-      return { attempts: attempts.count, jobs: jobs.count, assets: removedAssets.count, renderManifests: renderManifests.count, oauthStates: oauthStates.count, authSessions: authSessions.count, notifications: notifications.count, ideaSnapshots: ideaSnapshots.count, storageObjects: storageKeys.length };
-    });
-    return result;
+    const retention = await applySafeRetention(this.prisma, this.storage, workspaceId, before);
+    const audit = await auditStorage(this.prisma, this.storage, workspaceId);
+    const temporary = await cleanupRenderTemps(this.prisma);
+    return { ...retention, audit, temporary };
   }
 
   private async deleteUser(userId: string | null): Promise<Record<string, number>> {
@@ -86,13 +66,28 @@ export class DataLifecycleProcessor {
     if (!workspaceId) throw new Error("WORKSPACE_SCOPE_REQUIRED");
     const channels = await this.prisma.channel.findMany({ where: { workspaceId }, select: { id: true } });
     const channelIds = channels.map(({ id }) => id);
+    await this.prisma.$transaction(async (tx) => {
+      await tx.channel.updateMany({ where: { id: { in: channelIds } }, data: { status: "PAUSED" } });
+      await tx.platformAccount.updateMany({ where: { workspaceId }, data: { status: "DISCONNECTED", disconnectedAt: new Date() } });
+      await tx.automationRun.updateMany({ where: { channelId: { in: channelIds }, status: { notIn: ["SUCCEEDED", "CANCELLED"] } }, data: { status: "CANCELLED" } });
+      await tx.productionJob.updateMany({ where: { channelId: { in: channelIds }, status: { in: ["QUEUED", "RETRY_WAIT"] } }, data: { status: "CANCELLED", finishedAt: new Date() } });
+      await tx.productionJob.updateMany({ where: { channelId: { in: channelIds }, status: "RUNNING" }, data: { status: "CANCEL_REQUESTED" } });
+    });
+    if (await this.prisma.productionJob.count({ where: { channelId: { in: channelIds }, status: { in: ["RUNNING", "CANCEL_REQUESTED"] } } })) throw new Error("ACTIVE_WORK_DELETION_WAIT_REQUIRED");
+    if (await this.prisma.asset.count({ where: { channelId: { in: channelIds }, usages: { some: { contentItem: { channel: { workspaceId: { not: workspaceId } } } } } } })) throw new Error("CROSS_WORKSPACE_ASSET_REFERENCE_REVIEW_REQUIRED");
     const content = await this.prisma.contentItem.findMany({ where: { channelId: { in: channelIds } }, select: { id: true } });
     const contentIds = content.map(({ id }) => id);
     const [assets, scenes] = await Promise.all([
-      this.prisma.asset.findMany({ where: { OR: [{ channelId: { in: channelIds } }, { usages: { some: { contentItemId: { in: contentIds } } } }] }, select: { id: true, storageKey: true } }),
+      this.prisma.asset.findMany({ where: { channelId: { in: channelIds } }, select: { id: true, storageKey: true } }),
       this.prisma.sceneVersion.findMany({ where: { contentItemId: { in: contentIds } }, select: { id: true, renderManifest: true } })
     ]);
-    const storageKeys = unique([...assets.map(({ storageKey }) => storageKey), ...scenes.flatMap(({ renderManifest }) => objectKeysFromManifest(renderManifest))]);
+    await this.prisma.$transaction(async (tx) => {
+      for (const scene of scenes) if (scene.renderManifest) await tx.storageDeletion.upsert({ where: { kind_resourceId: { kind: "OWNER_DELETE_RENDER", resourceId: scene.id } }, update: {}, create: { workspaceId, channelId: channelIds[0] ?? "deleted", resourceId: scene.id, kind: "OWNER_DELETE_RENDER", objectKeys: objectKeysFromManifest(scene.renderManifest), snapshot: scene.renderManifest } });
+      await tx.sceneVersion.updateMany({ where: { id: { in: scenes.map((scene) => scene.id) } }, data: { retentionState: "MARKED", renderManifest: Prisma.DbNull } });
+      await tx.asset.updateMany({ where: { id: { in: assets.map((asset) => asset.id) } }, data: { retentionState: "MARKED" } });
+    });
+    const pending = await this.prisma.storageDeletion.findMany({ where: { workspaceId }, select: { objectKeys: true } });
+    const storageKeys = unique([...assets.map(({ storageKey }) => storageKey), ...pending.flatMap((task) => Array.isArray(task.objectKeys) ? task.objectKeys.filter((key): key is string => typeof key === "string") : [])]);
     for (const key of storageKeys) await this.storage.delete(key);
     await this.prisma.$transaction(async (tx) => {
       const jobs = await tx.productionJob.findMany({ where: { OR: [{ channelId: { in: channelIds } }, { contentItemId: { in: contentIds } }] }, select: { id: true } });
@@ -135,6 +130,9 @@ export class DataLifecycleProcessor {
       await tx.assetUsage.deleteMany({ where: { OR: [{ contentItemId: { in: contentIds } }, { assetId: { in: assetIds } }] } });
       await tx.assetSource.deleteMany({ where: { assetId: { in: assetIds } } });
       await tx.assetLicense.deleteMany({ where: { assetId: { in: assetIds } } });
+      await tx.assetGenerationCache.deleteMany({ where: { channelId: { in: channelIds } } });
+      await tx.providerRightsPolicy.deleteMany({ where: { channelId: { in: channelIds } } });
+      await tx.storageDeletion.deleteMany({ where: { workspaceId } });
       await tx.asset.deleteMany({ where: { id: { in: assetIds } } });
       await tx.sceneVersion.deleteMany({ where: { contentItemId: { in: contentIds } } });
       await tx.scriptVersion.deleteMany({ where: { contentItemId: { in: contentIds } } });

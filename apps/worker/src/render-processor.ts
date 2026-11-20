@@ -1,5 +1,5 @@
 import { durationCompliance } from "@postbot/optimization";
-import { jobExecution, assertExecutionOwner } from "@postbot/database";
+import { Prisma as PrismaRuntime, jobExecution, assertExecutionOwner } from "@postbot/database";
 import { loadConfig } from "@postbot/config";
 import { readAssetUsagePurpose, AssetRepository, assetNeedsReview } from "@postbot/asset-library";
 import { RenderJobPayloadSchema } from "@postbot/contracts";
@@ -7,7 +7,7 @@ import type { Prisma, PrismaClient } from "@postbot/database";
 import { FakeStorageProvider, S3StorageProvider, type StorageProvider } from "@postbot/providers";
 import { inspectTechnicalQuality, splitDisplayCaptions, RenderQualityReviewError, textUnits, FfmpegPostProcessor, RemotionVideoRenderer, type FfprobeResult, type VideoRenderer } from "@postbot/renderer";
 import { readFile, rm, writeFile, mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, hostname } from "node:os";
 import { join } from "node:path";
 import type { CaptionTiming } from "@postbot/renderer";
 import { retimeNarration, SceneDocumentSchema, VideoStyleSchema, SpeechNormalizationSchema, displayTimingsFromSpeech } from "@postbot/scene-schema";
@@ -58,8 +58,28 @@ export class RenderProcessor {
   async process(payload: Record<string, unknown>, jobId: string): Promise<Record<string, unknown>> {
     const input = RenderJobPayloadSchema.parse(payload).render;
     const sceneVersion = await this.prisma.sceneVersion.findFirstOrThrow({ where: { id: input.sceneVersionId, contentItemId: input.contentItemId } });
+    if (sceneVersion.retentionState !== "ACTIVE") throw new Error("RENDER_RETENTION_OR_RESTORE_REQUIRED");
     const previous = sceneVersion.renderManifest;
     if (previous && typeof previous === "object" && !Array.isArray(previous) && (previous as Record<string, unknown>).idempotencyKey === input.idempotencyKey) {
+      const videoKey = previous.videoKey; const thumbnailKey = previous.thumbnailKey;
+      try {
+        if (typeof videoKey !== "string") throw new Error("MISSING_VIDEO_KEY");
+        for (const key of [videoKey, ...(typeof thumbnailKey === "string" ? [thumbnailKey] : [])]) {
+          if (this.storage.inspect) { const object = await this.storage.inspect(key); if (!object.exists || object.sizeBytes === 0) throw new Error("STORAGE_OBJECT_NOT_FOUND"); }
+          else await this.storage.download(key);
+        }
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== "STORAGE_OBJECT_NOT_FOUND") throw new Error("RENDER_STORAGE_CHECK_UNAVAILABLE");
+        await this.prisma.$transaction(async (tx) => {
+          await assertExecutionOwner(tx);
+          const content = await tx.contentItem.findUniqueOrThrow({ where: { id: sceneVersion.contentItemId } });
+          const channel = await tx.channel.findUniqueOrThrow({ where: { id: content.channelId } });
+          await tx.storageDeletion.upsert({ where: { kind_resourceId: { kind: "RENDER", resourceId: sceneVersion.id } }, update: { state: "MISSING", snapshot: previous }, create: { workspaceId: channel.workspaceId, channelId: channel.id, kind: "RENDER", resourceId: sceneVersion.id, state: "MISSING", objectKeys: [videoKey, thumbnailKey].filter((key): key is string => typeof key === "string"), snapshot: previous } });
+          await tx.sceneVersion.update({ where: { id: sceneVersion.id }, data: { retentionState: "MISSING", renderManifest: PrismaRuntime.DbNull } });
+          await tx.contentItem.updateMany({ where: { id: content.id, status: { not: "PUBLISHED" } }, data: { status: "HELD" } });
+        });
+        throw new Error("RENDER_OBJECT_MISSING_RESTORE_REQUIRED");
+      }
       return previous;
     }
     let sceneDocument = SceneDocumentSchema.parse(sceneVersion.sceneDocument);
@@ -106,6 +126,7 @@ export class RenderProcessor {
     }
     let expectedDuration = sceneDocument.durationInFrames / sceneDocument.fps;
     const directory = await mkdtemp(join(tmpdir(), `postbot-render-${jobId}-`));
+    await writeFile(join(directory, ".postbot-owner.json"), JSON.stringify({ jobId, token: jobExecution.getStore()?.token ?? null, pid: process.pid, hostname: hostname(), startedAt: new Date().toISOString() }));
     try {
       const draftPath = join(directory, "draft.mp4");
       const outputPath = join(directory, "output.mp4");
@@ -143,11 +164,13 @@ export class RenderProcessor {
       const artifactId = jobExecution.getStore()?.token ?? jobId;
       const videoKey = `renders/${input.contentItemId}/${jobId}/${artifactId}.mp4`;
       const thumbnailKey = `renders/${input.contentItemId}/${jobId}/${artifactId}.jpg`;
-      await this.storage.upload({ key: videoKey, body: await readFile(outputPath), mimeType: "video/mp4" });
-      await this.storage.upload({ key: thumbnailKey, body: await readFile(thumbnailPath), mimeType: "image/jpeg" });
+      const videoObject = await this.storage.upload({ key: videoKey, body: await readFile(outputPath), mimeType: "video/mp4" });
+      const thumbnailObject = await this.storage.upload({ key: thumbnailKey, body: await readFile(thumbnailPath), mimeType: "image/jpeg" });
       const styleSnapshot = VideoStyleSchema.parse(sceneDocument.style ?? {});
       const voice = object(narration?.usageSnapshot);
+      const editorialContent = await this.prisma.contentItem.findUniqueOrThrow({ where: { id: sceneVersion.contentItemId }, select: { title: true, topicKey: true } });
       const productionFeatures = {
+        topic: editorialContent,
         version: "published-features-v1", sceneVersionId: sceneVersion.id, scriptVersionId: sceneVersion.scriptVersionId,
         actualDurationSeconds: qa.durationSeconds, rendererVersion: rendered.rendererVersion,
         hookType: script?.hook.includes("?") || script?.hook.includes("\uFF1F") ? "QUESTION" : script?.hook && /\d/.test(script.hook) ? "NUMERIC_RESULT" : "STATEMENT",
@@ -164,8 +187,8 @@ export class RenderProcessor {
         technicalQuality,
         productionFeatures,
         schemaVersion: sceneDocument.schemaVersion,
-        videoKey,
-        thumbnailKey,
+        videoKey, videoChecksumSha256: videoObject.checksumSha256,
+        thumbnailKey, thumbnailChecksumSha256: thumbnailObject.checksumSha256,
         captions: displayCaptions.length,
         sceneAssets: Object.keys(sceneAssets),
         style: sceneDocument.style ?? null,

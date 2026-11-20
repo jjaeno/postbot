@@ -158,6 +158,7 @@ await test("held metadata plan cancels, reapproves and publishes the latest titl
   const replacement = await publishing.schedule(f.workspace.id, { ...request, idempotencyKey: randomUUID() });
   const publisher = new PublishProcessor(prisma, storage);
   assert.equal((await publisher.process({ publish: { publishPlanId: old.id } })).cancelled, true);
+  await prisma.publishPlan.update({ where: { id: replacement.id }, data: { scheduledAt: new Date(Date.now() - 1000) } });
   await publisher.process({ publish: { publishPlanId: replacement.id } });
   assert.equal((await publisher.process({ publish: { publishPlanId: replacement.id } })).duplicate, true);
   assert.equal(await prisma.platformPost.count({ where: { publishPlanId: replacement.id } }), 1);

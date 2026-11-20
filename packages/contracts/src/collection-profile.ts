@@ -37,3 +37,12 @@ export const collectionProfilePreset = (kind: "HISTORY" | "SCIENCE" | "IT", lang
   production: { maxEstimatedCostUsd: "1.00", minSeconds: 30, maxSeconds: 60, requireVisualEvidence: true }
 });
 export const ResearchQuestionInputSchema = z.object({ question: z.string().trim().min(5).max(1000), subtopic: z.string().trim().min(1).max(200), origin: z.enum(["AUDIENCE", "EDITORIAL", "AI_HYPOTHESIS"]), idempotencyKey: z.string().min(1).max(120) }).strict();
+
+export function hasHttpsVisualReference(value: unknown): boolean {
+  const record = (input: unknown): Record<string, unknown> => input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  const snapshot = record(value); const media = record(snapshot.visualReferences ?? record(snapshot.reliability).media);
+  return (Array.isArray(media.references) ? media.references : []).some((reference) => {
+    const url = typeof reference === "string" ? reference : record(reference).url; if (typeof url !== "string") return false;
+    try { return new URL(url).protocol === "https:"; } catch { return false; }
+  });
+}

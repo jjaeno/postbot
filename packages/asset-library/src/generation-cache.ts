@@ -31,7 +31,7 @@ export async function cachedGeneration(prisma: PrismaClient, storage: StoragePro
     const snapshot = claim.row.snapshot;
     if (!claim.row.assetId || !snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) throw new Error("ASSET_CACHE_RECEIPT_INVALID");
     const asset = await prisma.asset.findFirst({ where: { id: claim.row.assetId, channelId: input.channelId } });
-    if (!asset) throw new Error("ASSET_CACHE_REFERENCE_MISSING");
+    if (!asset || asset.retentionState !== "ACTIVE") throw new Error("ASSET_CACHE_REFERENCE_MISSING_OR_RESTORE_REQUIRED");
     try { await storage.download(asset.storageKey); } catch { throw new Error("ASSET_CACHE_OBJECT_MISSING_RESTORE_OR_RECONCILE"); }
     return { assetId: asset.id, snapshot: { ...snapshot, reuseReason: "EXACT_PROVIDER_INPUT_CACHE", cacheInputKey: input.inputKey } };
   }

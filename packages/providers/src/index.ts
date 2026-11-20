@@ -727,10 +727,15 @@ export interface StorageProvider {
   download(key: string): Promise<Uint8Array>;
   delete(key: string): Promise<void>;
   presignedUrl(key: string, expiresInSeconds: number): Promise<string>;
+  inspect?(key: string): Promise<{ exists: boolean; sizeBytes: number | null }>;
+  list?(prefix: string, cursor?: string): Promise<{ keys: string[]; nextCursor: string | null }>;
 }
 
 export class FakeStorageProvider implements StorageProvider {
   private readonly objects = new Map<string, { body: Uint8Array; mimeType: string }>();
+  inspect(key: string): Promise<{ exists: boolean; sizeBytes: number | null }> { const value = this.objects.get(key); return Promise.resolve({ exists: Boolean(value), sizeBytes: value?.body.byteLength ?? null }); }
+  list(prefix: string, cursor?: string): Promise<{ keys: string[]; nextCursor: string | null }> { const values = [...this.objects.keys()].filter((key) => key.startsWith(prefix) && (!cursor || key > cursor)).sort(); const keys = values.slice(0, 100); return Promise.resolve({ keys, nextCursor: values.length > 100 ? keys.at(-1) ?? null : null }); }
+
 
   upload(input: { key: string; body: Uint8Array; mimeType: string }): Promise<StorageObject> {
     const body = new Uint8Array(input.body);
@@ -752,6 +757,11 @@ export class FakeStorageProvider implements StorageProvider {
 export class S3StorageProvider implements StorageProvider {
   private readonly client: S3Client;
   constructor(private readonly options: { endpoint: string; region: string; bucket: string; accessKeyId: string; secretAccessKey: string }) { this.client = new S3Client({ endpoint: options.endpoint, region: options.region, forcePathStyle: true, credentials: { accessKeyId: options.accessKeyId, secretAccessKey: options.secretAccessKey } }); }
+  async inspect(key: string): Promise<{ exists: boolean; sizeBytes: number | null }> {
+    try { const result = await this.client.send(new HeadObjectCommand({ Bucket: this.options.bucket, Key: key })); return { exists: true, sizeBytes: result.ContentLength ?? null }; }
+    catch (error) { if (error && typeof error === "object" && "$metadata" in error && error.$metadata && typeof error.$metadata === "object" && "httpStatusCode" in error.$metadata && error.$metadata.httpStatusCode === 404) return { exists: false, sizeBytes: null }; throw error; }
+  }
+  async list(prefix: string, cursor?: string): Promise<{ keys: string[]; nextCursor: string | null }> { const result = await this.client.send(new ListObjectsV2Command({ Bucket: this.options.bucket, Prefix: prefix, ContinuationToken: cursor, MaxKeys: 100 })); return { keys: (result.Contents ?? []).flatMap((item) => item.Key ? [item.Key] : []), nextCursor: result.NextContinuationToken ?? null }; }
   async upload(input: { key: string; body: Uint8Array; mimeType: string }): Promise<StorageObject> { await this.client.send(new PutObjectCommand({ Bucket: this.options.bucket, Key: input.key, Body: input.body, ContentType: input.mimeType })); return { key: input.key, checksumSha256: createHash("sha256").update(input.body).digest("hex"), mimeType: input.mimeType, sizeBytes: input.body.byteLength }; }
   async download(key: string): Promise<Uint8Array> { const result = await this.client.send(new GetObjectCommand({ Bucket: this.options.bucket, Key: key })); if (!result.Body) throw new Error("STORAGE_OBJECT_NOT_FOUND"); return new Uint8Array(await result.Body.transformToByteArray()); }
   async delete(key: string): Promise<void> { await this.client.send(new DeleteObjectCommand({ Bucket: this.options.bucket, Key: key })); }
@@ -888,5 +898,5 @@ const decodeProviderBase64 = (value: string): Uint8Array => {
   if (!bytes.length) throw new Error("PROVIDER_MEDIA_EMPTY");
   return new Uint8Array(bytes);
 };
-import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";

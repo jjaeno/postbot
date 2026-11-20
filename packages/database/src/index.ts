@@ -21,3 +21,7 @@ export const withTransaction = async <Result>(
   client: PrismaClient,
   operation: (tx: TransactionClient) => Promise<Result>
 ): Promise<Result> => client.$transaction(operation);
+
+export { hasRecoverableResult } from "./recoverable-result.js";
+
+export { pruneDiscoveryChannel } from "./discovery-retention.js";

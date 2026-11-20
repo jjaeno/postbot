@@ -1,3 +1,4 @@
+import { hasRecoverableResult } from "@postbot/database";
 import { Inject, Injectable } from "@nestjs/common";
 import { productionJobRequestIntent, jobDomainPayload } from "@postbot/jobs";
 import type {
@@ -172,6 +173,12 @@ export class PrismaJobsRepository implements JobsRepository {
     return this.findForWorkspace(workspaceId, jobId);
   }
 
+  async canRecoverKnownResult(workspaceId: string, jobId: string): Promise<boolean> {
+    if (!await this.findForWorkspace(workspaceId, jobId)) return false;
+    const job = await this.prisma.productionJob.findUnique({ where: { id: jobId } });
+    return job ? hasRecoverableResult(this.prisma, job) : false;
+  }
+
   async recover(workspaceId: string, jobId: string, runAfter: Date | null): Promise<ProductionJobResponse | null> {
     const existing = await this.findForWorkspace(workspaceId, jobId);
     if (!existing) {
@@ -180,7 +187,7 @@ export class PrismaJobsRepository implements JobsRepository {
     if (!["FAILED", "CANCELLED", "NEEDS_REVIEW"].includes(existing.status)) {
       return existing;
     }
-    if (existing.result?.reconciliationRequired === true || existing.errorCode?.includes("RECONCILIATION_REQUIRED")) throw new Error("RECONCILIATION_REQUIRED");
+    if ((existing.result?.reconciliationRequired === true || existing.errorCode?.includes("RECONCILIATION_REQUIRED")) && !await this.canRecoverKnownResult(workspaceId, jobId)) throw new Error("RECONCILIATION_REQUIRED");
     await this.prisma.productionJob.updateMany({
       where: { id: jobId, status: existing.status, updatedAt: new Date(existing.updatedAt) },
       data: {

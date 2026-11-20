@@ -663,3 +663,12 @@ test("shows the next analysis condition and policy boundary on mobile", async ({
   await expect(panel).toContainText("정책상 제한되는 파생 분석은 보류");
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
 });
+
+test("shows business stalls separately from server health on mobile", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 }); await mockApi(page);
+  await page.route("**/operations/channels/channel-1/business-health", (route) => route.fulfill({ json: { state: "ATTENTION_REQUIRED", issues: ["MISSED_PUBLICATION", "ACCOUNT_REAUTH_REQUIRED"], lastCollectionAt: null, lastProductionAt: null, lastPublicationAt: null, externalNotifications: "NOT_CONFIGURED", backup: { state: "NOT_CONFIGURED" }, dailySummary: { recordedCost: "0.000000", currency: "USD" } } }));
+  await page.goto("/#settings"); const panel = page.getByTestId("business-health-panel");
+  await expect(panel).toContainText("게시 예정 시각 누락 · 계정 재인증 필요");
+  await expect(panel).toContainText("외부 알림: 미설정 · 백업: 미설정");
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+});

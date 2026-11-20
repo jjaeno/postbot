@@ -6,6 +6,8 @@ import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { ScriptGenerationProcessor } from "./script-generation-processor.js";
 import { DeterministicJobProcessor } from "./job-processor.js";
+import { recoverQueues } from "./queue-recovery.js";
+import { BullMqQueueAdapter } from "@postbot/jobs";
 
 const enabled = process.env.RUN_DB_INTEGRATION === "1" && new URL(process.env.DATABASE_URL ?? "mysql://invalid/").pathname.endsWith("_test");
 const prisma = new PrismaClient();
@@ -54,6 +56,16 @@ describe.skipIf(!enabled).sequential("real LLM call journal (mock HTTP, no paid 
     expect((await prisma.automationCostReservation.findUniqueOrThrow({ where: { idempotencyKey: `automation:${item.payload.automation.runId}:script:youtube:cost` } })).settledAt).not.toBeNull();
 
     expect(await prisma.costLedger.count({ where: { providerUsage: { productionJobId: item.job.id } } })).toBe(2);
+    const queue = new BullMqQueueAdapter(process.env.REDIS_URL ?? "redis://127.0.0.1:16379", `known-receipt-${randomUUID()}`);
+    try {
+      await prisma.productionJob.update({ where: { id: item.job.id }, data: { status: "RUNNING", heartbeatAt: new Date(Date.now() - 600000), executionToken: randomUUID() } });
+      await recoverQueues(prisma, queue, 60000);
+      expect((await prisma.productionJob.findUniqueOrThrow({ where: { id: item.job.id } })).status).toBe("RETRY_WAIT");
+      await new DeterministicJobProcessor(prisma).process({ id: item.job.id, type: "SCRIPT", queueName: "script", runAfter: null, payload: item.payload });
+      expect((await prisma.productionJob.findUniqueOrThrow({ where: { id: item.job.id } })).status).toBe("SUCCEEDED");
+      expect(network).toHaveBeenCalledTimes(2);
+      expect(await prisma.costLedger.count({ where: { providerUsage: { productionJobId: item.job.id } } })).toBe(2);
+    } finally { await queue.close(); }
   });
   it("refuses a long-input call before network I/O when remaining reservation is insufficient", async () => {
     const item = await fixture();

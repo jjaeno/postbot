@@ -52,6 +52,7 @@ export class AssetRepository {
       : { status: "unknown", commercialUseAllowed: false, derivativeAllowed: false, attributionRequired: false, attributionText: null, proofUrl: null };
   }
   async getLicense(assetId: string): Promise<AssetLicenseSnapshot | null> {
+    if ((await this.prisma.asset.findUnique({ where: { id: assetId }, select: { retentionState: true } }))?.retentionState !== "ACTIVE") return null;
     const license = await this.prisma.assetLicense.findFirst({ where: { assetId }, include: { rightsPolicy: true }, orderBy: [{ createdAt: "desc" }, { id: "desc" }] });
     if (!license) return null;
     const now = new Date();
@@ -78,7 +79,7 @@ export class AssetRepository {
   async store(input: StoreAssetInput): Promise<{ assetId: string; duplicate: boolean }> {
     const checksum = checksumSha256(input.body);
     const existing = await this.prisma.asset.findUnique({ where: { dedupScope_checksumSha256: { dedupScope: input.channelId ?? "global", checksumSha256: checksum } } });
-    if (existing) return { assetId: existing.id, duplicate: true };
+    if (existing) { if (existing.retentionState !== "ACTIVE") throw new Error("ASSET_RETENTION_PENDING"); return { assetId: existing.id, duplicate: true }; }
     await this.storage.upload({ key: input.key, body: input.body, mimeType: input.mimeType });
     try {
       const asset = await this.prisma.asset.create({ data: { channelId: input.channelId, dedupScope: input.channelId ?? "global", kind: input.kind, origin: input.origin, storageKey: input.key, checksumSha256: checksum, mimeType: input.mimeType, width: input.width, height: input.height, sources: { create: { provider: input.source.provider, model: input.source.model, prompt: input.source.prompt, sourceUrl: input.source.sourceUrl } }, licenses: { create: { status: input.license.status === "verified" ? "VERIFIED" : input.license.status === "rejected" ? "REJECTED" : input.license.status === "expired" ? "EXPIRED" : "PENDING", licenseName: "snapshot", commercialUseAllowed: input.license.commercialUseAllowed, derivativeAllowed: input.license.derivativeAllowed, attributionRequired: input.license.attributionRequired, attributionText: input.license.attributionText, proofUrl: input.license.proofUrl, rightsPolicyId: input.license.rightsPolicyId, validFrom: input.license.validFrom, validUntil: input.license.validUntil, checkedAt: new Date() } } } });
@@ -91,7 +92,7 @@ export class AssetRepository {
   }
 
   async findAllowedFallback(kind: StoreAssetInput["kind"], channelId: string | null = null): Promise<{ assetId: string; storageKey: string } | null> {
-    const candidates = await this.prisma.asset.findMany({ where: { kind, channelId, licenses: { some: { status: "VERIFIED", commercialUseAllowed: true, derivativeAllowed: true } } }, include: { licenses: { orderBy: { createdAt: "desc" }, take: 1 } }, orderBy: { createdAt: "asc" } });
+    const candidates = await this.prisma.asset.findMany({ where: { retentionState: "ACTIVE", kind, channelId, licenses: { some: { status: "VERIFIED", commercialUseAllowed: true, derivativeAllowed: true } } }, include: { licenses: { orderBy: { createdAt: "desc" }, take: 1 } }, orderBy: { createdAt: "asc" } });
     const asset = candidates.find((candidate) => {
       const license = candidate.licenses[0];
       const now = new Date();
@@ -105,7 +106,7 @@ export class AssetRepository {
   }
 
   async selectLicensedStock(channelId: string): Promise<StockCandidate[]> {
-    const candidates = await this.prisma.asset.findMany({ where: { channelId, kind: "IMAGE", origin: { in: ["STOCK_FREE", "STOCK_PAID", "PUBLIC_DOMAIN", "INTERNAL"] } }, include: { sources: { orderBy: [{ createdAt: "desc" }, { id: "desc" }] }, _count: { select: { usages: { where: { createdAt: { gte: new Date(Date.now() - 30 * 86_400_000) } } } } } }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
+    const candidates = await this.prisma.asset.findMany({ where: { retentionState: "ACTIVE", channelId, kind: "IMAGE", origin: { in: ["STOCK_FREE", "STOCK_PAID", "PUBLIC_DOMAIN", "INTERNAL"] } }, include: { sources: { orderBy: [{ createdAt: "desc" }, { id: "desc" }] }, _count: { select: { usages: { where: { createdAt: { gte: new Date(Date.now() - 30 * 86_400_000) } } } } } }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
     const allowed: StockCandidate[] = [];
     for (const candidate of candidates) if (!assetNeedsReview(await this.getLicense(candidate.id))) {
       const source = candidate.sources.find((source) => source.providerResponse && typeof source.providerResponse === "object" && !Array.isArray(source.providerResponse) && ("description" in source.providerResponse || "tags" in source.providerResponse));
@@ -129,6 +130,11 @@ export class AssetRepository {
     const purpose = sceneAssetUsageKey(input.purpose, input.sceneVersionId);
     await this.prisma.$transaction(async (tx) => {
       await assertExecutionOwner(tx);
+      await tx.$queryRaw`SELECT id FROM assets WHERE id = ${input.assetId} FOR UPDATE`;
+      const asset = await tx.asset.findUnique({ where: { id: input.assetId } });
+      if (asset?.retentionState !== "ACTIVE") throw new Error("ASSET_RETENTION_PENDING");
+      const content = await tx.contentItem.findUniqueOrThrow({ where: { id: input.contentItemId } });
+      if (asset.channelId && asset.channelId !== content.channelId) throw new Error("ASSET_CHANNEL_SCOPE_MISMATCH");
       await tx.assetUsage.upsert({ where: { assetId_contentItemId_purpose: { assetId: input.assetId, contentItemId: input.contentItemId, purpose } }, update: { sceneVersionId: input.sceneVersionId, usageSnapshot: snapshot }, create: { assetId: input.assetId, contentItemId: input.contentItemId, sceneVersionId: input.sceneVersionId, purpose, usageSnapshot: snapshot } });
     });
   }

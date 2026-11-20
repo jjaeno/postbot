@@ -1,5 +1,5 @@
 import { loadConfig } from "@postbot/config";
-import { ChannelCollectionProfileSchema, CollectAutomationJobPayloadSchema, TopicSelectionPolicySchema } from "@postbot/contracts";
+import { hasHttpsVisualReference, ChannelCollectionProfileSchema, CollectAutomationJobPayloadSchema, TopicSelectionPolicySchema } from "@postbot/contracts";
 import { assertExecutionOwner, Prisma, type PrismaClient } from "@postbot/database";
 import { FixtureTopicSourceProvider, RssTopicSourceProvider, scoreTopicCandidate, topicSimilarity, type TopicSourceCandidate, type TopicSourceProvider } from "@postbot/providers";
 import { createHash } from "node:crypto";
@@ -85,13 +85,7 @@ export class CollectProcessor {
         const repeat = !limits ? null : people.some((person) => prior.filter((old) => list(old.persons ?? null).includes(person)).length >= limits.maxPersonRepeats) ? "PERSON_REPEAT_LIMIT"
           : typeof reliability.subtopic === "string" && prior.filter((old) => old.subtopic === reliability.subtopic).length >= limits.maxSubtopicRepeats ? "SUBTOPIC_REPEAT_LIMIT"
           : typeof snapshot.eventClusterKey === "string" && priorIdeas.filter((idea) => record(idea.rawSnapshot ?? undefined).eventClusterKey === snapshot.eventClusterKey).length >= limits.maxEventRepeats ? "EVENT_REPEAT_LIMIT" : null;
-        const media = record(snapshot.visualReferences ?? reliability.media ?? undefined);
-        const references = Array.isArray(media.references) ? media.references : [];
-        const hasVisualReference = references.some((reference) => {
-          const value = typeof reference === "string" ? reference : record(reference ?? undefined).href;
-          if (typeof value !== "string") return false;
-          try { return new URL(value).protocol === "https:"; } catch { return false; }
-        });
+        const hasVisualReference = hasHttpsVisualReference(snapshot);
         const visualReason = profile?.production.requireVisualEvidence && !hasVisualReference ? "VISUAL_REFERENCE_REQUIRED" : null;
         const rejectionReason = score.rejectionReason ?? repeat ?? visualReason ?? (duplicateScore >= (input.selectionPolicy?.semanticDuplicateThreshold ?? 0.65) ? "RECENT_TOPIC_DUPLICATE" : null);
         snapshot = { ...snapshot, evaluation: { components: { ...score.components, recentTopicNovelty: 1 - duplicateScore }, method: score.scoringMethod, evaluatedAt: new Date().toISOString(), duplicateScore, duplicateThreshold: input.selectionPolicy?.semanticDuplicateThreshold ?? 0.65, reason: rejectionReason ?? "CURRENT_POLICY_ELIGIBLE" } };

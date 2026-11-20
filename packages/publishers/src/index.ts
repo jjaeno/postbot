@@ -282,13 +282,14 @@ export class GoogleYouTubePublisherProvider implements PublisherProvider, VideoP
     const response = await this.request(url, { method: "GET", headers: { authorization: `Bearer ${accessToken}` } });
     if ([401, 403].includes(response.status)) throw new OAuthRefreshError(true);
     if (!response.ok) throw new Error("PUBLICATION_STATUS_LOOKUP_FAILED");
-    const body = await response.json() as { items?: Array<{ id?: string; snippet?: { channelId?: string; publishedAt?: string }; status?: { uploadStatus?: string; privacyStatus?: string; publishAt?: string; failureReason?: string; rejectionReason?: string }; processingDetails?: { processingStatus?: string; processingFailureReason?: string } }> };
+    const body = await response.json() as { items?: Array<{ id?: string; snippet?: { channelId?: string; publishedAt?: string; liveBroadcastContent?: string }; status?: { uploadStatus?: string; privacyStatus?: string; publishAt?: string; failureReason?: string; rejectionReason?: string }; processingDetails?: { processingStatus?: string; processingFailureReason?: string } }> };
     const item = body.items?.find((item) => item.id === externalVideoId);
     if (!item || externalAccountId && item.snippet?.channelId !== externalAccountId) throw new Error("PUBLICATION_ACCOUNT_OR_ID_MISMATCH");
     const status = item.status; const processing = item.processingDetails;
     const visibility = status?.privacyStatus === "public" || status?.privacyStatus === "unlisted" || status?.privacyStatus === "private" ? status.privacyStatus : undefined;
     const failed = ["failed", "rejected", "deleted"].includes(status?.uploadStatus ?? "") || processing?.processingStatus === "failed";
-    const phase = failed ? "failed" : status?.publishAt && visibility === "private" ? "scheduled" : processing?.processingStatus === "processing" || status?.uploadStatus === "uploaded" ? "processing" : status?.uploadStatus === "processed" && (visibility === "public" || visibility === "unlisted") ? "published" : "uploaded";
+    const upcoming = item.snippet?.liveBroadcastContent === "upcoming" || Boolean(item.snippet?.publishedAt && Date.parse(item.snippet.publishedAt) > Date.now());
+    const phase = failed ? "failed" : status?.publishAt && visibility === "private" ? "scheduled" : upcoming ? "processing" : processing?.processingStatus === "processing" || status?.uploadStatus === "uploaded" ? "processing" : status?.uploadStatus === "processed" && (visibility === "public" || visibility === "unlisted") ? "published" : "uploaded";
     return { externalVideoId, url: `https://www.youtube.com/watch?v=${externalVideoId}`, status: phase, visibility, processingComplete: status?.uploadStatus === "processed" && processing?.processingStatus !== "processing", publishedAt: phase === "published" ? item.snippet?.publishedAt ?? null : null, scheduledAt: status?.publishAt ?? null,
       ...(failed ? { failureReason: processing?.processingFailureReason ?? status?.failureReason ?? status?.rejectionReason ?? "PLATFORM_REPORTED_FAILURE" } : {}) };
   }
@@ -325,6 +326,7 @@ type SocialProviderOptions = {
 
 const responseJson = async <Body>(response: Response, label: string): Promise<Body> => {
   const body = await response.json().catch(() => null) as Body | null;
+  if (label.startsWith("Instagram") && (response.status === 401 || response.status === 403)) throw new OAuthRefreshError(true);
   if (!response.ok || body === null) throw new Error(`${label} failed with status ${response.status}.`);
   return body;
 };
@@ -430,25 +432,29 @@ export class MetaInstagramPublisherProvider implements SocialVideoPublisher {
       const publish = await withTimeout(this.fetchImplementation, `https://graph.instagram.com/${graphVersion}/${encodeURIComponent(input.externalAccountId)}/media_publish`, { method: "POST", headers: { authorization: `OAuth ${accessToken}`, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ creation_id: containerId }) }, this.timeoutMs);
       const publishBody = await responseJson<{ id?: string }>(publish, "Instagram media publish");
       if (!publishBody.id) throw new Error("Instagram publish response did not include a media ID.");
-      return this.getPublicationStatus(publishBody.id, accessToken);
+      return this.getPublicationStatus(publishBody.id, accessToken, input.externalAccountId);
     } catch (error) {
+      if (error instanceof OAuthRefreshError) throw error;
       if (publicationStarted) throw new AmbiguousPublishError("Instagram publish outcome requires reconciliation before retry.", containerId);
       if (containerId && (error instanceof DOMException || (error instanceof Error && /abort|network|fetch/i.test(error.message)))) throw new AmbiguousPublishError("Instagram publish outcome is ambiguous.", containerId);
       throw error;
     }
   }
 
-  async getPublicationStatus(externalVideoId: string, accessToken?: string): Promise<PublishedVideo> {
+  async getPublicationStatus(externalVideoId: string, accessToken?: string, expectedAccountId?: string): Promise<PublishedVideo> {
     if (!accessToken) throw new Error("Instagram access token is required.");
-    const response = await withTimeout(this.fetchImplementation, `https://graph.instagram.com/${this.options.graphVersion ?? "v24.0"}/${encodeURIComponent(externalVideoId)}?${new URLSearchParams({ fields: "id,permalink,timestamp", access_token: accessToken })}`, { method: "GET" }, this.timeoutMs);
-    const body = await responseJson<{ id?: string; permalink?: string; timestamp?: string }>(response, "Instagram publication lookup");
-    return { externalVideoId: body.id ?? externalVideoId, url: body.permalink ?? "", publishedAt: body.timestamp ?? null, status: "published" };
+    if (!expectedAccountId) throw new Error("PUBLICATION_ACCOUNT_OR_ID_MISMATCH");
+    const response = await withTimeout(this.fetchImplementation, `https://graph.instagram.com/${this.options.graphVersion ?? "v24.0"}/${encodeURIComponent(externalVideoId)}?${new URLSearchParams({ fields: "id,permalink,timestamp,owner" })}`, { method: "GET", headers: { authorization: `OAuth ${accessToken}` } }, this.timeoutMs);
+    const body = await responseJson<{ id?: string; permalink?: string; timestamp?: string; owner?: { id?: string } | string }>(response, "Instagram publication lookup");
+    const ownerId = typeof body.owner === "string" ? body.owner : body.owner?.id;
+    if (body.id !== externalVideoId || ownerId !== expectedAccountId) throw new Error("PUBLICATION_ACCOUNT_OR_ID_MISMATCH");
+    return { externalVideoId: body.id, url: body.permalink ?? "", publishedAt: body.timestamp ?? null, status: "published" };
   }
 
   private async waitForContainer(containerId: string, accessToken: string, graphVersion: string): Promise<void> {
     const deadline = Date.now() + this.timeoutMs;
     while (Date.now() < deadline) {
-      const response = await withTimeout(this.fetchImplementation, `https://graph.instagram.com/${graphVersion}/${encodeURIComponent(containerId)}?${new URLSearchParams({ fields: "status_code,status", access_token: accessToken })}`, { method: "GET" }, this.timeoutMs);
+      const response = await withTimeout(this.fetchImplementation, `https://graph.instagram.com/${graphVersion}/${encodeURIComponent(containerId)}?${new URLSearchParams({ fields: "status_code,status" })}`, { method: "GET", headers: { authorization: `OAuth ${accessToken}` } }, this.timeoutMs);
       const body = await responseJson<{ status_code?: string; status?: string }>(response, "Instagram container status");
       if (body.status_code === "FINISHED") return;
       if (body.status_code === "ERROR" || body.status_code === "EXPIRED") throw new Error(`Instagram container failed: ${body.status ?? body.status_code}.`);

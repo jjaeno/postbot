@@ -26,6 +26,24 @@ const seed = async (maxAssignments?: number) => {
 
 suite("real production experiment allocation and available metric comparison", () => {
   afterAll(() => prisma.$disconnect());
+  it("applies one strategy under competing requests and rechecks current permissions and limits", async () => {
+    const f = await seed(); const userId = f.workspace.ownerId;
+    await prisma.channel.update({ where: { id: f.channel.id }, data: { optimizationSettings: { autoApplyFields: ["durationSeconds"], maxChangeRatio: 0.2 } } });
+    await prisma.strategyVersion.create({ data: { channelId: f.channel.id, version: 1, name: "Initial", strategy: { durationSeconds: 30 } } });
+    const suggestion = await prisma.optimizationSuggestion.create({ data: { channelId: f.channel.id, status: "APPROVED", title: "Bounded", rationale: "Owner-approved editorial hypothesis", evidence: { platform: "INSTAGRAM" }, sampleSize: 4, metricVersion: "analytics-mapping-v3", ruleVersion: "optimization-rules-v3", targetStrategy: { durationSeconds: 33, maxChangeRatio: 0.2 } } });
+    const applied = await Promise.all([0, 1, 2].map(() => f.service.suggestionAction(f.workspace.id, "OWNER", userId, suggestion.id, { action: "apply" })));
+    expect(applied.every((item) => item.status === "APPLIED")).toBe(true);
+    expect(await prisma.strategyVersion.count({ where: { channelId: f.channel.id } })).toBe(2);
+    const restored = await Promise.all([0, 1].map(() => f.service.rollback(f.workspace.id, "OWNER", userId, f.channel.id, 1)));
+    expect(restored[0]).toEqual(restored[1]);
+    expect(await prisma.strategyVersion.count({ where: { channelId: f.channel.id } })).toBe(3);
+    const next = await prisma.optimizationSuggestion.create({ data: { channelId: f.channel.id, status: "APPROVED", title: "Stale permission", rationale: "Fixture", evidence: { platform: "INSTAGRAM" }, sampleSize: 4, metricVersion: "analytics-mapping-v3", ruleVersion: "optimization-rules-v3", targetStrategy: { durationSeconds: 33, maxChangeRatio: 0.2 } } });
+    await prisma.channel.update({ where: { id: f.channel.id }, data: { optimizationSettings: { autoApplyFields: [], maxChangeRatio: 0.2 } } });
+    await expect(f.service.suggestionAction(f.workspace.id, "OWNER", userId, next.id, { action: "apply" })).rejects.toThrow("STRATEGY_FIELD_NOT_CURRENTLY_ALLOWED");
+    await prisma.channel.update({ where: { id: f.channel.id }, data: { optimizationSettings: { autoApplyFields: ["durationSeconds"], maxChangeRatio: 0.01 } } });
+    await expect(f.service.suggestionAction(f.workspace.id, "OWNER", userId, next.id, { action: "apply" })).rejects.toThrow("STRATEGY_CHANGE_EXCEEDS_CURRENT_LIMIT");
+    expect(await prisma.strategyVersion.count({ where: { channelId: f.channel.id } })).toBe(3);
+  });
   it("keeps allocation stable, isolates platform, expires the period and protects reserved terms", async () => {
     const fixture = await seed();
     const content = await prisma.contentItem.create({ data: { channelId: fixture.channel.id, title: "Science", topicKey: fixture.key } });

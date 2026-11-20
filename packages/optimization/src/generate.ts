@@ -42,7 +42,7 @@ export async function generateOptimization(prisma: PrismaClient, channel: { id: 
     const topDuration = averageDuration(top); const bottomDuration = averageDuration(bottom);
     const sufficient = sorted.length >= MIN_SAMPLE_SIZE && standardDeviation > 0 && Math.abs(topDuration - bottomDuration) >= 0.1;
     const targetDuration = bottomDuration ? Math.round(bottomDuration * (1 + Math.max(-settings.maxChangeRatio, Math.min(settings.maxChangeRatio, (topDuration - bottomDuration) / bottomDuration)))) : 0;
-    const featureAnalysis = ["hookType", "sceneTemplates", "transitionsPerMinute", "subtitles", "voice"].map((field) => {
+    const featureAnalysis = ["topic", "hookType", "sceneTemplates", "transitionsPerMinute", "subtitles", "voice"].map((field) => {
       const groups = new Map<string, number[]>();
       for (const item of analysisData) { const value = item.features[field]; if (value === undefined || value === null) continue; const key = JSON.stringify(value); groups.set(key, [...(groups.get(key) ?? []), Number(item.snapshot.value)]); }
       return { field, status: groups.size >= 2 && [...groups.values()].every((values) => values.length >= MIN_SAMPLE_SIZE) ? "DESCRIPTIVE_HYPOTHESIS" : "HELD_INSUFFICIENT_COMPARABLE_SAMPLES", groups: [...groups.entries()].map(([featureValue, values]) => ({ featureValue, sampleSize: values.length, mean: values.reduce((sum, value) => sum + value, 0) / values.length })), causalClaim: false };

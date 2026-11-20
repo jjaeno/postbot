@@ -324,6 +324,7 @@ model Membership {
 }
 
 model Channel {
+  discoveryRetentionCursor String? @db.VarChar(191)
   id                      String                   @id @default(cuid())
   workspaceId             String
   name                    String                   @db.VarChar(120)
@@ -658,6 +659,7 @@ model SceneVersion {
   platform        Platform?
   sceneDocument   Json
   renderManifest  Json?
+  retentionState  String         @default("ACTIVE") @db.VarChar(24)
   durationSeconds Decimal?       @db.Decimal(8, 3)
   createdAt       DateTime       @default(now()) @db.DateTime(3)
   contentItem     ContentItem    @relation(fields: [contentItemId], references: [id], onDelete: Restrict)
@@ -667,6 +669,7 @@ model SceneVersion {
 
   @@unique([contentItemId, platform, version])
   @@index([scriptVersionId])
+  @@index([retentionState, createdAt, id])
   @@map("scene_versions")
 }
 
@@ -676,6 +679,7 @@ model Asset {
   kind            AssetKind
   origin          AssetOrigin
   storageKey      String         @db.VarChar(512)
+  retentionState  String         @default("ACTIVE") @db.VarChar(24)
   checksumSha256  String         @db.VarChar(64)
   dedupScope      String         @default("global") @db.VarChar(191)
   mimeType        String         @db.VarChar(120)
@@ -693,7 +697,24 @@ model Asset {
 
   @@unique([dedupScope, checksumSha256])
   @@index([channelId, kind, origin])
+  @@index([retentionState, createdAt, id])
   @@map("assets")
+}
+
+model StorageDeletion {
+  id          String   @id @default(cuid())
+  workspaceId String
+  channelId   String
+  resourceId  String
+  kind        String   @db.VarChar(24)
+  state       String   @default("MARKED") @db.VarChar(24)
+  objectKeys  Json
+  snapshot    Json?
+  createdAt   DateTime @default(now()) @db.DateTime(3)
+  updatedAt   DateTime @updatedAt @db.DateTime(3)
+  @@unique([kind, resourceId])
+  @@index([workspaceId, state, id])
+  @@map("storage_deletions")
 }
 
 model AssetSource {
@@ -820,6 +841,8 @@ model ProductionJob {
   automationSteps AutomationStep[]
 
   @@index([queueName, status, runAfter])
+  @@index([status, heartbeatAt, id])
+  @@index([channelId, status, finishedAt])
   @@index([contentItemId, type, status])
   @@map("production_jobs")
 }

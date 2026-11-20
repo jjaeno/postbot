@@ -1,6 +1,6 @@
 # 채널별 제작·운영 개선 기록
 
-기준 커밋: `31d0564a1d44711f830e44de0b6563c39cff6ca2`. 브랜치: `feat/channel-production-operations`. 시작 시 작업 트리는 깨끗했다. 이번 요청은 20단계 전체를 승인하며 push/merge/배포는 금지한다. 현재 상태는 구현 중이며 아래 항목 전체가 완료된 것은 아니다.
+기준 커밋: `31d0564a1d44711f830e44de0b6563c39cff6ca2`. 브랜치: `feat/channel-production-operations`. 시작 시 작업 트리는 깨끗했다. 이번 요청은 20단계 전체를 승인하며 push/merge/배포는 금지한다. 2026-11-20 현재 요청된 20.1–20.10의 로컬 구현과 필수 검증을 완료했다. 실제 Provider·운영 환경의 확인과 의도적 미지원 범위는 마지막 상태표에 구분했다. 아래 초기 상태표와 단계별 당시 기록은 작업 경과를 보존한다.
 
 ## 기준 코드 재검증
 
@@ -142,6 +142,60 @@ Migration 202611180004~006: 갱신 fencing, nullable 실제 게시 시각·확�
 2026-11-18 [YouTube Developer Policies III.E.4.h](https://developers.google.com/youtube/terms/developer-policies), [Analytics day 정의](https://developers.google.com/youtube/analytics/dimensions#day)를 확인했다. 현재 정책에 따라 YouTube API 관측으로 평균·자체 점수·효과·실험 승자·자동 전략을 계산하지 않는다. 원래 native 관측과 Postbot의 불변 제작 특성·자체 사용량 비용 영수증은 출처를 구분해 기록한다. YouTube 제안은 YOUTUBE_DERIVED_DATA_RESTRICTED/HELD, baseline/변경안/예상 효과 없음으로 남기며 과거 제안 승인·적용과 실험 완료 계산도 차단한다. 범용 비 YouTube 비교의 훅·장면·자막·음성 분석은 설명적 가설이며 신뢰도·인과·성과 향상을 보장하지 않는다. 기존 명시 허용 필드·변경 폭·종료 기준·rollback을 유지한다. 주제·비용을 포함한 추가 편집 전략의 효과 검증은 원래 지표와 혼합하지 않으며, 정책상 미지원 기능을 완료한 것으로 표시하지 않는다. 갱신 책임은 분석/플랫폼 어댑터 유지보수자다.
 
 검증: optimization unit 8개, Provider Mock 4개(25시간 DST·inclusive 날짜 포함), API MySQL/Redis·scope 회귀 7개, worker 수집/분석 dispatch·멱등 회귀 5개와 기존 복구 회귀 통과. 모바일 표본/다음 확인/정책 경계 Playwright 통과. 변경 packages/API/worker/web lint·typecheck/build 통과. 비용 증거의 실제 DB 필드 operation과 불필요 import를 수정해 재검증했다. 기존 YouTube 승자 계산 fixture는 제한을 회피하지 않고 Instagram 기반 범용 계산 회귀로 옮겼으며, 별도 YouTube 정책 차단 테스트를 추가했다. migration 없음. 실제 API 수집·권한 승인·법률상 해석·성과 개선 효과는 외부 확인 필요다.
+
+## 20.10 보존·업무 감시·백업
+
+보존은 `StorageDeletion`의 MARKED/DELETING/FILES_DELETED/DONE으로 재개한다. FAILED 콘텐츠의 오래된 렌더도 예약·검토·활성 작업·자동화 참조가 있으면 지우지 않는다. 자산은 사용·생성 캐시·브랜드·템플릿·권리 근거를 재검사한다. 파일 삭제 전에 manifest를 준비 상태에서 제외하고, 삭제 시작 전 새 참조가 생기면 취소한다. workspace 삭제는 먼저 계정·채널을 정지하고 실행 작업의 취소 완료를 기다린다. 실패한 같은 maintenance 요청은 같은 ID와 멱등 키로 재개한다. 비용·호출 journal·durable 작업 키와 후보 예약 근거는 기간만으로 삭제하지 않는다.
+
+수집 캐시 만료와 미사용 후보 보존은 정지 채널도 cursor로 순회한다. 사용·선정·예약·생성 근거가 있는 후보는 보호하고 호출 영수증은 당일 예산 우회가 없도록 유지한다. Redis terminal 보존과 DB 증거 보존을 분리했다. 이미 저장된 원래 결과/비용 영수증이 완전한 작업만 원래 키로 복구하고, STARTED 또는 불명확한 유료 호출은 계속 검토한다.
+
+저장소 재사용은 실제 객체 존재를 확인하며 검사 장애를 유실로 단정하지 않는다. 유실 시 원래 manifest와 체크섬을 보존한다. 원래 체크섬이 없는 과거 렌더는 자동 복원하지 않는다. 사용자 보존 요청은 해당 workspace 참조만 검사하고 전역 고립 객체 목록은 운영자 CLI에서만 확인한다. 소유권 미확인 객체는 해시로 보고하며 자동 삭제하지 않는다. 임시 파일은 경로 범위·소유 marker·같은 호스트의 종료된 PID·24시간 경과·DB 실행 소유권 부재가 확인된 경우만 정리한다.
+
+`GET /operations/channels/:channelId/business-health`와 설정 화면은 마지막 수집·렌더·실제 게시, 누락 슬롯, 장기 대기, 반복 실패, 재인증, 예산 보류와 UTC 일별 결과/비용을 표시한다. 프로세스 생존과 업무 진행을 구분한다. 로컬 디스크 부족을 검사하고 S3 전체 용량은 미제공으로 표시한다. 외부 알림 기본값은 disabled이며 Mock만 구현·실행했다. DB claim, 중복 억제, 실패 재시도, 재알림과 확인 후 전달 중지를 실제 DB로 검증했다.
+
+기존 덤프/검증/복원에 AES-256-GCM archive, 인증·체크섬 재검증, 보관 기간, 원자적 상태 파일과 systemd 일정 예시를 연결했다. 외부 저장소가 없으면 LOCAL_TEST_ONLY로 표시한다. 2026-11-20 격리 원본의 30개 migration, workspace 7개, channel 7개, content 5개를 암호화 백업에서 새 빈 `_restore` DB로 복원했고 Prisma schema diff가 없었다. 실제 외부 mount의 복제·가용성, 운영 키 보관, 주기 복원과 on-call은 운영자가 별도 검증해야 한다. 운영 백업이나 서비스 활성화는 실행하지 않았다.
+
+최종 계약 감사에서 Instagram 게시 ID와 계정 소유자를 함께 확인하고, 인증 철회를 재인증으로 전파하며, YouTube 미래 공개/예정 premiere를 공개 완료로 오인하지 않도록 보완했다. 전략 적용은 채널·제안 잠금과 현재 허용 필드/변경 폭 재검사로 한 번만 적용하며 동시 rollback도 한 버전만 만든다. 승인 뒤 운영 설정이 바뀌어 허용을 취소하면 과거 제안 적용을 거절한다. 필수 시각 자료 검사는 저장 후보와 수동 선택 모두에 적용하며 HTTPS 문자열·객체 URL 형식을 함께 지원한다.
+
+2026-11-20 [Instagram Media 공식 계약](https://developers.facebook.com/docs/instagram-platform/reference/instagram-media/v21.0/)에서 owner 확인 범위를 대조했다. 앱 사용자에게 귀속되는 owner가 응답하지 않거나 예상 계정과 다르면 공개 확정을 보류한다. 프로젝트에 고정된 API 버전을 자동 변경하지 않았다.
+
+핵심 파일:
+
+- [보존 처리](../apps/worker/src/retention.ts), [삭제/보존 작업](../apps/worker/src/data-lifecycle-processor.ts), [저장소 감사](../apps/worker/src/storage-audit.ts), [임시 파일 정리](../apps/worker/src/temp-cleanup.ts)
+- [후보 보존](../packages/database/src/discovery-retention.ts), [복구 증거 판정](../packages/database/src/recoverable-result.ts), [큐 복구](../apps/worker/src/queue-recovery.ts)
+- [업무 상태](../apps/api/src/operations/business-health.ts), [운영 API](../apps/api/src/operations/operations.service.ts), [전략 적용](../apps/api/src/optimization/optimization.service.ts), [게시 어댑터](../packages/publishers/src/index.ts)
+- [백업 일정 실행](../scripts/scheduled-backup.mjs), [암호화 복원](../scripts/restore-archive.mjs), [운영 절차](operations.md), [systemd 일정](../ops/postbot-backup.timer)
+
+추가 migration은 `202611180007_resumable_retention`, `202611180008_operational_scan_indexes`, `202611180009_discovery_retention_cursor`다. nullable cursor와 ACTIVE 기본 보존 상태를 사용하며 기존 결과를 자동 삭제하는 backfill은 없다. 전체 요청은 기준 19개에서 총 30개 migration으로 확장됐다. 기존 데이터 업그레이드와 빈 DB 적용을 검증했다. 운영 rollback은 제작/게시를 중지한 뒤 확장 schema와 원래 증거를 유지해야 한다. 삭제된 파일은 DB rollback으로 되살아나지 않으며 원래 체크섬이 있는 백업 복원이 필요하다. 첫 로컬 migration의 UTF-8 BOM 오류는 DDL 실행 전에 실패했고 BOM 제거·failed migration 정리 후 재적용했다. 이미 적용된 migration을 변경하지 않았다.
+
+## 최종 검증과 남은 확인
+
+전체 lint 27개 task, typecheck 27개 task, unit test 27개 task, build 15개 task와 desktop/mobile Playwright 26개가 통과했다. 전체 unit 검사의 첫 실행은 잘못된 기본 DB port로 실패했고 격리 DB URL을 명시해 통과했다. 관련 변경 이후에는 해당 범위만 추가 검증했다. 실제 MySQL/Redis 통합은 고유 테스트 157개(database 10, jobs 6, asset-library 6, API 62, worker 73)가 통과했다. 이후 저장소 감사 권한 범위 수정도 해당 실제 DB 테스트를 재실행해 통과했다. 게시 Provider Mock unit 20개, contracts src unit 3개와 Node 백업 unit 5개도 통과했다. contracts 검사는 src만 대상으로 하여 dist 중복 집계를 제거했다. 누락된 테스트 파일명으로 실행된 검사는 성공으로 세지 않았다.
+
+기존 수동/승인 Fake 전체 여정은 2026-11-18 Docker에서 통과했다. 완전 자동 여정은 실행 중 호스트 절전으로 약 39시간의 wall-clock 점프와 Redis lock 만료가 발생하여 실패했다. 2026-11-20 assertion과 제한 시간을 완화하지 않고 최종 이미지·새 DB/Redis/MinIO 환경에서 해당 여정만 재검증해 통과했다(1 passed, 기존 통과 2개는 선택 실행에서 제외, 전체 484.58초). 플랫폼 3개의 렌더·정책·실제 Fake 공개 확인, analytics 작업 9개와 최적화 검사가 성공했다. 수동·승인·완전 자동 세 경로의 검증이 모두 확보됐다.
+
+최종 Docker build도 성공했고 이미지 안의 소스 365개가 현재 파일의 SHA-256과 일치했다. 새 격리 acceptance DB에 migration 30개를 빈 DB부터 적용했다. 로컬 증거는 `.artifacts/final-validation-2026-11-18/`의 전체 검사 로그와 `.artifacts/final-validation-2026-11-20/`의 `docker-final-scoped-audit.log`, `source-hash-verification.log`, `acceptance-full-auto.log`에 보관한다. archive 키·덤프·렌더 산출물과 로그는 Git에 포함하지 않는다. 원격 CI나 PR의 성공을 주장하지 않으며 push/PR/merge/배포하지 않았다.
+
+테스트 fixture 변경 이유: Fake 공개 확인은 실제 공개 계약에 맞춰 격리 환경만 public으로 설정했다. 미래 게시와 게시 후 관측은 테스트에서 명시적으로 시각을 진행시켰다. YouTube 파생 전략 성공 fixture는 정책을 우회하지 않고 Instagram 범용 분석으로 옮기고 YouTube 차단 검사를 추가했다. 동시성 fixture의 workspace/필수 필드·공유 Fake 객체·고유 외부 ID를 수정했으며 실제 실패/중복/권리 gate는 유지했다. 시각 자료의 문자열 URL 회귀는 객체와 문자열 모두에 대한 검사를 추가해 수정했다.
+
+| 요구사항 | 최종 구현 범위 | 외부 확인 또는 의도적 미지원 |
+|---|---|---|
+| 1 제작/운영 경계 | 버전 고정 제작 결과와 별도 운영 상태 | 실제 공개는 native 확인 시에만 확정 |
+| 2 채널 수집 | 편집 가능한 프로필·공식/RSS 소스·원문·질문·분리 주기 | 실제 API quota/권한·항목별 출처 권리 |
+| 3 기획/장면 | 근거와 기획 보존, 의미별 낭독 정렬·검토 | 원문 진실성이나 모델의 내용 적합성 보장 없음 |
+| 4 자산/권리 | 공통 가이드·호출 전 공유 캐시·GRAPHIC 분리·증빙 정책 | 참조 이미지 conditioning은 TEXT_DESCRIPTION_ONLY, 미확인 권리는 검토 |
+| 5 음성/렌더 | 정규화 매핑·구절 자막·오디오 QA·실제 취소/회수 | 실제 유료 TTS의 자연스러움과 Provider 계정 검증 |
+| 6 재고 | 원자적 수요/예약, 제작·검토·게시 수명 분리 | 운영 채널별 한도/주기 선택 필요 |
+| 7 비용/복구 | 사용/청구/불명확 구분·대사·원래 호출 증거 복구 | 실제 청구서 확인, 불명확 호출은 자동 재과금 금지 |
+| 8 계정/게시 | DB 갱신 fencing·native 상태/계정 확인·대사 | 실제 OAuth/공개 처리 확인, TikTok Direct Post 보류 |
+| 9 성과 | 상대 달력 관측·주기 분석·멱등 전략/rollback | YouTube API 파생 점수/승자/전략은 HELD, 성과 향상 보장 없음 |
+| 10 운영 | 재개 가능한 보존·업무 감시·Mock 알림·암호화 복원 | 외부 알림/오프사이트/운영 키·S3 용량 모니터·정기 복원 미설정 |
+
+제작 계층은 원문·대본·장면·자산·QA 영상과 청구 근거를 제공한다. 운영 계층은 정책/권리/승인, 재고와 일정, 계정, 게시 확인, 성과 수집과 안전한 복구를 담당한다. READY는 PUBLISHED가 아니다. Fake/Mock 통과는 실 Provider·계정·정책 승인이나 운영 배포 완료를 의미하지 않는다.
+
+수집 예시: 역사 초기값은 LoC, 과학은 NASA, IT는 운영자가 지정한 RSS를 사용한다. 초기 수집/선정/제작 주기는 각각 360/60/120분, 일 호출 상한 100, 검색 페이지 2, 캐시 60분, 후보 7일, 목표 20개다. 모두 편집 가능하며 채널 이름으로 강제 추론하지 않는다. 선정/제작 주기는 별도 설정이며 미설정 기존 채널에 초기 프로필을 몰래 backfill하지 않는다.
+
+실 API·유료 생성·실 SNS 게시·실제 외부 알림·운영 DB·push/merge/배포는 실행하지 않았다. 정책 문서 확인은 계정별 계약/법률 승인과 다르다. 보호된 증거의 운영 보존/삭제 정책, 원래 체크섬이 없는 과거 렌더와 소유권 미확인 고립 객체는 검토가 필요하다. 외부 설정 없는 백업은 운영 성공으로 표시하지 않는다.
 
 ## 공식 문서 확인
 

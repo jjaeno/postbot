@@ -753,3 +753,5 @@ export type GeneratedMetadata = z.infer<typeof GeneratedMetadataSchema>;
 export type GeneratedScript = z.infer<typeof GeneratedScriptSchema>;
 export type ScriptSceneGenerationResponse = z.infer<typeof ScriptSceneGenerationResponseSchema>;
 export { ProductionReferenceSchema, ProductionResultSchema, ProductionResultsResponseSchema, type ProductionReference, type ProductionResult } from "./production.js";
+
+export { hasHttpsVisualReference } from "./collection-profile.js";

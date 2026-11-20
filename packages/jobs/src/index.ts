@@ -39,6 +39,7 @@ export type QueueAdapter = {
   enqueue(input: EnqueueJobInput): Promise<void>;
   cancel(jobId: string, queueName: JobQueueName): Promise<void>;
   state?(jobId: string, queueName: JobQueueName): Promise<string>;
+  pruneTerminal?(queueName: JobQueueName, completedGraceMs?: number, failedGraceMs?: number, limit?: number): Promise<{ completed: number; failed: number }>;
   close(): Promise<void>;
 };
 
@@ -78,8 +79,8 @@ export const defaultJobOptions = (input: EnqueueJobInput): JobsOptions => ({
     delay: 1_000
   },
   delay: input.runAfter ? Math.max(input.runAfter.getTime() - Date.now(), 0) : 0,
-  removeOnComplete: false,
-  removeOnFail: false
+  removeOnComplete: { age: 7 * 86400, count: 10000 },
+  removeOnFail: { age: 30 * 86400, count: 10000 }
 });
 
 const startWorker = <Payload>(worker: Worker<Payload>): void => {
@@ -118,6 +119,14 @@ export class BullMqQueueAdapter implements QueueAdapter {
       if (state !== "unknown") return;
     }
     await queue.add(input.type, input, defaultJobOptions(input));
+  }
+
+  async pruneTerminal(queueName: JobQueueName, completedGraceMs = 7 * 86400000, failedGraceMs = 30 * 86400000, limit = 100): Promise<{ completed: number; failed: number }> {
+    if (completedGraceMs < 0 || failedGraceMs < 0 || !Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error("INVALID_QUEUE_RETENTION");
+    const queue = this.getQueue(queueName);
+    const completed = await queue.clean(completedGraceMs, limit, "completed");
+    const failed = await queue.clean(failedGraceMs, limit, "failed");
+    return { completed: completed.length, failed: failed.length };
   }
 
   async cancel(jobId: string, queueName: JobQueueName): Promise<void> {
@@ -164,12 +173,18 @@ export class BullMqMaintenanceQueueAdapter implements MaintenanceQueueAdapter {
   }
 
   async enqueue(input: MaintenanceJobInput): Promise<void> {
+    const existing = await this.queue.getJob(input.requestId);
+    if (existing) {
+      const state = await existing.getState();
+      if (state === "completed" || state === "failed") { try { await existing.retry(state); } catch (error) { if (await existing.getState() === state) throw error; } return; }
+      if (state !== "unknown") return;
+    }
     await this.queue.add("DATA_LIFECYCLE", input, {
       jobId: input.requestId,
       attempts: 3,
       backoff: { type: "exponential", delay: 5_000 },
-      removeOnComplete: false,
-      removeOnFail: false
+      removeOnComplete: { age: 7 * 86400, count: 10000 },
+      removeOnFail: { age: 30 * 86400, count: 10000 }
     });
   }
 
