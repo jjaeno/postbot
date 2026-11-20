@@ -12,6 +12,16 @@ const hash = (value: string): string => createHash("sha256").update(value).diges
 const clamp = (value: number): number => Math.max(0, Math.min(1, value));
 
 export type TopicSelectionPolicy = { freshness?: "NEWS" | "EVERGREEN" | "MIXED"; keywordMatch?: "REQUIRED" | "PREFER"; semanticDuplicateThreshold?: number; recentTopicDays?: number };
+export function topicSourceAllowed(raw: string, name: string, settings: { allowedSources: readonly string[]; excludedSources: readonly string[] }, discovery = false): boolean {
+  try {
+    const url = new URL(raw);
+    const matches = (source: string, allow: boolean) => {
+      if (/^https?:\/\//i.test(source)) { const scope = new URL(source); return url.hostname === scope.hostname && (discovery && allow || url.pathname === scope.pathname || url.pathname.startsWith(scope.pathname.endsWith("/") ? scope.pathname : `${scope.pathname}/`)); }
+      return url.hostname === source.toLowerCase() || url.hostname.endsWith(`.${source.toLowerCase()}`) || name.toLowerCase() === source.toLowerCase();
+    };
+    return !settings.excludedSources.some((source) => matches(source, false)) && (!settings.allowedSources.length || settings.allowedSources.some((source) => matches(source, true)));
+  } catch { return false; }
+}
 export const topicTokens = (text: string): Set<string> => new Set(text.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/u).filter((word) => word.length > 1 && !["the", "a", "an", "and", "of", "to", "in", "for", "with", "new", "news"].includes(word)));
 export const topicSimilarity = (left: string, right: string): number => {
   const a = topicTokens(left); const b = topicTokens(right);
@@ -30,16 +40,8 @@ export function scoreTopicCandidate(candidate: TopicSourceCandidate, settings: {
     suitabilityScore: 0, freshnessScore: 0, reliabilityScore: 0, expectedValueScore: 0,
     components: { channelFit: null, freshness: null, sourceReliability: null, explanationValue: null, visualizability: null, productionCost: null, historicalPerformance: null },
     scoringMethod: "DISCOVERY_ONLY_UNSCORED" as const, rejectionReason: "DISCOVERY_REQUIRES_EVIDENCE" };
-  const host = new URL(canonicalUrl).hostname;
-  const sourceMatches = (source: string): boolean => {
-    if (/^https?:\/\//i.test(source)) {
-      const allowed = new URL(source);
-      return host === allowed.hostname && (new URL(canonicalUrl).pathname === allowed.pathname || new URL(canonicalUrl).pathname.startsWith(allowed.pathname.endsWith("/") ? allowed.pathname : `${allowed.pathname}/`));
-    }
-    return host === source.toLowerCase() || host.endsWith(`.${source.toLowerCase()}`) || candidate.sourceName.toLowerCase() === source.toLowerCase();
-  };
   const blocked = ["politics", "medical advice", "financial advice", "legal advice", ...settings.excludedKeywords, ...settings.excludedTopics].find((term) => term && text.includes(term.toLowerCase()));
-  const sourceBlocked = settings.excludedSources.some(sourceMatches) || (settings.allowedSources.length > 0 && !settings.allowedSources.some(sourceMatches));
+  const sourceBlocked = !topicSourceAllowed(canonicalUrl, candidate.sourceName, settings);
   const suitabilityScore = settings.keywords.length ? settings.keywords.filter((term) => text.includes(term.toLowerCase())).length / settings.keywords.length : 0.5;
   // Freshness describes publication age, never the date of the historical event.
   const publishedAt = candidate.publishedAt ? Date.parse(candidate.publishedAt) : Number.NaN;

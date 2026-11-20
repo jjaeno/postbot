@@ -672,3 +672,14 @@ test("shows business stalls separately from server health on mobile", async ({ p
   await expect(panel).toContainText("외부 알림: 미설정 · 백업: 미설정");
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
 });
+
+test("explains absent collection jobs, production holds and recovery on mobile", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 }); await mockApi(page);
+  let recovered = false;
+  const progress = { state: "STALLED", reason: "EXPECTED_CYCLE_ELAPSED_WITHOUT_SUCCESS_OR_ACTIVE_WORK", cadenceMinutes: 360, graceMinutes: 375, expectedAt: "2026-11-19T12:00:00Z", lastAttemptAt: null, lastSuccessAt: null, delayMinutes: 1440 };
+  await page.route("**/operations/channels/channel-1/business-health", (route) => route.fulfill({ json: { state: recovered ? "PROGRESS_OBSERVED" : "ATTENTION_REQUIRED", issues: recovered ? [] : ["COLLECTION_STALLED"], lastCollectionAt: recovered ? "2026-11-20T12:00:00Z" : null, lastExternalSuccessAt: recovered ? "2026-11-20T12:00:00Z" : null, lastProductionAt: null, lastPublicationAt: null, collectionProgress: { ...progress, ...(recovered ? { state: "AWAITING_NEXT_CYCLE", lastSuccessAt: "2026-11-20T12:00:00Z", delayMinutes: 0 } : {}) }, productionProgress: { ...progress, state: "REVIEW_HOLD", reason: "REVIEW_HOLD" }, externalNotifications: "NOT_CONFIGURED", backup: { state: "NOT_CONFIGURED" }, dailySummary: { recordedCost: "0.000000", currency: "USD" } } }));
+  await page.goto("/#settings"); const panel = page.getByTestId("business-health-panel");
+  await expect(panel).toContainText("수집 주기 중단"); await expect(panel).toContainText("기대 실행:"); await expect(panel).toContainText("마지막 시도: 기록 없음"); await expect(panel).toContainText("판정 근거:"); await expect(panel).toContainText("검수 대기 또는 검수 상한");
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  recovered = true; await page.reload(); await expect(panel).toContainText("다음 주기 대기"); await expect(panel).not.toContainText("수집 주기 중단");
+});

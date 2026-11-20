@@ -1,7 +1,7 @@
 import { loadConfig } from "@postbot/config";
 import { hasHttpsVisualReference, ChannelCollectionProfileSchema, CollectAutomationJobPayloadSchema, TopicSelectionPolicySchema } from "@postbot/contracts";
 import { assertExecutionOwner, Prisma, type PrismaClient } from "@postbot/database";
-import { FixtureTopicSourceProvider, RssTopicSourceProvider, scoreTopicCandidate, topicSimilarity, type TopicSourceCandidate, type TopicSourceProvider } from "@postbot/providers";
+import { assessResearch, FixtureTopicSourceProvider, RssTopicSourceProvider, scoreTopicCandidate, topicSimilarity, type TopicSourceCandidate, type TopicSourceProvider, type TopicSourceResult } from "@postbot/providers";
 import { createHash } from "node:crypto";
 import { SourceCollection } from "./source-collection.js";
 
@@ -25,28 +25,35 @@ export class CollectProcessor {
     let profile = currentRule?.profile ? ChannelCollectionProfileSchema.parse(currentRule.profile) : null;
     if (!this.providerOverride && loadConfig().TOPIC_SOURCE_PROVIDER === "profile" && !profile) throw new Error("CHANNEL_COLLECTION_PROFILE_REQUIRED");
     const discovers = input.mode === "DISCOVER" || input.mode === "COLLECT_SELECT";
-    if (profile && discovers) {
-      for (const subtopic of profile.subtopics) await this.prisma.researchQuestion.upsert({ where: { channelId_idempotencyKey: { channelId: input.channelId, idempotencyKey: `subtopic:${sha256(subtopic)}` } },
-        create: { channelId: input.channelId, idempotencyKey: `subtopic:${sha256(subtopic)}`, question: `${subtopic}?`, subtopic, origin: "EDITORIAL" }, update: {} });
-    }
     const questions = profile && discovers ? await this.prisma.researchQuestion.findMany({ where: { channelId: input.channelId, status: "INVESTIGATE" }, orderBy: { createdAt: "asc" }, take: 5 }) : [];
-    if (profile && questions.length) profile = { ...profile, subtopics: [...new Set([...profile.subtopics, ...questions.map((question) => question.subtopic)])].slice(0, 40) };
+    const channelContext = await this.prisma.channel.findUniqueOrThrow({ where: { id: input.channelId }, select: { language: true, targetAudience: true, excludedTopics: true } });
     if (profile) input = { ...input, topic: profile.subtopics.join(" "), language: profile.language, keywords: profile.subtopics, excludedKeywords: profile.exclusions,
       selectionPolicy: { ...input.selectionPolicy, freshness: profile.freshness, recentTopicDays: profile.limits.recentTopicDays } };
     const provider = this.providerOverride ?? this.provider();
-    const request = { channelId: input.channelId, topic: input.topic, keywords: input.keywords, allowedSources: input.allowedSources, excludedSources: input.excludedSources, recencyHours: input.recencyHours, idempotencyKey: input.idempotencyKey, freshness: profile?.freshness ?? input.selectionPolicy?.freshness };
-    const result = !discovers ? { provider: "stored-candidates", candidates: [] as TopicSourceCandidate[], failures: [] }
+    const exclusions = [...(profile?.exclusions ?? []), ...(Array.isArray(channelContext.excludedTopics) ? channelContext.excludedTopics.filter((term): term is string => typeof term === "string") : [])];
+    input = { ...input, excludedTopics: Array.isArray(channelContext.excludedTopics) ? channelContext.excludedTopics.filter((term): term is string => typeof term === "string") : [] };
+    const request = { channelId: input.channelId, topic: input.topic, keywords: input.keywords, allowedSources: input.allowedSources, excludedSources: input.excludedSources, recencyHours: input.recencyHours, idempotencyKey: input.idempotencyKey, freshness: profile?.freshness ?? input.selectionPolicy?.freshness,
+      researchQuestions: questions.map(({ id, question, subtopic, origin, status }) => ({ id, question, subtopic, origin, status })),
+      researchContext: { language: profile?.language ?? channelContext.language, audience: profile?.audience || channelContext.targetAudience || "", exclusions, storyStyles: profile?.storyStyles ?? [] } };
+    const result: Pick<TopicSourceResult, "provider" | "candidates" | "failures" | "research" | "diagnostics"> = !discovers ? { provider: "stored-candidates", candidates: [], failures: [] }
       : !this.providerOverride && profile && loadConfig().TOPIC_SOURCE_PROVIDER === "profile"
       ? await new SourceCollection(this.prisma, input.channelId, profile, loadConfig().YOUTUBE_DISCOVERY_API_KEY).collect(request)
       : await provider.collect(request);
     const eligible = result.candidates.map((candidate) => scoreTopicCandidate(candidate, input))
-      .sort((left, right) => right.expectedValueScore - left.expectedValueScore);
+      .sort((left, right) => right.expectedValueScore - left.expectedValueScore || left.url.localeCompare(right.url));
     for (const candidate of eligible) await this.save(input.channelId, candidate, result.provider);
     for (const question of questions) {
-      const evidence = eligible.filter((candidate) => candidate.reliabilityMetadata?.contentScope === "FULL_TEXT" && topicSimilarity(question.subtopic, `${candidate.title} ${candidate.body}`) > 0).map((candidate) => ({ url: candidate.url, scope: "FULL_TEXT", fingerprint: sha256(candidate.body) }));
-      await this.prisma.researchQuestion.update({ where: { id: question.id }, data: { status: evidence.length ? "SUPPORTED" : "NEEDS_REVIEW", evidence, reason: evidence.length ? "SOURCE_AVAILABLE_CLAIMS_REQUIRE_VERIFICATION" : "NO_ORIGINAL_EVIDENCE" } });
+      const outcome = result.research?.find((entry) => entry.questionId === question.id) ?? assessResearch(question, eligible, request.researchContext);
+      const previous = question.evidence && typeof question.evidence === "object" && !Array.isArray(question.evidence) ? question.evidence : {};
+      const history = Array.isArray(previous.history) ? previous.history.slice(-4) : [];
+      const evidence = JSON.parse(JSON.stringify({ version: "research-v1", ...outcome, context: request.researchContext, claimsVerified: false, history: [...history, { observedAt: new Date().toISOString(), state: outcome.state, sources: outcome.sources }] })) as Prisma.InputJsonObject;
+      await this.prisma.researchQuestion.updateMany({ where: { id: question.id, status: "INVESTIGATE", updatedAt: question.updatedAt }, data: { status: outcome.state === "ANSWER_EVIDENCE_AVAILABLE" ? "CLAIM_REVIEW_REQUIRED" : outcome.state, evidence, reason: outcome.reason } });
     }
-    if (input.mode === "DISCOVER") return { provider: result.provider, discovered: eligible.length, sourceFailures: result.failures ?? [] };
+    if (profile && discovers) for (const candidate of eligible.filter((entry) => entry.reliabilityMetadata?.role !== "DISCOVERY").slice(0, 3)) {
+      const question = profile.language.startsWith("ko") ? `${candidate.title}의 원인과 결과는 무엇이며, 어떤 원문 자료로 확인할 수 있는가?` : `What caused ${candidate.title}, and which original records support its consequences?`;
+      await this.prisma.researchQuestion.upsert({ where: { channelId_idempotencyKey: { channelId: input.channelId, idempotencyKey: `discovery:${sha256(candidate.url)}` } }, create: { channelId: input.channelId, idempotencyKey: `discovery:${sha256(candidate.url)}`, question, subtopic: profile.subtopics[0]!, origin: "AI_HYPOTHESIS", reason: "DISCOVERED_TOPIC_UNVERIFIED_HYPOTHESIS" }, update: {} });
+    }
+    if (input.mode === "DISCOVER") return { provider: result.provider, discovered: eligible.length, sourceFailures: result.failures ?? [], externalCollection: result.diagnostics ?? null, research: result.research ?? [] };
     let rankedCount = 0;
     const idea = await this.prisma.$transaction(async (tx) => {
       await assertExecutionOwner(tx);
@@ -93,6 +100,7 @@ export class CollectProcessor {
         if (!rejectionReason) ranked.push({ candidate, snapshot, score, duplicateScore });
       }
       ranked.sort((left, right) => Number(right.snapshot.reservationRunId === runId) - Number(left.snapshot.reservationRunId === runId) || right.score.expectedValueScore - left.score.expectedValueScore || left.candidate.id.localeCompare(right.candidate.id));
+      if (profile) ranked.splice(profile.limits.targetCandidates);
       rankedCount = ranked.length;
       if (input.mode === "RANK") return null;
       const selected = ranked[0];
@@ -102,28 +110,26 @@ export class CollectProcessor {
     }, { timeout: 30_000 });
     if (input.mode === "RANK") return { provider: result.provider, ranked: rankedCount, rankedAt: new Date().toISOString() };
     if (!idea) throw new Error("NO_UNUSED_SOURCE_CANDIDATE_WAIT_FOR_NEXT_COLLECTION");
-    return { provider: result.provider, sourceFailures: result.failures ?? [], idea: { id: idea.id, channelId: idea.channelId, title: idea.title, summary: idea.summary ?? "", canonicalUrl: idea.canonicalUrl, sourceName: idea.sourceName, sourceKind: idea.sourceKind, publishedAt: idea.publishedAt?.toISOString() ?? null, topic: input.topic, language: input.language }, contentHash: idea.contentHash };
+    return { provider: result.provider, discovered: eligible.length, externalCollection: result.diagnostics ?? null, sourceFailures: result.failures ?? [], idea: { id: idea.id, channelId: idea.channelId, title: idea.title, summary: idea.summary ?? "", canonicalUrl: idea.canonicalUrl, sourceName: idea.sourceName, sourceKind: idea.sourceKind, publishedAt: idea.publishedAt?.toISOString() ?? null, topic: input.topic, language: input.language }, contentHash: idea.contentHash };
   }
 
-  private async save(channelId: string, candidate: TopicSourceCandidate & { suitabilityScore: number; freshnessScore: number; expectedValueScore: number }, provider: string) {
+  private async save(channelId: string, candidate: TopicSourceCandidate & { suitabilityScore: number; freshnessScore: number; expectedValueScore: number; rejectionReason?: string | null }, provider: string) {
     const canonicalUrl = canonicalizeUrl(candidate.url);
     const contentHash = candidate.contentHash ?? sha256(`${candidate.title}\n${candidate.summary}\n${candidate.body}`.toLowerCase().trim());
+    const evaluation = candidate.reliabilityMetadata?.collectionEvaluation;
+    const collectionReason = evaluation && typeof evaluation === "object" && "reason" in evaluation && typeof evaluation.reason === "string" && evaluation.reason !== "ELIGIBLE" ? evaluation.reason : null;
     const data = {
-      channelId, status: "SHORTLISTED" as const, title: candidate.title, summary: candidate.summary,
+      channelId, status: "CANDIDATE" as const, title: candidate.title, summary: candidate.summary,
       canonicalUrl, urlHash: sha256(canonicalUrl), contentHash, sourceName: candidate.sourceName, sourceKind: candidate.sourceKind,
-      provider, publishedAt: candidate.publishedAt ? new Date(candidate.publishedAt) : null,
+      provider, publishedAt: candidate.publishedAt ? new Date(candidate.publishedAt) : null, rejectionReason: candidate.rejectionReason ?? collectionReason,
       suitabilityScore: new Prisma.Decimal(candidate.suitabilityScore), freshnessScore: new Prisma.Decimal(candidate.freshnessScore),
       reliabilityScore: new Prisma.Decimal(candidate.reliabilityScore.toFixed(6)), expectedValueScore: new Prisma.Decimal(candidate.expectedValueScore.toFixed(6)),
       rawSnapshot: { contentScope: candidate.reliabilityMetadata?.contentScope === "FULL_TEXT" && candidate.body.length <= 10_000 ? "FULL_TEXT" : candidate.body ? "SUMMARY" : "UNKNOWN", body: candidate.body.slice(0, 10_000), collectedAt: new Date().toISOString(), eventAt: candidate.eventAt ?? null, reliability: candidate.reliabilityMetadata ? JSON.parse(JSON.stringify(candidate.reliabilityMetadata)) as Prisma.InputJsonObject : null }
     };
     const existing = await this.prisma.contentIdea.findFirst({ where: { channelId, OR: [{ urlHash: data.urlHash }, { contentHash }] } });
     if (existing) return existing;
-    // Link related event coverage without merging their separate claims/text.
-    const peers = candidate.publishedAt ? await this.prisma.contentIdea.findMany({ where: { channelId, publishedAt: { gte: new Date(Date.parse(candidate.publishedAt) - 86400000), lte: new Date(Date.parse(candidate.publishedAt) + 86400000) } }, orderBy: { collectedAt: "desc" }, take: 100 }) : [];
-    const peer = peers.find((peer) => topicSimilarity(candidate.title, peer.title) >= 0.6);
-    const peerSnapshot = peer?.rawSnapshot && typeof peer.rawSnapshot === "object" && !Array.isArray(peer.rawSnapshot) ? peer.rawSnapshot : {};
-    const cluster = typeof peerSnapshot.eventClusterKey === "string" ? peerSnapshot.eventClusterKey : peer ? `event:${peer.id}` : `event:${data.contentHash}`;
-    Object.assign(data.rawSnapshot, { eventClusterKey: cluster, clusterMethod: "TITLE_SIMILARITY_WITHIN_ONE_DAY_ASSOCIATION_ONLY", question: typeof candidate.reliabilityMetadata?.question === "string" ? candidate.reliabilityMetadata.question : `${candidate.title}?`,
+    const cluster = `source:${data.urlHash}`;
+    Object.assign(data.rawSnapshot, { eventClusterKey: cluster, clusterMethod: "SOURCE_RECORD_IDENTITY_NOT_TITLE_SIMILARITY", question: typeof candidate.reliabilityMetadata?.question === "string" ? candidate.reliabilityMetadata.question : `${candidate.title}?`,
       angle: candidate.reliabilityMetadata?.angle ?? "SOURCE_EXPLANATION", evidence: candidate.reliabilityMetadata?.evidence ?? [], visualReferences: candidate.reliabilityMetadata?.media ?? null });
     try { return await this.prisma.contentIdea.create({ data }); }
     catch (error) {

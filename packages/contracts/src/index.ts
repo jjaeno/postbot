@@ -755,3 +755,5 @@ export type ScriptSceneGenerationResponse = z.infer<typeof ScriptSceneGeneration
 export { ProductionReferenceSchema, ProductionResultSchema, ProductionResultsResponseSchema, type ProductionReference, type ProductionResult } from "./production.js";
 
 export { hasHttpsVisualReference } from "./collection-profile.js";
+export { normalizeMediaReferences, type MediaReference } from "./collection-profile.js";
+export { BusinessProgressSchema, evaluateBusinessProgress, type BusinessProgress } from "./business-progress.js";

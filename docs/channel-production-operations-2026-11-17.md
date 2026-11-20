@@ -1,5 +1,7 @@
 # 채널별 제작·운영 개선 기록
 
+현재 PR #5의 소재 조사·업무 감시 결함에 대한 최신 결과는 아래 **20.11** 절을 기준으로 한다. 기존 20.2/20.10의 당시 통과 기록은 이번에 발견된 다섯 결함이나 실운영 검증까지 완료했다는 의미가 아니다.
+
 기준 커밋: `31d0564a1d44711f830e44de0b6563c39cff6ca2`. 브랜치: `feat/channel-production-operations`. 시작 시 작업 트리는 깨끗했다. 이번 요청은 20단계 전체를 승인하며 push/merge/배포는 금지한다. 2026-11-20 현재 요청된 20.1–20.10의 로컬 구현과 필수 검증을 완료했다. 실제 Provider·운영 환경의 확인과 의도적 미지원 범위는 마지막 상태표에 구분했다. 아래 초기 상태표와 단계별 당시 기록은 작업 경과를 보존한다.
 
 ## 기준 코드 재검증
@@ -205,3 +207,35 @@ Migration 202611180004~006: 갱신 fencing, nullable 실제 게시 시각·확�
 - [LoC JSON API](https://www.loc.gov/apis/json-and-yaml/requests/)
 - [NASA API](https://api.nasa.gov/), [이미지 API 명세](https://images.nasa.gov/docs/images.nasa.gov_api_docs.pdf)
 - 2026-11-18 재확인: [Gemini API 약관](https://aistudio.google.com/docs/terms), [ElevenLabs TTS 문서](https://elevenlabs.io/docs/overview/capabilities/text-to-speech). 소유권·계정 요금제·상업 사용·제한 조건을 각각 검토해야 하며 일반 약관 링크만으로 개별 자산 권리를 확정하지 않는다.
+
+## 20.11 PR #5 소재 조사·업무 감시 수정 (2026-11-20–21)
+
+시작 확인: 브랜치 `feat/channel-production-operations`, HEAD `fa755d59d97decc588834c7fad7d405375ec6fdd`, 깨끗한 작업 트리. 검토 기준과 같아 이후 커밋으로 이미 고쳐진 다섯 항목은 없었다. 기존 안전 읽기/예산/캐시/원문 범위/권리 검사와 수동 제작의 공통 시각 판정은 이미 구현되어 재사용했다. 제목 유사도만으로 새 원문을 사건/주장 단위로 합치던 부분은 출처 레코드 식별로 변경했으며 기존 저장 증거를 덮어쓰지 않았다.
+
+| 항목 | 상태 | 원인·수정 파일·현재 동작 | 직접 검증 |
+|---|---|---|---|
+| NASA 최종 선정 | 수정 완료 | `contracts/collection-profile.ts`, `providers/official-topic-source.ts`, API `ideas.service.ts`/`prisma-ideas.repository.ts`, worker `collect-processor.ts`. NASA href를 공통 미디어 계약으로 정규화하고 저장된 구형 href도 읽는다. API 수집·수동 제작·자동 RANK/SELECT가 같은 predicate를 사용한다. 상세/API 주소와 미리보기를 구분하며 권리·다운로드·상업 사용은 미확정이다. | 실제 필드 모양의 NASA 응답→후보 저장의 IMAGE_PREVIEW/UNKNOWN 확인→구형 href 재평가→SELECT 통과. AssetLicense는 0개. 잘못된 URL/상세/API만 있는 참조 탈락 및 API 경로의 동일 판정 통과. |
+| 다중 출처 후보 보존 | 수정 완료 | `providers/research.ts`, `official-topic-source.ts`, worker `source-collection.ts`. 탐색 처리 상한과 최종 목표를 분리하고 출처/검색어를 순환한다. 중복 제거·보강·채널 적합성 이후 목표를 적용한다. 보강 후 같은 원문으로 합쳐져도 다른 후보로 보충한다. 소스별 수집/처리/보강/통과/선정/탈락과 호출 수·실패를 durable 결과에 기록한다. | YouTube 25+LoC 1+RSS 1, 목표 20에서 LoC/RSS가 평가·선정됨. 총 실제 Mock 읽기 8회 상한, 소진 실패 기록. 역순 응답/지연에서도 같은 후보 순서. 소스 장애 격리·허용 출처 제한·URL 중복·동시 예산 선점/공유 캐시·채널 격리 통과. 같은 원문으로 연결된 영상 2개 이후 다른 원문까지 보충되어 최종 2개 통과. |
+| 질문별 조사 | 수정 완료 | `providers/research.ts`/`index.ts`, worker `collect-processor.ts`/`script-generation-processor.ts`, API `research-questions.controller.ts`. ID/본문/분류/기원/상태를 전달하고 전체 질문으로 실제 LoC/NASA 검색한다. 질문별 요청·원문·인용 위치·fingerprint·이력을 연결한다. 발견 자료/답변 관련 인용/검증 필요/부족/충돌을 구분하고 claimsVerified=false를 유지한다. 자동 질문은 실제 발견 제목의 대상/원인/결과를 조사 가설로 만든다. | 같은 history의 로마/피라미드 질문이 서로 다른 q·원문 연결을 생성. 분류만 일치하거나 요청 추적이 없는 원문은 근거에서 제외. 재실행 후보 멱등성·재조사 후 충돌 상태·제외 주제·언어/시청자/이야기 설정 전달 통과. |
+| YouTube 독립 조사 | 수정 완료 | worker `source-collection.ts`, providers의 기존 안전 커넥터/공통 연구 판정. 설명란 근거 실패/부재 시 제목 기반 미검증 가설로 허용된 독립 컬렉션을 조사한다. 원문 인용이 맞는 경우만 독립 EVIDENCE로 연결하고 원래 영상은 발견 URL로 기록한다. 공공 지표를 근거·자산·자체 점수로 사용하지 않는다. | 링크 없는 로마 영상→LoC 원문/주장 인용 연결 통과. 피라미드 질문에 로마 원문만 있으면 DISCOVERY 유지. 독립 커넥터 미설정은 INDEPENDENT_SEARCH_NOT_CONFIGURED, 출처 제한과 일 호출 상한 통과. |
+| 작업 미생성 중단 감지 | 수정 완료 | `contracts/business-progress.ts`, API `operations/business-health.ts`, web `business-progress.tsx`/`main.tsx`, DB migration. 실제 새 수집과 후보 확보 성과/단순 읽기/빈 결과/RANK를 분리하고 주기·유예·재고·검수·진행 작업·예산·계정·정지를 평가한다. 기대/시도/성과/지연/사유를 화면에 표시하고 복구된 알림을 해제한다. | 계정·일정이 정상인데 24시간 동안 작업이 0개인 채널에서 수집·제작 경고. RANK 성공이 수집 시각을 갱신하지 않음. 후보 0개 구분, 실제 읽기+적격 후보/렌더 후 해제, 알림 중복 억제·Mock 전달 제외 통과. 최초 유예·정지·승인 재고·검수·예산·계정 보류·진행 작업에서 제작 중단 오탐 없음. 관련 모바일 브라우저 2개 통과. |
+
+실패 우선 재현: NASA href predicate, YouTube 뒤 LoC 유실/질문 검색, NASA 저장→선정, 링크 없는 YouTube 독립 조사, 정상 설정+작업 0개 중단 감지, API 시각 필수 경로는 각각 수정 전 assertion 실패를 확인했다. 이후 같은 기대값으로 통과했다. 새 보충 테스트의 원문 fixture에 채널 필수어 history가 없어 KEYWORD_MISMATCH가 발생한 것은 fixture의 채널 관련 문맥을 보완했다. 키워드/권리/예산/근거 판정은 완화하지 않았다. 테스트의 unsafe any/async lint 오류도 수정했다.
+
+검증 환경은 로컬 Windows/Node 20, 격리 MySQL 8.4·Redis, 외부 응답은 실제 필드 형식을 반영한 Mock이다. 변경 contracts/providers/database/API/worker/web lint·typecheck를 수행했다. 관련 테스트는 contracts 5개, providers 16개, worker 14개(실제 MySQL/Redis 포함), API 26개(실제 MySQL 포함), 관련 Playwright 2개다. 변경 앱 API/worker/web와 providers build도 수행했다. 전체 monorepo/전체 E2E/renderer smoke는 이 변경과 무관해 반복하지 않는다. 상세 명령은 각 package의 lint/typecheck 및 vitest 대상 파일(`visual-reference`, `business-progress`, `official-topic-source`, `research`, `topic-scoring`, `rss-topic-source`, `safe-external-reader`, `source-research.integration`, `source-collection.integration`, `topic-selection.integration`, `script-generation-processor`, `ideas.service`, `automation-start.integration`, `business-health.integration`, `research-questions.integration`)에 한정했다.
+
+Migration `202611200001_source_fetch_completion`: nullable UTC `source_fetches.completedAt`와 채널/완료시각 index 추가. 기존 테스트 DB `postbot_upgrade_test`는 30→31 migration, 채널 7개와 legacy 응답 행을 보존하고 기존 completedAt=NULL을 확인했다. schema diff 차이 없음. 빈 `postbot_pr5_empty_test`도 31개 migration 적용 통과. 기존 행에 성공 시각을 추정 backfill하지 않는다. rollback은 추가 컬럼을 유지하고 구버전 앱으로 되돌리는 방식이며 증거를 삭제하는 자동 down migration은 없다.
+
+상태 구분:
+
+- **이미 해결되어 변경 불필요:** HTTPS/DNS/리다이렉트 안전 읽기, 요청 캐시·일별 예산 row lock, 외부 데이터 비신뢰 처리의 기존 경계, 자산 권리·비용·멱등성 검사. 호출/판정 경로를 재사용했고 검사를 제거하지 않았다.
+- **외부 설정 필요:** 실제 YouTube API key와 quota/권한, 채널별 허용 출처·원문 파싱 가능성, 개별 자료 권리 검토, 실제 SNS/운영 주기·규모·외부 알림 수신 검증. 운영 알림 어댑터는 여전히 Mock/미설정이다.
+- **미완료/지원 제한:** 임의 웹 검색·다국어 의미 추론·자동 사실성 교차 검증은 구현하지 않았다. 질문별 대상 토큰/같은 문장 관계/반증 표현의 보수적 검사로 인용을 연결하며 사실 검증 완료로 표시하지 않는다. 설정된 LoC/NASA에서 적격 자료를 못 찾으면 검토 상태를 유지한다. 외부 API 실응답·운영 DB·원격 CI는 이번 작업에서 검증하지 않았다. Mock/로컬 통과를 실운영 완료로 표현하지 않는다.
+
+이번 요청에서는 push·merge·배포·실 SNS 게시·유료 Provider 호출을 실행하지 않는다. 로컬 문서를 갱신하며 원격 PR 본문은 변경하지 않는다. YouTube 정책과 NASA/LoC 응답 문서는 2026-11-20 재확인했으며 링크 및 갱신 책임은 `operations.md`에 기록했다.
+
+최종 점검 추가: 키워드 검색을 설정한 YouTube에도 로마/피라미드 질문별 q를 전달하는 실패 테스트를 확인 후 수정했다. YouTube 제목은 독립 검색의 입력으로 그대로 전달하며 영상 페이지/리다이렉트는 사실 근거에서 제외한다. YouTube DISCOVERY를 변형한 자동 질문 레코드는 생성하지 않고, 독립 원문에서 확보한 제목으로 질문을 만든다. API Data의 다운로드·파생 데이터/지표 제한은 [공식 정책 III.E](https://developers.google.com/youtube/terms/developer-policies)를 2026-11-21 재확인했다. 이 구현을 정책 심사 승인으로 표현하지 않으며 실제 API 프로젝트의 사용 목적/정책 검토는 외부 확인 필요다. 추가 OpenAI/Fake LLM 관련 5개 회귀도 통과해 providers 관련 검증은 총 21개다. 모든 LLM 호출은 HTTP Mock/Fake이며 유료 호출은 없다.
+
+페이지별 공정성 추가 회귀: pagesPerSource=5에서 첫 검색어의 후속 페이지가 예산을 먼저 소진하는 실패를 재현했다. 커넥터를 페이지 단위 비동기 iterator로 나눠 각 출처/검색어의 첫 페이지를 후속 페이지보다 먼저 순환한다. YouTube 우선 순서·읽기 예산 3회에서도 LoC 첫 페이지 후보를 보존하는 회귀를 추가했다. 이 항목을 포함한 최종 providers 검증 대상은 22개다.
+
+최종 내부 필수 검증 결과: 변경 6개 app/package의 lint·typecheck 통과, 관련 unit/integration 총 67개와 브라우저 2개 통과, providers/API/worker/web build 통과, 빈/기존 데이터 DB migration 및 schema diff 통과. 후속 변경이 없는 검증은 재사용했으며 전체 monorepo 검증이나 원격 CI 통과를 주장하지 않는다. 현재 단계의 내부 수정은 완료, 실제 운영 검증은 외부 확인 대기다.

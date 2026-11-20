@@ -434,11 +434,13 @@ model SourceFetch {
   state      String   @db.VarChar(16)
   response   Json?
   startedAt  DateTime @default(now()) @db.DateTime(3)
+  completedAt DateTime? @db.DateTime(3)
   expiresAt  DateTime @db.DateTime(3)
   channel    Channel  @relation(fields: [channelId], references: [id], onDelete: Restrict)
 
   @@unique([channelId, requestKey])
   @@index([channelId, startedAt])
+  @@index([channelId, completedAt])
   @@index([expiresAt])
   @@map("source_fetches")
 }

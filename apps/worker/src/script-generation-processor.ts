@@ -170,6 +170,8 @@ export class ScriptGenerationProcessor {
         const visual = jsonObject(template?.visualStyle ?? null);
         const strategy = jsonObject(channel?.strategyVersions[0]?.strategy ?? null);
         const generationContext = {
+          storyStyles: collection?.storyStyles ?? [],
+          excludedTopics: [...(collection?.exclusions ?? []), ...(Array.isArray(channel?.excludedTopics) ? channel.excludedTopics.filter((term): term is string => typeof term === "string") : [])],
           language: collection?.language ?? channel?.language ?? input.idea.language,
           targetAudience: collection?.audience || channel?.targetAudience || null,
           tone: template?.tone ?? null,

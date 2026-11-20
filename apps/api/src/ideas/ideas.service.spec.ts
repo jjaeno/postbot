@@ -171,6 +171,13 @@ const createService = (provider: TopicSourceProvider = new StaticTopicSourceProv
 };
 
 describe("IdeasService", () => {
+  it("uses the common preview predicate for API collection and retains unapproved NASA references", async () => {
+    const refs = [{ href: "https://images-assets.nasa.gov/image/SPACE/SPACE~thumb.jpg", rel: "preview", render: "image" }];
+    const { service, repository } = createService(new StaticTopicSourceProvider([candidate({ url: "https://example.org/good", reliabilityMetadata: { media: { references: refs, rights: "ITEM_REVIEW_REQUIRED" } } }), candidate({ url: "https://example.org/bad", reliabilityMetadata: { media: { references: [{ url: "https://images.nasa.gov/details/SPACE" }] } } })]));
+    repository.addSettings("workspace-1", { ...baseSettings(), requireVisualEvidence: true });
+    const result = await service.collect("workspace-1", { channelId: "channel-1", idempotencyKey: "api-nasa-visual", source: "auto" });
+    expect(result.created).toBe(1); expect(result.rejected).toBe(1);
+  });
   beforeEach(() => {
     process.env.NODE_ENV = "test";
   });

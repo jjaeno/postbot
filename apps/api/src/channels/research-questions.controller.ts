@@ -18,7 +18,8 @@ export class ResearchQuestionsController {
   }
   @Get("questions") async list(@Req() req: AuthenticatedRequest, @Param("channelId") channelId: string) {
     await this.owned(req.auth.workspaceId, channelId);
-    return { questions: await this.prisma.researchQuestion.findMany({ where: { channelId }, orderBy: { createdAt: "desc" }, take: 100 }) };
+    const rows = await this.prisma.researchQuestion.findMany({ where: { channelId }, orderBy: { createdAt: "desc" }, take: 100 });
+    return { questions: rows.map((row) => ({ ...row, claimsVerified: false, evidenceState: row.status === "SUPPORTED" ? "MATERIAL_FOUND" : row.status === "CLAIM_REVIEW_REQUIRED" ? "ANSWER_EVIDENCE_AVAILABLE" : row.status })) };
   }
   @Post("questions") async create(@Req() req: AuthenticatedRequest, @Param("channelId") channelId: string, @Body() raw: unknown) {
     await this.owned(req.auth.workspaceId, channelId);

@@ -1208,6 +1208,14 @@ Commit: `fix: CI 전체 여정의 수집 근거와 Fake Hook 계약 보완`
 
 각 단계는 관련 lint/typecheck/test를 통과해야 커밋한다. 변경되지 않은 성공 검증은 반복하지 않는다. 외부 확인 대기와 내부 미완료는 구별해서 보고한다.
 
+### 20.11단계 — PR #5 소재 조사·업무 감시 결함 보완
+
+기준: `fa755d59d97decc588834c7fad7d405375ec6fdd`, 브랜치 `feat/channel-production-operations`. NASA 미디어 계약, 출처별 처리 기회와 평가 후 제한, 질문별 조사·근거 상태, YouTube 독립 원문 조사, 작업 미생성 중단 감지만 수정한다. push·merge·배포·실 SNS 게시·유료 호출은 제외한다.
+
+완료 조건: 결함의 실패 테스트와 수정 후 회귀, 변경 contracts/providers/database/API/worker/web lint·typecheck, 관련 unit 및 격리 MySQL/Redis integration, 업무 감시 화면의 관련 Playwright, 빈 DB와 기존 데이터 migration 검증. 기존 성공 검증은 해당 코드가 바뀌지 않으면 반복하지 않는다. 기존 구현 보고서와 운영 계약을 갱신하고 실 API/운영 미검증을 명시한다.
+
+Commit: `fix: 소재 조사와 채널 업무 중단 감지 보완`
+
 세부 제품 요구사항과 각 단계의 추적 관계는 기능 명세에서 관리한다.
 
 구현 계획에는 **단계 범위와 완료 조건만 유지**하며 기능 명세의 전체 내용을 중복 복사하지 않는다.

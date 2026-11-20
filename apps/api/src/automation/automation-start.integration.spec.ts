@@ -30,9 +30,12 @@ suite("scheduler and manual start concurrency", () => {
     const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Fixture", slug: key, outputProfiles: { create: { platform: "YOUTUBE", minDurationSeconds: 35, maxDurationSeconds: 55 } }, collectionRules: { create: { profile: collectionProfilePreset("SCIENCE", "en"), recencyHours: 72, collectionFrequencyMinutes: 360, keywords: [], excludedKeywords: [], allowedSources: [], excludedSources: [] } } } });
     const idea = await prisma.contentIdea.create({ data: { channelId: channel.id, title: "Fixture", canonicalUrl: "https://example.com/fixture", urlHash: key, contentHash: key, sourceName: "Fixture", sourceKind: "OFFICIAL", provider: "fixture", suitabilityScore: 1, freshnessScore: 1, reliabilityScore: 1, expectedValueScore: 1, rawSnapshot: { body: "Fixture without visual evidence" } } });
     const queue: QueueAdapter = { enqueue: () => Promise.resolve(), cancel: () => Promise.resolve(), close: () => Promise.resolve() };
-    const service = new AutomationService(prisma, new JobsService(new PrismaJobsRepository(prisma), queue), {} as OperationsService);
+    const service = new AutomationService(prisma, new JobsService(new PrismaJobsRepository(prisma), queue), { notify: vi.fn(() => Promise.resolve()), audit: vi.fn(() => Promise.resolve()) } as unknown as OperationsService);
     await expect(service.start(workspace.id, { channelId: channel.id, ideaId: idea.id, idempotencyKey: key })).rejects.toThrow("VISUAL_REFERENCE_REQUIRED");
     expect(await prisma.productionJob.count({ where: { channelId: channel.id } })).toBe(0);
+    expect(await prisma.providerUsage.count({ where: { contentItem: { channelId: channel.id } } })).toBe(0);
+    await prisma.contentIdea.update({ where: { id: idea.id }, data: { rawSnapshot: { body: "NASA space reference", visualReferences: { references: [{ href: "https://images-assets.nasa.gov/image/SPACE/SPACE~thumb.jpg", rel: "preview", render: "image" }], rights: "ITEM_REVIEW_REQUIRED" } } } });
+    await expect(service.start(workspace.id, { channelId: channel.id, ideaId: idea.id, idempotencyKey: `${key}:nasa` })).resolves.toMatchObject({ channelId: channel.id });
     expect(await prisma.providerUsage.count({ where: { contentItem: { channelId: channel.id } } })).toBe(0);
   });
   it("holds only the affected account branch before paid production", async () => {

@@ -26,6 +26,10 @@ worker/renderer 내부 `:3002/ready`는 BullMQ 실행/Redis 연결을 확인한�
 
 ## 채널 업무 감시와 보존 (20.10)
 
+20.11 보완: 수집 성과는 새 외부 읽기와 적격 후보가 함께 기록된 COLLECT 결과로 판단한다. RANK/SELECT, 캐시 재사용, 후보 0개는 성공 주기를 갱신하지 않는다. `SourceFetch.completedAt`은 실제 새 읽기의 성공 시각이며 기존 행은 NULL을 유지한다. `lastExternalSuccessAt`은 마지막 읽기, `lastCollectionAt`은 후보 확보 성과로 구분한다. 결과 영수증은 `ProductionJob.result.externalCollection`에 남아 만료 캐시 정리 후에도 성과 시각을 확인할 수 있다.
+
+`collectionProgress`/`productionProgress`는 기대 실행·마지막 시도/성과·지연·주기·유예·판정 사유를 반환한다. 최초 기대 시각은 채널 생성+주기이며 유예는 추가 1주기+15분이다. 이후 마지막 성과를 기준으로 계산한다. 제작은 승인 재고+가까운 예약 재고, 진행 작업, 검수 대기/상한을 함께 본다. 재고 충족/의도적 정지/예산/계정/설정 보류는 STALLED와 구분한다. 진행 작업 자체가 정체되면 기존 STALE_WORK가 별도로 경고한다. 실제 성과 이력이 없으면 PROGRESS_OBSERVED를 반환하지 않는다. 해소한 business 알림은 payload._resolution=RESOLVED로 보존하고 전달하지 않으며, 지속 장애는 기존 4시간 bucket의 중복 억제·확인·재알림을 따른다.
+
 `GET /operations/channels/:channelId/business-health`와 설정 화면은 liveness/readiness와 별도로 마지막 수집·렌더·플랫폼 확인 게시 시각, 놓친 예약/자동 슬롯, 2시간 이상 대기, 하루 3회 이상 실패, 재인증·예산 보류, 로컬 임시 디스크 여유, UTC 일별 생성·렌더·게시·실패·비용 기록을 보여준다. S3 어댑터는 전체 저장 용량을 제공하지 않으므로 용량을 추정하지 않고 미제공으로 표시한다. 감시는 분당 채널 50개 cursor 단위로 순회하므로 전체 탐지 지연은 채널 수에 비례한다. 명시적으로 정지한 채널의 새 자동 슬롯을 누락으로 간주하지 않는다.
 
 in-app 알림은 이벤트/채널/시간 구간별로 중복을 억제하고 지속 문제는 재알림하며 OWNER가 확인할 수 있다. `OPERATIONS_NOTIFICATION_PROVIDER=disabled`는 외부 미설정, `mock`은 Mock 검증 전용이다. DB lease로 Mock 중복 전달을 막고 실패는 재시도하며 확인한 알림은 다시 전달하지 않는다. 실제 메일·메신저·Sentry 수신 검증은 별도 운영 설정이 필요하다. 외부 전송 성공을 기록하지 않는다.
@@ -35,6 +39,20 @@ RETENTION은 오래된 FAILED 콘텐츠의 보호되지 않은 렌더와 참조�
 Redis 완료 기록은 7일, 실패 기록은 30일/각 10000개 상한으로 정리하며 복구 스캔은 terminal 기록을 batch 100개씩 정리한다. DB 작업 기록은 남겨 Redis 재전달에도 이미 성공한 유료 작업을 실행하지 않는다. 임시 렌더 폴더는 소유 marker가 있고 같은 호스트의 PID가 종료되었으며 24시간이 지났고 실행 소유권이 없는 경우만 정리한다. marker가 없는 과거 폴더와 살아 있는 프로세스는 보존한다.
 
 채널 감시는 정지한 채널도 포함해 만료 수집 캐시와 사용하지 않은 후보를 batch 100개씩 정리한다. 후보는 프로필의 보존 기간(최대 30일)을 적용하며 사용·선정·예약·생성 작업 근거가 있으면 보존한다. 채널별 cursor로 보호된 첫 페이지 이후도 순회한다. 오늘의 호출 예산 영수증은 지우지 않는다.
+
+## 소재 조사 운영 계약 (20.11)
+
+`limits.targetCandidates`는 평가 후 제작 후보 목표다. 선택적 `processingCandidates`는 20–400이며 미설정이면 min(400, max(40, target×4))이다. 기존 프로필 JSON은 그대로 읽는다. 소스/검색어별 차례를 순환하고 UTC 날짜로 시작 소스를 회전한다. 한 수집의 검색 작업은 최대 min(120, 처리 상한), 페이지는 기존 설정 1–5, 페이지당 후보는 25개로 제한한다. 공통 일별 호출 예산·캐시·안전 읽기를 재사용한다. URL 중복 제거→보강→출처/채널/시각 조건 평가→최종 목표 제한 순서이며, 보강 후 같은 원문으로 합쳐져도 남은 후보를 처리한다. `externalCollection.sources`와 후보의 collectionEvaluation/rejectionReason에서 수집·보강·통과·선정/탈락 사유를 확인한다. 모든 출처에 호출을 보장할 수 없는 작은 예산에서는 예산을 넘기지 않고 실패 사유를 기록한다.
+
+미디어 참고 자료는 IMAGE_PREVIEW/DETAIL_PAGE/API_RESPONSE로 정규화한다. NASA href+render=image+rel=preview, LoC 이미지 URL 문자열, 기존 url 객체/이미지 확장자를 호환한다. 상세 페이지·JSON/XML/API 주소만으로 시각 조건을 통과하지 않는다. HTTPS preview는 참고 자료의 존재만 의미한다. downloadable/commercialUse=UNKNOWN, rights=ITEM_REVIEW_REQUIRED이며 기존 자산 권리·제작 승인 검사는 유지한다. 기존 저장 NASA href도 공통 판정 함수로 읽는다.
+
+질문은 ID·본문·분류·기원·상태 및 현재 채널의 언어/시청자/제외 주제/이야기 설정과 함께 전달한다. LoC/NASA q와 키워드 검색이 설정된 YouTube q에는 전체 질문을 사용한다. 참고 채널 업로드만 설정한 경우 임의로 전역 YouTube 검색을 추가하지 않는다. RSS는 원격 질의인 것처럼 표시하지 않고 LOCAL_FEED_FILTER와 feed URL을 기록한다. 조사 상태는 INVESTIGATE→MATERIAL_FOUND/CLAIM_REVIEW_REQUIRED/CONFLICTING_EVIDENCE/INSUFFICIENT_EVIDENCE이며 API evidenceState의 ANSWER_EVIDENCE_AVAILABLE은 답변 관련 원문 인용 확보를 뜻한다. 이전 SUPPORTED는 MATERIAL_FOUND로 해석한다. claimsVerified는 false다. 질문별 요청 기록·원문 snapshot·SHA-256·정규화 텍스트 위치·최대 5회 이력을 보존하고 recheck는 다음 수집에서 재조사한다. 분류 일치/원문 확보만으로 답을 검증하지 않는다. 현재 판정은 보수적인 대상 토큰·같은 문장의 관계/반증 표현 검사이며 의미 이해/사실성 교차 검증을 대신하지 않는다. 외부 본문과 질문은 지시문으로 실행하지 않는다.
+
+YouTube는 공개 탐색 자료다. 설명란에 적격 원문이 없으면 제목을 미검증 조사 가설로 삼아 채널에서 허용한 LoC/NASA를 조회한다. 독립 검색 결과 중 최대 3건의 허용 원문을 확인하며, 질문별 원문 인용이 없거나 다른 사건이면 DISCOVERY 상태를 유지한다. 커넥터가 없으면 INDEPENDENT_SEARCH_NOT_CONFIGURED, 허용 출처가 없으면 NO_ALLOWED_DISCOVERY_SOURCE_CONFIGURED, 키가 없으면 YOUTUBE_DISCOVERY_KEY_UNSET을 기록한다. 임의 웹 검색·영상/음성/제3자 자막 다운로드는 구현하지 않았다. 공개 통계는 원래 지표로 분리하고 자체 점수/성과 추론에 쓰지 않는다. [YouTube 공식 정책](https://developers.google.com/youtube/terms/developer-policies), [NASA 응답 문서](https://images.nasa.gov/docs/images.nasa.gov_api_docs.pdf), [LoC 요청 문서](https://www.loc.gov/apis/json-and-yaml/requests/)는 2026-11-20 확인했으며 커넥터 관리자가 정책/응답 변경 시 갱신한다. 실제 API 및 운영 규모 검증은 별도다.
+
+YouTube 정책 III.E는 2026-11-21 재확인했다. 영상 제목은 독립 검색의 입력으로 그대로 전달하며 YouTube 페이지/리다이렉트는 사실 근거에서 제외한다. 자동 질문 레코드는 독립 원문 기반으로만 만든다. 다운로드·새 파생 지표/데이터를 허용받았다고 해석하지 않으며 실제 API 프로젝트의 정책 적합성 심사는 운영자가 확인해야 한다.
+
+## 저장소 감사
 
 렌더 재사용은 저장소 존재 검사를 수행한다. 확인된 유실만 MISSING으로 바꾸고 원래 manifest/체크섬을 보존한다. 네트워크 검사 실패를 유실로 단정하지 않는다. 보존 작업은 요청 workspace의 참조만 검사하며 다음 cursor를 기록한다. 아래 운영자 CLI로 페이지를 이어 확인할 수 있다. `audit`은 확인된 유실의 준비 상태를 해제하고 전역 객체 목록도 검사하므로 저장소 운영자 권한으로 실행한다. 전역 고립 객체 검사는 사용자 보존 요청에서 실행하지 않는다. 참조가 없는 객체는 소유권이 확인되지 않은 검토 후보 해시만 보고하고 자동 삭제하지 않는다.
 
