@@ -21,10 +21,10 @@ export class OfficialTopicSourceProvider implements TopicSourceProvider {
   async *batches(request: TopicSourceRequest, extra: Array<{ source: string; query: string; run: () => Promise<TopicSourceCandidate[]> }> = []): AsyncGenerator<{ source: string; query: string; candidates: TopicSourceCandidate[]; failures: Array<{ source: string; code: string }> }> {
     const groups: Array<{ source: string; tasks: Array<{ query: string; run: () => Promise<TopicSourceCandidate[]> }> }> = [];
     const turns = (entries: Array<{ query: string; pages: AsyncGenerator<TopicSourceCandidate[]> }>) => Array.from({ length: this.profile.limits.pagesPerSource }, () => entries.map(({ query, pages }) => ({ query, run: async () => { const page = await pages.next(); return page.done ? [] : page.value; } }))).flat();
-    const queries = [...new Set([...(request.researchQuestions ?? []).slice(0, 5).map(researchQuery), ...this.profile.subtopics])];
-    for (const source of [...this.profile.sources.collections].sort()) groups.push({ source, tasks: turns(queries.map((query) => ({ query, pages: this.collection(source, query) }))) });
-    const youtubeQueries = this.profile.sources.youtubeQueries.length ? [...new Set([...(request.researchQuestions ?? []).slice(0, 5).map(researchQuery), ...this.profile.sources.youtubeQueries])] : [];
-    groups.push({ source: "YOUTUBE", tasks: turns([...youtubeQueries.map((query) => ({ query, pages: this.youtubeSearch(query, request) })), ...this.profile.sources.youtubeChannelIds.map((query) => ({ query, pages: this.youtubeUploads(query) }))]) });
+    const questions = [...new Set((request.researchQuestions ?? []).slice(0, 5).map(researchQuery))];
+    for (const source of [...this.profile.sources.collections].sort()) groups.push({ source, tasks: [...turns(questions.map((query) => ({ query, pages: this.collection(source, query) }))), ...turns(this.profile.subtopics.filter((query) => !questions.includes(query)).map((query) => ({ query, pages: this.collection(source, query) })))] });
+    const youtubeQuestions = this.profile.sources.youtubeQueries.length ? questions : [];
+    groups.push({ source: "YOUTUBE", tasks: [...turns(youtubeQuestions.map((query) => ({ query, pages: this.youtubeSearch(query, request) }))), ...turns([...this.profile.sources.youtubeQueries.filter((query) => !youtubeQuestions.includes(query)).map((query) => ({ query, pages: this.youtubeSearch(query, request) })), ...this.profile.sources.youtubeChannelIds.map((query) => ({ query, pages: this.youtubeUploads(query) }))])] });
     for (const task of extra) { if (!topicSourceAllowed(task.query, task.source, request, true)) continue; let group = groups.find((group) => group.source === task.source); if (!group) { group = { source: task.source, tasks: [] }; groups.push(group); } group.tasks.push(task); }
     const roots: Record<string, string> = { YOUTUBE: "https://www.youtube.com/", LOC: "https://www.loc.gov/", NASA: "https://images.nasa.gov/" };
     const active = groups.filter((group) => group.tasks.length && (group.source === "RSS" || topicSourceAllowed(roots[group.source] ?? "", group.source, request, true))); const offset = active.length ? Math.floor(Date.now() / 86400000) % active.length : 0;
@@ -39,10 +39,11 @@ export class OfficialTopicSourceProvider implements TopicSourceProvider {
         const researchRequests = (request.researchQuestions ?? []).filter((question) => researchQuery(question) === task.query).map((question) => ({ questionId: question.id, question: question.question, subtopic: question.subtopic, origin: question.origin, status: question.status, query: task.query }));
         yield { source: group.source, query: task.query, candidates: found.map((candidate) => ({ ...candidate, reliabilityMetadata: { ...candidate.reliabilityMetadata, sourceFamily: group.source, searchQuery: task.query, researchRequests: [...list(candidate.reliabilityMetadata?.researchRequests), ...researchRequests], researchContext: request.researchContext ?? null } })), failures: [] };
       } catch (error) {
-        const code = error instanceof Error && ["SOURCE_DAILY_CALL_BUDGET_EXHAUSTED", "YOUTUBE_DISCOVERY_KEY_UNSET", "SOURCE_REQUEST_PENDING_OR_FAILED"].includes(error.message) ? error.message : "DISCOVERY_SOURCE_UNAVAILABLE";
+        const code = error instanceof Error && ["SOURCE_DAILY_CALL_BUDGET_EXHAUSTED", "QUESTION_RESEARCH_CALL_LIMIT_REACHED", "RESEARCH_BUDGET_RESERVED", "YOUTUBE_DISCOVERY_KEY_UNSET", "SOURCE_REQUEST_PENDING_OR_FAILED"].includes(error.message) ? error.message : "DISCOVERY_SOURCE_UNAVAILABLE";
         yield { source: group.source, query: task.query, candidates: [], failures: [{ source: `${group.source}:${task.query}`, code }] };
       }
     }
+    for (const group of ordered) for (const query of new Set(group.tasks.map((task) => task.query))) yield { source: group.source, query, candidates: [], failures: [{ source: `${group.source}:${query}`, code: "DISCOVERY_PROCESSING_LIMIT_REACHED" }] };
   }
   private url(path: string, params: Record<string, string>) { const url = new URL(path); for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value); return url.href; }
   private async *youtubeSearch(query: string, request: TopicSourceRequest): AsyncGenerator<TopicSourceCandidate[]> {

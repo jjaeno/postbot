@@ -1,6 +1,6 @@
 # 채널별 제작·운영 개선 기록
 
-현재 PR #5의 소재 조사·업무 감시 결함에 대한 최신 결과는 아래 **20.11** 절을 기준으로 한다. 기존 20.2/20.10의 당시 통과 기록은 이번에 발견된 다섯 결함이나 실운영 검증까지 완료했다는 의미가 아니다.
+현재 PR #5의 소재 조사·업무 감시 결함은 **20.11**, 재수집·질문 조사 재개의 후속 수정은 **20.12** 절을 기준으로 한다. 기존 20.2/20.10의 당시 통과 기록은 후속 결함이나 실운영 검증까지 완료했다는 의미가 아니다.
 
 기준 커밋: `31d0564a1d44711f830e44de0b6563c39cff6ca2`. 브랜치: `feat/channel-production-operations`. 시작 시 작업 트리는 깨끗했다. 이번 요청은 20단계 전체를 승인하며 push/merge/배포는 금지한다. 2026-11-20 현재 요청된 20.1–20.10의 로컬 구현과 필수 검증을 완료했다. 실제 Provider·운영 환경의 확인과 의도적 미지원 범위는 마지막 상태표에 구분했다. 아래 초기 상태표와 단계별 당시 기록은 작업 경과를 보존한다.
 
@@ -239,3 +239,39 @@ Migration `202611200001_source_fetch_completion`: nullable UTC `source_fetches.c
 페이지별 공정성 추가 회귀: pagesPerSource=5에서 첫 검색어의 후속 페이지가 예산을 먼저 소진하는 실패를 재현했다. 커넥터를 페이지 단위 비동기 iterator로 나눠 각 출처/검색어의 첫 페이지를 후속 페이지보다 먼저 순환한다. YouTube 우선 순서·읽기 예산 3회에서도 LoC 첫 페이지 후보를 보존하는 회귀를 추가했다. 이 항목을 포함한 최종 providers 검증 대상은 22개다.
 
 최종 내부 필수 검증 결과: 변경 6개 app/package의 lint·typecheck 통과, 관련 unit/integration 총 67개와 브라우저 2개 통과, providers/API/worker/web build 통과, 빈/기존 데이터 DB migration 및 schema diff 통과. 후속 변경이 없는 검증은 재사용했으며 전체 monorepo 검증이나 원격 CI 통과를 주장하지 않는다. 현재 단계의 내부 수정은 완료, 실제 운영 검증은 외부 확인 대기다.
+
+## 20.12 재수집 근거 버전과 질문 조사 재개 (2026-11-21)
+
+시작 브랜치 `feat/channel-production-operations`, HEAD `f7da2a90c1882b3685afe34831dafa08a8797de3`, 작업 트리 깨끗함을 확인했다. 검토 기준 이후 변경이 없었고 두 결함 모두 수정 전 회귀 테스트에서 실패했다. 같은 URL의 FULL_TEXT 재수집 후에도 SUMMARY가 남았으며, 목표 1개를 먼저 채운 뒤 질문 원문 HTML 조회가 실행되지 않았다. 기대값을 유지한 채 수정했다.
+
+### 1. 기존 소재의 원문 보강 — 수정 완료
+
+원인은 `CollectProcessor.save()`의 URL/contentHash 중복 즉시 반환이었다. `packages/providers/src/source-observation.ts`와 worker `collect-processor.ts`에서 소재 동일성, 고유 수집 관측, 활성 근거를 분리했다. URL을 우선 확인하고 기존 contentHash 중복은 대체 출처 관측으로 보존한다. 첫 contentHash는 동일성/중복 식별값으로 유지하고 현재 원문은 별도 NFKC fingerprint와 sourceVersionId로 추적한다. 다른 URL의 출처·제목·원문을 기존 소재의 주 출처로 잘못 덮어쓰지 않는다.
+
+새 관측은 `rawSnapshot.sourceVersions`에 URL·본문·근거/미디어·내용 기반 ID·변경 사유·이전 버전을 남긴다. 동일 관측은 새 버전 없이 재사용한다. 같은 URL의 미사용·미예약 후보는 적격 새 근거로 보강하지만 FULL_TEXT의 SUMMARY/조회 실패/오래된 캐시 퇴행과 명시적 충돌의 자동 교체를 막는다. 충돌 자료와 과거 원문을 보존하고 자동 선정은 보류한다. 예약·사용·선정 이력은 초기화하지 않는다. 예약이 해제된 후보는 이미 보존한 적격 관측도 다시 활성화할 수 있다.
+
+worker `script-generation-processor.ts`는 호출 전 채널 잠금 안에서 근거를 고정한다. `_sourceEvidence`를 재시도에도 사용하고, 생성 입력·대본 generationContext·SourceReference에 같은 버전/fingerprint를 남긴다. 생성 중 재수집은 관측만 추가한다. 질문 근거도 URL만으로 연결하지 않고 URL/fingerprint/범위에 맞는 관측을 가리키며 과거 인용의 참조를 유지한다.
+
+데이터 호환: 기존 ContentIdea.rawSnapshot, ProductionJob.payload, ScriptVersion.qualitySnapshot, SourceReference.normalizedSnapshot을 먼저 검토했고 이번 범위에는 이 구조로 불변 근거와 관측을 보존할 수 있어 새 테이블/Prisma migration을 추가하지 않았다. 기존 행은 처음 보강/고정할 때 LEGACY_SNAPSHOT으로 편입한다. 실제 과거 수집 시각이나 검증을 만들어내지 않는다. 기존 NULL/구형 스냅샷·예약 ID·USED·usedContentItemId를 유지한다. 관측 JSON은 내용 변경 수에 따라 증가할 수 있고, 후보의 기존 보존 정책과 실제 저장량 확인은 필요하다.
+
+직접 검증: SUMMARY→동일 URL FULL_TEXT 저장, 실제 Fake 생성 입력 반영, 생성 중 새 관측 후 사용 근거/SourceReference 고정, FULL_TEXT 이후 SUMMARY·실패 보존, 동일 결과의 후보/버전 중복 방지, 새 FULL_TEXT 변경 이력 및 오래된 캐시 퇴행 방지, 출처가 다른 동일 contentHash 계보, 동시 재수집/SELECT의 예약 보존, 질문 관측 ID/fingerprint 연결 및 수동 재검사 경쟁 통과.
+
+### 2. 목표 도달 후 질문 원문 조사 — 수정 완료
+
+원인은 `passed.size < targetCandidates`가 원문 조사까지 제어한 것이었다. worker `question-investigation.ts`와 `source-collection.ts`가 제작 목표와 조사 완료를 분리한다. 처리 상한 안에서 질문별 원문 후보 자리를 확보하고 실행당 최대 5개 질문·질문당 2개 후보를 처리한다. 실제 새 호출은 남은 예산 분배/질문당 최대 3회로 제한하며 캐시와 채널 일별 원자적 예산을 유지한다. 작은 예산의 질문 차례는 UTC 날짜로 회전한다. providers `official-topic-source.ts`는 질문들/출처들의 페이지를 먼저 순환하고 작업 상한으로 생략한 요청을 명시적으로 보고한다.
+
+`research-v2`는 질문별 발견·처리·시도·보강과 COMPLETE/PARTIAL/NOT_STARTED를 기록한다. 목표 도달, 질문 원문 확보, 일 예산 소진, 질문 호출/시도 한도, 처리 상한, 실제 검색 미실행을 구분한다. 실제 조사하지 못한 질문을 확정적 근거 부족으로 바꾸지 않는다. 원문이 확보돼도 대상/관계가 다른 자료는 답변 근거로 승격하지 않으며 claimsVerified=false를 유지한다.
+
+진행 signature·처리 키·인용·다음 최대 2개 후보·추가 검색 필요 여부를 기존 질문 evidence에 저장한다. `CollectProcessor`는 RESEARCH_PENDING/RESEARCH_PARTIAL도 다음 주기에 가져오며, 원문 체크포인트부터 재개할 수 있다. 일 예산 1회 테스트에서도 첫날 검색 후 다음 UTC 날짜에 원문만 읽어 완료한다. 최신 질문 상태를 재조회하고 상태+updatedAt 조건으로 저장하며, 수동 INVESTIGATE 재검사는 이전 커서를 사용하지 않는다. 동일 결과는 근거/질문 이력에 중복 추가하지 않는다. 채널 설정/질문 내용이 바뀌면 이전 진행 signature를 재사용하지 않는다.
+
+직접 검증: target=1의 일반 후보 뒤 질문 HTML 조회/답변 인용, 질문 2개와 최종 후보 1개의 독립 상태 및 실제 호출 6회 상한, 동일 캐시 재실행의 추가 외부 요청 0회, 일 예산 소진의 PARTIAL 및 다음 날 검색 중복 없는 원문 재개, DB에 저장된 부분 조사 자동 재개/이력 멱등성, 처리 상한 20·질문별 원문 2개 제한과 재개, 무관한 이집트 원문의 로마 답변 승격 방지 통과.
+
+### 검증과 남은 제한
+
+providers/worker lint·typecheck 및 build를 검증했다. providers 관련 unit 11개(`source-observation`, `research`, `official-topic-source`), worker 관련 25개(`recollection.integration` 11개, 기존 source-research/source-collection/topic-selection/script-generation unit·integration)를 격리 실제 MySQL 8.4/Redis에서 검증했다. 외부 수집 응답은 Mock이며 생성은 Fake다. 신규 회귀는 두 결함의 실패 우선 재현을 포함한다. SourceFetch 예산 영수증의 startedAt도 캐시/UTC 예산 계산과 같은 실행 시각을 사용하도록 맞췄다.
+
+기존 제작 근거와 예약/사용 상태를 보존하며 질문 조사 재개를 검증했다. 일반 원문 변경의 사실성·다국어 의미 추론·독립 출처 간 자동 진실성 검증을 새로 구현한 것은 아니다. COMPLETE는 제한된 조사 범위/인용 확보의 완료이며 사실 확정이 아니다. 미설정/실패한 커넥터·허용 도메인·실 API 권한/정책·권리와 운영 규모 확인은 외부 확인 필요다. 명시적 버전 선택은 현재의 자동 활성화/고정 정책이며 과거 제작 근거를 바꾸는 별도 UI는 추가하지 않았다.
+
+실 API·유료 Provider·실 SNS 게시·운영 DB·원격 CI·push·merge·배포는 실행하지 않는다. API/web/renderer는 수정하지 않아 관련 없는 전체 회귀·브라우저·렌더 검사를 반복하지 않는다. DB 스키마가 바뀌지 않아 빈 DB migration을 반복하지 않고 구형/기존 데이터 호환을 실제 DB 회귀로 검증한다. 위 Mock/Fake 통과를 실운영 완료로 표현하지 않는다.
+
+최종 결과: 두 항목 모두 수정 완료. 변경 providers/worker lint·typecheck·build 통과, 관련 테스트 총 36개(providers 11 + worker 25) 통과, diff 공백 검사 통과. 최종 provenance 연결/충돌 처리 변경 후 관련 19개, 재개된 조사 상태와 진단 사유 정합성 보완 후 11개를 각각 재검증해 통과했다. 영향 없는 기존 성공 검증은 반복하지 않았다. 필수 로컬 검증의 미실행 항목은 없으며, 실제 외부/운영 검증은 위와 같이 별도로 남는다.

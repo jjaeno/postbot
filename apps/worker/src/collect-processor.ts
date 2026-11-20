@@ -1,7 +1,7 @@
 import { loadConfig } from "@postbot/config";
 import { hasHttpsVisualReference, ChannelCollectionProfileSchema, CollectAutomationJobPayloadSchema, TopicSelectionPolicySchema } from "@postbot/contracts";
 import { assertExecutionOwner, Prisma, type PrismaClient } from "@postbot/database";
-import { assessResearch, FixtureTopicSourceProvider, RssTopicSourceProvider, scoreTopicCandidate, topicSimilarity, type TopicSourceCandidate, type TopicSourceProvider, type TopicSourceResult } from "@postbot/providers";
+import { assessResearch, sourceDigest, sourceRecord, sourceObservation, FixtureTopicSourceProvider, RssTopicSourceProvider, scoreTopicCandidate, topicSimilarity, type TopicSourceCandidate, type TopicSourceProvider, type TopicSourceResult } from "@postbot/providers";
 import { createHash } from "node:crypto";
 import { SourceCollection } from "./source-collection.js";
 
@@ -25,7 +25,7 @@ export class CollectProcessor {
     let profile = currentRule?.profile ? ChannelCollectionProfileSchema.parse(currentRule.profile) : null;
     if (!this.providerOverride && loadConfig().TOPIC_SOURCE_PROVIDER === "profile" && !profile) throw new Error("CHANNEL_COLLECTION_PROFILE_REQUIRED");
     const discovers = input.mode === "DISCOVER" || input.mode === "COLLECT_SELECT";
-    const questions = profile && discovers ? await this.prisma.researchQuestion.findMany({ where: { channelId: input.channelId, status: "INVESTIGATE" }, orderBy: { createdAt: "asc" }, take: 5 }) : [];
+    const questions = profile && discovers ? await this.prisma.researchQuestion.findMany({ where: { channelId: input.channelId, status: { in: ["INVESTIGATE", "RESEARCH_PENDING", "RESEARCH_PARTIAL"] } }, orderBy: [{ updatedAt: "asc" }, { id: "asc" }], take: 5 }) : [];
     const channelContext = await this.prisma.channel.findUniqueOrThrow({ where: { id: input.channelId }, select: { language: true, targetAudience: true, excludedTopics: true } });
     if (profile) input = { ...input, topic: profile.subtopics.join(" "), language: profile.language, keywords: profile.subtopics, excludedKeywords: profile.exclusions,
       selectionPolicy: { ...input.selectionPolicy, freshness: profile.freshness, recentTopicDays: profile.limits.recentTopicDays } };
@@ -33,21 +33,37 @@ export class CollectProcessor {
     const exclusions = [...(profile?.exclusions ?? []), ...(Array.isArray(channelContext.excludedTopics) ? channelContext.excludedTopics.filter((term): term is string => typeof term === "string") : [])];
     input = { ...input, excludedTopics: Array.isArray(channelContext.excludedTopics) ? channelContext.excludedTopics.filter((term): term is string => typeof term === "string") : [] };
     const request = { channelId: input.channelId, topic: input.topic, keywords: input.keywords, allowedSources: input.allowedSources, excludedSources: input.excludedSources, recencyHours: input.recencyHours, idempotencyKey: input.idempotencyKey, freshness: profile?.freshness ?? input.selectionPolicy?.freshness,
-      researchQuestions: questions.map(({ id, question, subtopic, origin, status }) => ({ id, question, subtopic, origin, status })),
+      researchQuestions: questions.map(({ id, question, subtopic, origin, status, evidence }) => ({ id, question, subtopic, origin, status, progress: sourceRecord(sourceRecord(evidence).investigation).progress })),
       researchContext: { language: profile?.language ?? channelContext.language, audience: profile?.audience || channelContext.targetAudience || "", exclusions, storyStyles: profile?.storyStyles ?? [] } };
     const result: Pick<TopicSourceResult, "provider" | "candidates" | "failures" | "research" | "diagnostics"> = !discovers ? { provider: "stored-candidates", candidates: [], failures: [] }
       : !this.providerOverride && profile && loadConfig().TOPIC_SOURCE_PROVIDER === "profile"
       ? await new SourceCollection(this.prisma, input.channelId, profile, loadConfig().YOUTUBE_DISCOVERY_API_KEY).collect(request)
       : await provider.collect(request);
-    const eligible = result.candidates.map((candidate) => scoreTopicCandidate(candidate, input))
+    const researchOutcomes = questions.map((question) => result.research?.find((entry) => entry.questionId === question.id) ?? assessResearch(question, result.candidates, request.researchContext));
+    const conflictUrls = new Set(researchOutcomes.flatMap((outcome) => outcome.sources.filter((source) => source.relationship === "COUNTEREVIDENCE_OR_CONFLICT_REQUIRES_REVIEW" && typeof source.url === "string").map((source) => canonicalizeUrl(source.url as string))));
+    const eligible = result.candidates.map((candidate) => scoreTopicCandidate(conflictUrls.has(canonicalizeUrl(candidate.url)) ? { ...candidate, reliabilityMetadata: { ...candidate.reliabilityMetadata, researchState: "CONFLICTING_EVIDENCE" } } : candidate, input))
       .sort((left, right) => right.expectedValueScore - left.expectedValueScore || left.url.localeCompare(right.url));
-    for (const candidate of eligible) await this.save(input.channelId, candidate, result.provider);
+    const observations = new Map<string, { ideaId: string; versionId: string; fingerprint: string }>();
+    const observationKey = (url: string, fingerprint: string, scope: unknown) => JSON.stringify([canonicalizeUrl(url), fingerprint, scope]);
+    for (const candidate of eligible) {
+      const saved = await this.save(input.channelId, candidate, result.provider);
+      const versions = sourceRecord(sourceRecord(saved.rawSnapshot).sourceVersions);
+      for (const value of Object.values(versions)) {
+        const version = sourceRecord(value);
+        if (typeof version.url === "string" && typeof version.id === "string" && typeof version.fingerprint === "string") observations.set(observationKey(version.url, version.fingerprint, sourceRecord(version.snapshot).contentScope), { ideaId: saved.id, versionId: version.id, fingerprint: version.fingerprint });
+      }
+      observations.set(observationKey(candidate.url, saved.observedFingerprint, sourceRecord(sourceRecord(versions[saved.observedVersionId]).snapshot).contentScope), { ideaId: saved.id, versionId: saved.observedVersionId, fingerprint: saved.observedFingerprint });
+    }
     for (const question of questions) {
-      const outcome = result.research?.find((entry) => entry.questionId === question.id) ?? assessResearch(question, eligible, request.researchContext);
+      const outcome = researchOutcomes.find((entry) => entry.questionId === question.id)!;
+      outcome.sources = outcome.sources.map((entry) => ({ ...entry, sourceObservation: entry.sourceObservation ?? (typeof entry.url === "string" && typeof entry.fingerprint === "string" ? observations.get(observationKey(entry.url, entry.fingerprint, entry.contentScope)) ?? null : null) }));
+      if (outcome.investigation) sourceRecord(outcome.investigation.progress).sources = outcome.sources;
       const previous = question.evidence && typeof question.evidence === "object" && !Array.isArray(question.evidence) ? question.evidence : {};
       const history = Array.isArray(previous.history) ? previous.history.slice(-4) : [];
-      const evidence = JSON.parse(JSON.stringify({ version: "research-v1", ...outcome, context: request.researchContext, claimsVerified: false, history: [...history, { observedAt: new Date().toISOString(), state: outcome.state, sources: outcome.sources }] })) as Prisma.InputJsonObject;
-      await this.prisma.researchQuestion.updateMany({ where: { id: question.id, status: "INVESTIGATE", updatedAt: question.updatedAt }, data: { status: outcome.state === "ANSWER_EVIDENCE_AVAILABLE" ? "CLAIM_REVIEW_REQUIRED" : outcome.state, evidence, reason: outcome.reason } });
+      const signature = sourceDigest({ state: outcome.state, sources: outcome.sources, progress: outcome.investigation?.progress ?? null });
+      const updatedHistory = sourceRecord(history.at(-1)).signature === signature ? history : [...history, { signature, observedAt: new Date().toISOString(), state: outcome.state, sources: outcome.sources }];
+      const evidence = JSON.parse(JSON.stringify({ version: "research-v2", ...outcome, context: request.researchContext, claimsVerified: false, history: updatedHistory })) as Prisma.InputJsonObject;
+      await this.prisma.researchQuestion.updateMany({ where: { id: question.id, status: question.status, updatedAt: question.updatedAt }, data: { status: outcome.state === "ANSWER_EVIDENCE_AVAILABLE" ? "CLAIM_REVIEW_REQUIRED" : outcome.state, evidence, reason: outcome.reason } });
     }
     if (profile && discovers) for (const candidate of eligible.filter((entry) => entry.reliabilityMetadata?.role !== "DISCOVERY").slice(0, 3)) {
       const question = profile.language.startsWith("ko") ? `${candidate.title}의 원인과 결과는 무엇이며, 어떤 원문 자료로 확인할 수 있는가?` : `What caused ${candidate.title}, and which original records support its consequences?`;
@@ -94,7 +110,7 @@ export class CollectProcessor {
           : typeof snapshot.eventClusterKey === "string" && priorIdeas.filter((idea) => record(idea.rawSnapshot ?? undefined).eventClusterKey === snapshot.eventClusterKey).length >= limits.maxEventRepeats ? "EVENT_REPEAT_LIMIT" : null;
         const hasVisualReference = hasHttpsVisualReference(snapshot);
         const visualReason = profile?.production.requireVisualEvidence && !hasVisualReference ? "VISUAL_REFERENCE_REQUIRED" : null;
-        const rejectionReason = score.rejectionReason ?? repeat ?? visualReason ?? (duplicateScore >= (input.selectionPolicy?.semanticDuplicateThreshold ?? 0.65) ? "RECENT_TOPIC_DUPLICATE" : null);
+        const rejectionReason = score.rejectionReason ?? (snapshot.sourceObservationConflict ? "SOURCE_EVIDENCE_CONFLICT_REVIEW_REQUIRED" : null) ?? repeat ?? visualReason ?? (duplicateScore >= (input.selectionPolicy?.semanticDuplicateThreshold ?? 0.65) ? "RECENT_TOPIC_DUPLICATE" : null);
         snapshot = { ...snapshot, evaluation: { components: { ...score.components, recentTopicNovelty: 1 - duplicateScore }, method: score.scoringMethod, evaluatedAt: new Date().toISOString(), duplicateScore, duplicateThreshold: input.selectionPolicy?.semanticDuplicateThreshold ?? 0.65, reason: rejectionReason ?? "CURRENT_POLICY_ELIGIBLE" } };
         await tx.contentIdea.update({ where: { id: candidate.id }, data: { suitabilityScore: score.suitabilityScore, freshnessScore: score.freshnessScore, expectedValueScore: score.expectedValueScore, rejectionReason, rawSnapshot: snapshot } });
         if (!rejectionReason) ranked.push({ candidate, snapshot, score, duplicateScore });
@@ -124,21 +140,35 @@ export class CollectProcessor {
       provider, publishedAt: candidate.publishedAt ? new Date(candidate.publishedAt) : null, rejectionReason: candidate.rejectionReason ?? collectionReason,
       suitabilityScore: new Prisma.Decimal(candidate.suitabilityScore), freshnessScore: new Prisma.Decimal(candidate.freshnessScore),
       reliabilityScore: new Prisma.Decimal(candidate.reliabilityScore.toFixed(6)), expectedValueScore: new Prisma.Decimal(candidate.expectedValueScore.toFixed(6)),
-      rawSnapshot: { contentScope: candidate.reliabilityMetadata?.contentScope === "FULL_TEXT" && candidate.body.length <= 10_000 ? "FULL_TEXT" : candidate.body ? "SUMMARY" : "UNKNOWN", body: candidate.body.slice(0, 10_000), collectedAt: new Date().toISOString(), eventAt: candidate.eventAt ?? null, reliability: candidate.reliabilityMetadata ? JSON.parse(JSON.stringify(candidate.reliabilityMetadata)) as Prisma.InputJsonObject : null }
+      rawSnapshot: { contentScope: candidate.reliabilityMetadata?.contentScope === "FULL_TEXT" && candidate.body.length <= 10_000 ? "FULL_TEXT" : candidate.body ? "SUMMARY" : "UNKNOWN", body: candidate.body.slice(0, 10_000), collectedAt: typeof candidate.reliabilityMetadata?.collectedAt === "string" && Number.isFinite(Date.parse(candidate.reliabilityMetadata.collectedAt)) ? candidate.reliabilityMetadata.collectedAt : new Date().toISOString(), eventAt: candidate.eventAt ?? null, reliability: candidate.reliabilityMetadata ? JSON.parse(JSON.stringify(candidate.reliabilityMetadata)) as Prisma.InputJsonObject : null }
     };
-    const existing = await this.prisma.contentIdea.findFirst({ where: { channelId, OR: [{ urlHash: data.urlHash }, { contentHash }] } });
-    if (existing) return existing;
     const cluster = `source:${data.urlHash}`;
     Object.assign(data.rawSnapshot, { eventClusterKey: cluster, clusterMethod: "SOURCE_RECORD_IDENTITY_NOT_TITLE_SIMILARITY", question: typeof candidate.reliabilityMetadata?.question === "string" ? candidate.reliabilityMetadata.question : `${candidate.title}?`,
       angle: candidate.reliabilityMetadata?.angle ?? "SOURCE_EXPLANATION", evidence: candidate.reliabilityMetadata?.evidence ?? [], visualReferences: candidate.reliabilityMetadata?.media ?? null });
-    try { return await this.prisma.contentIdea.create({ data }); }
-    catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
-        const duplicate = await this.prisma.contentIdea.findFirst({ where: { channelId, OR: [{ urlHash: data.urlHash }, { contentHash }] } });
-        if (duplicate) return duplicate;
-      }
-      throw error;
-    }
+    const observation = sourceObservation({ url: canonicalUrl, title: candidate.title, summary: candidate.summary, sourceName: candidate.sourceName, sourceKind: candidate.sourceKind, snapshot: data.rawSnapshot });
+    const conflict = candidate.reliabilityMetadata?.researchState === "CONFLICTING_EVIDENCE" || candidate.reliabilityMetadata?.claimVerification === "CONFLICTING_EVIDENCE";
+    const json = (value: unknown) => JSON.parse(JSON.stringify(value)) as Prisma.InputJsonObject;
+    const saved = await this.prisma.$transaction(async (tx) => {
+      await assertExecutionOwner(tx);
+      await tx.$queryRaw`SELECT id FROM channels WHERE id = ${channelId} FOR UPDATE`;
+      const existing = await tx.contentIdea.findUnique({ where: { channelId_urlHash: { channelId, urlHash: data.urlHash } } }) ?? await tx.contentIdea.findUnique({ where: { channelId_contentHash: { channelId, contentHash } } });
+      if (!existing) return tx.contentIdea.create({ data: { ...data, ...(conflict ? { rejectionReason: "SOURCE_EVIDENCE_CONFLICT_REVIEW_REQUIRED" } : {}), rawSnapshot: json({ ...observation.snapshot, sourceVersionId: observation.id, sourceFingerprint: observation.fingerprint, sourceObservationConflict: conflict ? observation.id : null, sourceVersions: { [observation.id]: { ...observation, changeReason: "FIRST_OBSERVATION" } } }) } });
+      const current = sourceRecord(existing.rawSnapshot); const versions = { ...sourceRecord(current.sourceVersions) };
+      const previous = sourceObservation({ url: existing.canonicalUrl, title: existing.title, summary: existing.summary ?? "", sourceName: existing.sourceName, sourceKind: existing.sourceKind, snapshot: current });
+      const activeId = typeof current.sourceVersionId === "string" ? current.sourceVersionId : previous.id;
+      if (!versions[activeId]) versions[activeId] = { ...previous, id: activeId, changeReason: "LEGACY_SNAPSHOT" };
+      const sameSource = canonicalizeUrl(existing.canonicalUrl) === canonicalUrl;
+      const pinned = existing.status === "USED" || existing.usedContentItemId !== null || typeof current.reservationRunId === "string" || current.evidencePinned === true;
+      const downgrade = current.contentScope === "FULL_TEXT" && observation.snapshot.contentScope !== "FULL_TEXT";
+      const failure = Boolean(candidate.reliabilityMetadata?.evidenceFailure);
+      const stale = typeof current.collectedAt === "string" && Date.parse(data.rawSnapshot.collectedAt) < Date.parse(current.collectedAt);
+      const activate = sameSource && !pinned && !downgrade && !failure && !conflict && !stale && ["CANDIDATE", "SHORTLISTED"].includes(existing.status);
+      if (versions[observation.id] && (!activate || activeId === observation.id && !current.sourceObservationConflict)) return existing;
+      if (!versions[observation.id]) versions[observation.id] = { ...observation, previousVersionId: activeId, changeReason: !sameSource ? "ALTERNATE_SOURCE_SAME_CONTENT" : conflict ? "CONFLICT_REQUIRES_REVIEW" : pinned ? "PINNED_PRODUCTION_EVIDENCE" : stale ? "OLDER_COLLECTION_OBSERVATION" : downgrade || failure ? "LOWER_QUALITY_OBSERVATION" : "SOURCE_CONTENT_OR_EVIDENCE_CHANGED" };
+      const snapshot = activate ? { ...current, ...observation.snapshot, sourceVersionId: observation.id, sourceFingerprint: observation.fingerprint, sourceVersions: versions, sourceObservationConflict: null } : { ...current, sourceVersionId: activeId, sourceFingerprint: previous.fingerprint, sourceVersions: versions, ...(conflict && sameSource ? { sourceObservationConflict: observation.id } : {}) };
+      return tx.contentIdea.update({ where: { id: existing.id }, data: { rawSnapshot: json(snapshot), ...(activate ? { title: candidate.title, summary: candidate.summary, rejectionReason: data.rejectionReason, suitabilityScore: data.suitabilityScore, freshnessScore: data.freshnessScore, reliabilityScore: data.reliabilityScore, expectedValueScore: data.expectedValueScore } : {}) } });
+    }, { timeout: 30_000 });
+    return { ...saved, observedVersionId: observation.id, observedFingerprint: observation.fingerprint };
   }
 
   private provider(): TopicSourceProvider {

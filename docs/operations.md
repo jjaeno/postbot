@@ -86,3 +86,19 @@ OpenAI는 실제 REST 응답과 사용량을 job payload의 `_llmAttempts`에 �
 자동화 강제 종료(kill)는 실제 호출이 시작되지 않은 취소 job의 예약만 해제하고 해제액만 `budgetReserved`에서 차감한다. 실행 중·시도 이력이 있는 job·호출 결과 불명 job의 미정산 예약은 보존한다. 취소는 이미 시작한 외부 호출의 청구를 0으로 만들지 않는다. worker의 작업 시작과 취소는 ProductionJob 행 잠금으로 직렬화한다. 시작 여부를 입증할 job/시도 기록이 없는 예약도 자동으로 삭제하지 않고 운영자가 대사한다.
 
 플랫폼이 게시 ID를 반환한 뒤 DB 저장에 실패해도 `AMBIGUOUS_PUBLISH` attempt와 HELD 계획으로 보류하고 반환된 ID를 보존한다. worker는 `AMBIGUOUS_PUBLISH_RECONCILIATION_REQUIRED` 검수 보류로 자동 업로드 재시도를 중단한다. 기존 계획이 취소되지 않은 동안 같은 콘텐츠/플랫폼의 새 요청 키도 기존 slot gate가 차단한다. 플랫폼 결과 확인 없이 재게시하지 않는다. LLM 응답 뒤 사용량/원장 저장 실패도 새 유료 schema retry로 이어지지 않으며, journal의 응답을 재사용해 비용 기록을 복구한다.
+
+## 재수집과 질문 조사 재개 (20.12)
+
+소재의 URL 식별자와 첫 수집 contentHash는 동일성/중복 확인에 쓰고, 현재 제작 근거는 `ContentIdea.rawSnapshot.sourceVersionId`로 구분한다. `sourceVersions`는 URL·원문 NFKC SHA-256·범위·근거·시각 참조 등이 다른 관측을 내용 기반 ID로 보존한다. 반복 수집 시각·랭킹·예약 정보만 바뀐 경우에는 새 버전을 만들지 않는다. 별도 URL의 동일 contentHash는 대체 출처 관측으로 남기고 기존 소재의 출처/URL을 덮어쓰지 않는다. 기존 snapshot은 처음 보강/생성할 때 LEGACY_SNAPSHOT으로 편입하며 과거 실제 수집 시각이나 사실 검증을 소급 인증하지 않는다. 스키마 변경이나 강제 backfill은 없다.
+
+미사용·미예약 CANDIDATE/SHORTLISTED는 같은 URL의 새 정상 관측으로 보강한다. FULL_TEXT를 SUMMARY·실패·더 오래된 캐시로 바꾸지 않는다. 명시적 근거 충돌은 새 관측에 보존하고 현재 근거를 유지하며 자동 선정은 SOURCE_EVIDENCE_CONFLICT_REVIEW_REQUIRED로 보류한다. 이후 최신의 충돌 없는 적격 관측을 활성화할 수 있고 이전 기록은 삭제하지 않는다. reservationRunId, USED, usedContentItemId, 선정/사용 이력은 재수집으로 해제하지 않는다.
+
+수집 저장·기존 선정/수동 시작·생성의 근거 고정은 같은 채널 행 잠금과 작업 실행 소유권 경계에서 직렬화한다. SCRIPT는 Provider 호출 전에 한 버전을 `_sourceEvidence`에 고정하고 `evidencePinned=true`로 재수집의 활성 버전 교체를 막는다. 재시도도 이 스냅샷을 사용한다. `ScriptVersion.qualitySnapshot.generationContext`의 sourceVersionId/sourceFingerprint와 `SourceReference.normalizedSnapshot`은 실제 생성 입력의 근거를 가리킨다. 질문 원문 인용의 sourceObservation에는 소재 ID·해당 원문 fingerprint·버전 ID를 기록한다. 같은 URL의 서로 다른 fingerprint나 과거 인용을 최신 버전으로 잘못 연결하지 않는다. 새 원문은 별도 관측으로 남고 이미 진행/완료된 제작의 근거를 바꾸지 않는다.
+
+질문은 INVESTIGATE뿐 아니라 RESEARCH_PENDING/RESEARCH_PARTIAL도 다음 수집 대상이다. 최종 제작 목표와 별개로 실행당 최대 5개 질문, 질문당 최대 2개 원문 후보에 조사 기회를 배분한다. 질문 페이지는 질문들/출처들 사이에서 순환한 뒤 일반 검색어 페이지로 진행한다. 새 외부 읽기는 질문별 남은 예산 분배와 최대 3회 제한을 함께 적용하며 캐시와 채널 일별 원자적 예산은 그대로 사용한다. 작은 예산에서는 UTC 날짜로 질문 차례를 회전하고 일부 질문을 명시적으로 연기한다. 탐색에도 원문 조사 예산을 남기되 캐시 재사용은 허용한다.
+
+`research-v2`의 investigation은 COMPLETE/PARTIAL/NOT_STARTED, 발견/처리/시도/보강 수, stopReason을 반환한다. COMPLETE는 설정된 조사 범위 또는 답변 관련 인용 확보까지의 완료이며 사실 검증 완료가 아니다. 예산 소진·질문 호출/시도 한도·처리 상한·미설정/실패는 확정적 근거 부족과 구분한다. 후보가 없더라도 실제 질문 검색이 실행되지 않았으면 완료로 표시하지 않는다. 최종 제작 후보 수는 보강·중복 제거·현재 채널 평가 후 별도로 제한한다.
+
+진행 체크포인트는 질문/현재 채널 설정 signature, 중복 없는 처리 키/결과, 보존할 원문 인용, 다음 최대 2개 후보와 추가 검색 필요 여부를 저장한다. 이후 주기는 처리한 같은 자료를 건너뛰고 미완료 원문부터 재개할 수 있다. 일 예산 1회인 경우에도 첫날 검색 결과를 저장하고 다음 날 원문부터 읽을 수 있다. 캐시 실패/일별 예산은 재개로 우회하지 않는다. 수동 recheck의 INVESTIGATE는 이전 커서를 사용하지 않으며 유효한 캐시·예산을 유지한다. 저장 시 상태+updatedAt 조건을 확인해 진행 중 들어온 수동 재검사나 상태 변경을 덮어쓰지 않는다. 동일한 근거/진행 결과는 질문 이력을 중복 추가하지 않는다.
+
+관측 버전은 후보의 기존 보존 수명과 함께 관리되고 제작에 사용한 원문은 기존 SourceReference/ScriptVersion에도 남는다. 내용이 자주 바뀌는 장기 후보의 JSON 버전/처리 키는 증가할 수 있어 운영 규모의 저장량 관측이 필요하다. 변경된 두 경로는 Mock 외부 응답과 격리 DB/Redis로 검증하며 실제 API 품질·정책 승인·운영 규모를 검증한 것은 아니다.

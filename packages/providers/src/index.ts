@@ -182,9 +182,10 @@ export type TopicSourceResult = ProviderResult & {
   readonly diagnostics?: Readonly<Record<string, unknown>>;
   readonly research?: readonly ResearchOutcome[];
 };
-export type ResearchRequest = { id: string; question: string; subtopic: string; origin: string; status: string };
-export type ResearchOutcome = { questionId: string; question: string; subtopic: string; origin: string; state: string; query: string; sources: readonly Record<string, unknown>[]; reason: string };
+export type ResearchRequest = { id: string; question: string; subtopic: string; origin: string; status: string; progress?: unknown };
+export type ResearchOutcome = { questionId: string; question: string; subtopic: string; origin: string; state: string; query: string; sources: readonly Record<string, unknown>[]; reason: string; investigation?: Record<string, unknown> };
 export { researchQuery, assessResearch, fairCandidatePool, processingLimit } from "./research.js";
+export { sourceRecord, sourceDigest, sourceEvidenceSnapshot, sourceObservation } from "./source-observation.js";
 
 export interface TopicSourceProvider {
   collect(request: TopicSourceRequest): Promise<TopicSourceResult>;

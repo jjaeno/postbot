@@ -9,7 +9,7 @@ import {
   type ScriptGenerationJobPayload
 } from "@postbot/contracts";
 import { assertExecutionOwner, Prisma, type PrismaClient } from "@postbot/database";
-import { estimateLlmInputTokens, FakeLlmProvider, FakeStorageProvider, OpenAiLlmProvider, type LlmGenerationRequest, type LlmGenerationResult, type LlmProvider } from "@postbot/providers";
+import { sourceObservation, sourceRecord, sourceEvidenceSnapshot, estimateLlmInputTokens, FakeLlmProvider, FakeStorageProvider, OpenAiLlmProvider, type LlmGenerationRequest, type LlmGenerationResult, type LlmProvider } from "@postbot/providers";
 import { ProviderCallError } from "@postbot/providers";
 import { alignSceneNarration, AudioStyleSchema, sceneReuseDecision, SceneDocumentSchema, VideoStyleSchema, type SceneDocument } from "@postbot/scene-schema";
 import { createHash } from "node:crypto";
@@ -47,8 +47,37 @@ export class ScriptGenerationProcessor {
     if (prior) return prior;
     if (input.generation.request.partial === "voice" || input.generation.request.partial === "subtitle") return this.reuseVersion(jobId, input.generation);
 
-    const generated = await this.generate(jobId, input.generation);
-    return this.save(jobId, input.generation.idea, input.generation.request, generated);
+    const pinned = await this.pinEvidence(jobId, input.generation.idea);
+    const generation = { ...input.generation, idea: pinned.idea };
+    const generated = await this.generate(jobId, generation, pinned.snapshot);
+    return this.save(jobId, generation.idea, generation.request, generated);
+  }
+
+  private async pinEvidence(jobId: string, idea: GenerationIdeaSnapshot) {
+    return this.prisma.$transaction(async (tx) => {
+      await assertExecutionOwner(tx);
+      await tx.$queryRaw`SELECT id FROM channels WHERE id = ${idea.channelId} FOR UPDATE`;
+      const job = await tx.productionJob.findUniqueOrThrow({ where: { id: jobId } });
+      if (job.channelId !== idea.channelId) throw new Error("GENERATION_SOURCE_SCOPE_MISMATCH");
+      const payload = jsonObject(job.payload); const prior = jsonObject(payload._sourceEvidence ?? null);
+      if (prior.idea && prior.snapshot) {
+        const pinned = ScriptGenerationJobPayloadSchema.shape.generation.shape.idea.parse(prior.idea);
+        if (pinned.id !== idea.id || pinned.channelId !== idea.channelId) throw new Error("GENERATION_SOURCE_SCOPE_MISMATCH");
+        return { idea: pinned, snapshot: jsonObject(prior.snapshot) };
+      }
+      const row = await tx.contentIdea.findFirstOrThrow({ where: { id: idea.id, channelId: idea.channelId } });
+      const snapshot = jsonObject(row.rawSnapshot);
+      const observation = sourceObservation({ url: row.canonicalUrl, title: row.title, summary: row.summary ?? "", sourceName: row.sourceName, sourceKind: row.sourceKind, snapshot });
+      const versionId = typeof snapshot.sourceVersionId === "string" ? snapshot.sourceVersionId : observation.id;
+      const versions = { ...sourceRecord(snapshot.sourceVersions) };
+      if (!versions[versionId]) versions[versionId] = { ...observation, id: versionId, changeReason: "LEGACY_SNAPSHOT" };
+      const pinned = { ...sourceEvidenceSnapshot(snapshot), sourceVersionId: versionId, sourceFingerprint: observation.fingerprint };
+      const selected = { ...idea, title: row.title, summary: row.summary ?? "", canonicalUrl: row.canonicalUrl, sourceName: row.sourceName, sourceKind: row.sourceKind, publishedAt: row.publishedAt?.toISOString() ?? null };
+      const json = (value: unknown) => JSON.parse(JSON.stringify(value)) as Prisma.InputJsonObject;
+      await tx.contentIdea.update({ where: { id: row.id }, data: { rawSnapshot: json({ ...snapshot, sourceVersionId: versionId, sourceFingerprint: observation.fingerprint, sourceVersions: versions, evidencePinned: true }) } });
+      await tx.productionJob.update({ where: { id: jobId }, data: { payload: json({ ...payload, _sourceEvidence: { idea: selected, snapshot: pinned } }) } });
+      return { idea: selected, snapshot: json(pinned) as Prisma.JsonObject };
+    }, { timeout: 30_000 });
   }
 
   private async reuseVersion(jobId: string, input: ScriptGenerationJobPayload["generation"]): Promise<GenerationResult> {
@@ -136,7 +165,7 @@ export class ScriptGenerationProcessor {
     });
   }
 
-  private async generate(jobId: string, input: ScriptGenerationJobPayload["generation"]): Promise<GeneratedWithUsage> {
+  private async generate(jobId: string, input: ScriptGenerationJobPayload["generation"], pinnedSource: Prisma.JsonObject): Promise<GeneratedWithUsage> {
     const config = loadConfig();
     if (config.LLM_PROVIDER === "openai" && (config.LLM_INPUT_USD_PER_MILLION_TOKENS <= 0 || config.LLM_OUTPUT_USD_PER_MILLION_TOKENS <= 0)) throw new Error("LLM_PRICING_REQUIRED");
     const context = await this.prisma.$transaction(async (tx) => {
@@ -170,6 +199,8 @@ export class ScriptGenerationProcessor {
         const visual = jsonObject(template?.visualStyle ?? null);
         const strategy = jsonObject(channel?.strategyVersions[0]?.strategy ?? null);
         const generationContext = {
+          sourceVersionId: pinnedSource.sourceVersionId ?? null,
+          sourceFingerprint: pinnedSource.sourceFingerprint ?? null,
           storyStyles: collection?.storyStyles ?? [],
           excludedTopics: [...(collection?.exclusions ?? []), ...(Array.isArray(channel?.excludedTopics) ? channel.excludedTopics.filter((term): term is string => typeof term === "string") : [])],
           language: collection?.language ?? channel?.language ?? input.idea.language,
@@ -186,8 +217,7 @@ export class ScriptGenerationProcessor {
           strategy: experiment?.strategy ?? (Object.keys(strategy).length > 0 ? strategy : null),
           experiment: experiment ? { experimentId: experiment.experimentId, arm: experiment.arm, assignmentKey: experiment.assignmentKey, targetDurationSeconds: experiment.strategy.durationSeconds, toleranceSeconds: experiment.durationToleranceSeconds } : null
         };
-        const sourceIdea = await this.prisma.contentIdea.findUnique({ where: { id: input.idea.id }, select: { rawSnapshot: true } });
-        const sourceBody = jsonObject(sourceIdea?.rawSnapshot ?? null).body;
+        const sourceBody = pinnedSource.body;
         const request: LlmGenerationRequest = {
           ...(lastError instanceof Error ? { validationFeedback: /^[A-Z][A-Z0-9_]{1,160}$/.test(lastError.message) ? lastError.message : "PREVIOUS_ATTEMPT_FAILED" } : {}),
           model: config.LLM_MODEL, maxOutputTokens: config.LLM_MAX_OUTPUT_TOKENS, promptVersion, idempotencyKey: `${input.request.idempotencyKey}:attempt:${attempt}`,
@@ -253,8 +283,9 @@ export class ScriptGenerationProcessor {
           const prior = this.readResult(existing?.providerResponse ?? null);
           if (prior) return prior;
           const originalIdea = await tx.contentIdea.findUniqueOrThrow({ where: { id: idea.id } });
-          const originalBody = jsonObject(originalIdea.rawSnapshot).body;
-          const sourceSnapshot = jsonObject(originalIdea.rawSnapshot);
+          const job = await tx.productionJob.findUniqueOrThrow({ where: { id: jobId } });
+          const sourceSnapshot = jsonObject(jsonObject(jsonObject(job.payload)._sourceEvidence ?? null).snapshot ?? null);
+          const originalBody = sourceSnapshot.body;
           const contentItem = await tx.contentItem.upsert({
             where: { channelId_topicKey: { channelId: idea.channelId, topicKey: `idea:${idea.id}` } },
             update: { status: "GENERATING" },
@@ -263,7 +294,7 @@ export class ScriptGenerationProcessor {
           await tx.sourceReference.upsert({
             where: { contentItemId_urlHash: { contentItemId: contentItem.id, urlHash: sha256(idea.canonicalUrl) } },
             update: {},
-            create: { contentItemId: contentItem.id, kind: idea.sourceKind, title: idea.title, url: idea.canonicalUrl, urlHash: sha256(idea.canonicalUrl), sourceName: idea.sourceName, publishedAt: idea.publishedAt ? new Date(idea.publishedAt) : null, reliabilityScore: originalIdea.reliabilityScore, isPrimary: true, normalizedSnapshot: { facts: generated.facts, body: typeof originalBody === "string" ? originalBody : null, contentScope: sourceSnapshot.contentScope ?? "UNKNOWN", collectedAt: sourceSnapshot.collectedAt ?? originalIdea.collectedAt.toISOString(), fingerprint: typeof originalBody === "string" ? sha256(originalBody) : null, evidence: sourceSnapshot.evidence ?? [], reliability: sourceSnapshot.reliability ?? null } }
+            create: { contentItemId: contentItem.id, kind: idea.sourceKind, title: idea.title, url: idea.canonicalUrl, urlHash: sha256(idea.canonicalUrl), sourceName: idea.sourceName, publishedAt: idea.publishedAt ? new Date(idea.publishedAt) : null, reliabilityScore: originalIdea.reliabilityScore, isPrimary: true, normalizedSnapshot: { facts: generated.facts, body: typeof originalBody === "string" ? originalBody : null, contentScope: sourceSnapshot.contentScope ?? "UNKNOWN", collectedAt: sourceSnapshot.collectedAt ?? originalIdea.collectedAt.toISOString(), fingerprint: sourceSnapshot.sourceFingerprint ?? null, sourceVersionId: sourceSnapshot.sourceVersionId ?? null, evidence: sourceSnapshot.evidence ?? [], reliability: sourceSnapshot.reliability ?? null } }
           });
           const latestScript = await tx.scriptVersion.findFirst({ where: { contentItemId: contentItem.id, platform: request.platform }, orderBy: { version: "desc" } });
           const latestScene = await tx.sceneVersion.findFirst({ where: { contentItemId: contentItem.id, platform: request.platform }, orderBy: { version: "desc" } });
