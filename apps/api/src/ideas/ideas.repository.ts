@@ -9,6 +9,7 @@ import type { TopicSourceCandidate, TopicSelectionPolicy } from "@postbot/provid
 export const IDEAS_REPOSITORY = Symbol("IDEAS_REPOSITORY");
 
 export type ChannelCollectionSettings = {
+  requireVisualEvidence?: boolean;
   selectionPolicy?: TopicSelectionPolicy;
   channelId: string;
   topic: string;

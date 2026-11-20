@@ -5,7 +5,7 @@ const input = { minimumInventory: 3, inventory: { generating: 0, review: 1, appr
 
 describe("fake automation operation", () => {
   it("creates only inventory deficit and permits an eligible full-auto publish", () => {
-    expect(simulateAutomationRun(input)).toEqual({ generated: 1, reserved: 3, published: true, paused: false, heldReason: null });
+    expect(simulateAutomationRun(input)).toEqual({ generated: 2, reserved: 3, published: true, paused: false, heldReason: null });
   });
   it("holds before generation when the hard limit would be exceeded", () => {
     expect(simulateAutomationRun({ ...input, hardLimit: 2 })).toMatchObject({ generated: 0, published: false, heldReason: "BUDGET_HARD_LIMIT" });

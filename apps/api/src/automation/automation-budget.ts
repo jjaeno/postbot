@@ -38,11 +38,31 @@ const unattributedWhere: Prisma.CostLedgerWhereInput = {
   ]
 };
 
-const sumLedger = (groups: Array<{ direction: "ESTIMATED" | "ACTUAL" | "CREDIT"; _sum: { amount: Prisma.Decimal | null } }>): number =>
-  groups.reduce((total, group) => {
-    const amount = Number(group._sum.amount?.toString() ?? "0");
-    return total + (group.direction === "CREDIT" ? -amount : amount);
-  }, 0);
+const sumLedger = (entries: Array<{ direction: "ESTIMATED" | "ACTUAL" | "CREDIT"; amount: Prisma.Decimal; providerUsageId: string | null; providerUsage: { actualCost: Prisma.Decimal | null } | null }>): number => {
+  const seen = new Set<string>(); let total = new Prisma.Decimal(0);
+  for (const entry of entries) {
+    if (entry.direction === "CREDIT") { total = total.minus(entry.amount); continue; }
+    if (entry.providerUsageId && entry.providerUsage?.actualCost !== null && entry.providerUsage?.actualCost !== undefined) {
+      if (!seen.has(entry.providerUsageId)) total = total.plus(entry.providerUsage.actualCost);
+      seen.add(entry.providerUsageId); continue;
+    }
+    total = total.plus(entry.amount);
+  }
+  return total.toNumber();
+};
+
+async function remainingReservationRisk(tx: Prisma.TransactionClient, where: Prisma.AutomationCostReservationWhereInput): Promise<number> {
+  const reservations = await tx.automationCostReservation.findMany({ where });
+  let risk = new Prisma.Decimal(0);
+  for (const reservation of reservations) {
+    const platform = reservation.idempotencyKey.split(":").at(-2)?.toUpperCase();
+    if (!["YOUTUBE", "INSTAGRAM", "TIKTOK"].includes(platform ?? "")) { risk = risk.plus(reservation.amount); continue; }
+    const usage = await tx.providerUsage.findMany({ where: { productionJob: { automationSteps: { some: { automationRunId: reservation.automationRunId, stage: reservation.stage, platform: platform as "YOUTUBE" | "INSTAGRAM" | "TIKTOK" } } } }, select: { actualCost: true, estimatedCost: true } });
+    const consumed = usage.reduce((total, item) => total.plus(item.actualCost ?? item.estimatedCost ?? 0), new Prisma.Decimal(0));
+    risk = risk.plus(Prisma.Decimal.max(0, reservation.amount.minus(consumed)));
+  }
+  return risk.toNumber();
+}
 
 const decision = (spent: number, reserved: number, softLimit: Prisma.Decimal | null, hardLimit: Prisma.Decimal | null, estimate: number): BudgetDecision =>
   evaluateBudget({ spent, reserved, softLimit: softLimit ? Number(softLimit) : null, hardLimit: hardLimit ? Number(hardLimit) : null }, estimate);
@@ -65,7 +85,10 @@ export const reserveAutomationCost = async (input: {
       return await input.prisma.$transaction(async (tx) => {
         await tx.$queryRaw(Prisma.sql`SELECT id FROM workspaces WHERE id = ${input.budget.workspaceId} FOR UPDATE`);
         const existing = await tx.automationCostReservation.findUnique({ where: { idempotencyKey: reservationKey } });
-        if (existing && !existing.releasedAt) return "EXISTING";
+        if (existing && !existing.releasedAt && !existing.settledAt && existing.createdAt >= dayStart) return "EXISTING";
+        const previousUsage = existing ? await tx.providerUsage.findMany({ where: { productionJob: { automationSteps: { some: { automationRunId: input.runId, stage: input.stage, platform: input.platform } } } }, select: { actualCost: true, estimatedCost: true } }) : [];
+        const consumed = previousUsage.reduce((total, item) => total.plus(item.actualCost ?? item.estimatedCost ?? 0), new Prisma.Decimal(0));
+        const requestedRisk = input.stage === "SCRIPT" ? Math.max(0, input.estimate - consumed.toNumber()) : input.estimate;
         const run = await tx.automationRun.findUniqueOrThrow({ where: { id: input.runId }, select: { channelId: true } });
         const budgets = await tx.automationBudget.findMany({ where: { workspaceId: input.budget.workspaceId, OR: [{ channelId: run.channelId }, { channelId: null }] } });
         for (const budget of budgets) {
@@ -74,21 +97,23 @@ export const reserveAutomationCost = async (input: {
           const reservationScope = budget.channelId
             ? { automationRun: { channelId: budget.channelId } }
             : { automationRun: { channel: { workspaceId: budget.workspaceId } } };
-          const [daily, monthly, reserved, unattributed] = await Promise.all([
-            tx.costLedger.groupBy({ by: ["direction"], where: { currency: budget.currency, occurredAt: { gte: dayStart }, ...scope }, _sum: { amount: true } }),
-            tx.costLedger.groupBy({ by: ["direction"], where: { currency: budget.currency, occurredAt: { gte: monthStart }, ...scope }, _sum: { amount: true } }),
-            tx.automationCostReservation.aggregate({ where: { ...reservationScope, currency: budget.currency, releasedAt: null, settledAt: null }, _sum: { amount: true } }),
+          const [daily, monthly, dailyReserved, monthlyReserved, unattributed] = await Promise.all([
+            tx.costLedger.findMany({ where: { currency: budget.currency, occurredAt: { gte: dayStart }, ...scope }, select: { direction: true, amount: true, providerUsageId: true, providerUsage: { select: { actualCost: true } } } }),
+            tx.costLedger.findMany({ where: { currency: budget.currency, occurredAt: { gte: monthStart }, ...scope }, select: { direction: true, amount: true, providerUsageId: true, providerUsage: { select: { actualCost: true } } } }),
+            remainingReservationRisk(tx, { ...reservationScope, id: { not: existing?.id }, currency: budget.currency, releasedAt: null, settledAt: null, createdAt: { gte: dayStart } }),
+            remainingReservationRisk(tx, { ...reservationScope, id: { not: existing?.id }, currency: budget.currency, releasedAt: null, settledAt: null, createdAt: { gte: monthStart } }),
             tx.costLedger.count({ where: { currency: budget.currency, occurredAt: { gte: monthStart }, ...unattributedWhere } })
           ]);
           if (unattributed > 0) return "UNATTRIBUTED_COST";
-          const reservedAmount = Number(reserved._sum.amount?.toString() ?? "0");
-          if (decision(sumLedger(daily), reservedAmount, budget.dailySoftLimit, budget.dailyHardLimit, input.estimate) === "HOLD" ||
-            decision(sumLedger(monthly), reservedAmount, budget.monthlySoftLimit, budget.monthlyHardLimit, input.estimate) === "HOLD") return "HARD_LIMIT";
+          const dailyReservedAmount = dailyReserved;
+          const monthlyReservedAmount = monthlyReserved;
+          if (decision(sumLedger(daily), dailyReservedAmount, budget.dailySoftLimit, budget.dailyHardLimit, requestedRisk) === "HOLD" ||
+            decision(sumLedger(monthly), monthlyReservedAmount, budget.monthlySoftLimit, budget.monthlyHardLimit, requestedRisk) === "HOLD") return "HARD_LIMIT";
         }
-        const amount = new Prisma.Decimal(input.estimate.toFixed(6));
-        if (existing) await tx.automationCostReservation.update({ where: { id: existing.id }, data: { amount, currency: input.budget.currency, releasedAt: null, settledAt: null } });
-        else await tx.automationCostReservation.create({ data: { automationRunId: input.runId, stage: input.stage, idempotencyKey: reservationKey, amount, currency: input.budget.currency } });
-        await tx.automationRun.update({ where: { id: input.runId }, data: { budgetReserved: { increment: amount } } });
+        const amount = input.stage === "SCRIPT" ? Prisma.Decimal.max(consumed, input.estimate.toFixed(6)) : consumed.plus(input.estimate.toFixed(6));
+        if (existing) await tx.automationCostReservation.update({ where: { id: existing.id }, data: { amount, currency: input.budget.currency, releasedAt: null, settledAt: null, settlementBasis: null, createdAt: now } });
+        else await tx.automationCostReservation.create({ data: { automationRunId: input.runId, stage: input.stage, idempotencyKey: reservationKey, amount, currency: input.budget.currency, createdAt: now } });
+        await tx.automationRun.update({ where: { id: input.runId }, data: { budgetReserved: { increment: amount.minus(existing && !existing.releasedAt && !existing.settledAt ? existing.amount : 0) } } });
         return "RESERVED";
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     } catch (error) {

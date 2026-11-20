@@ -1,8 +1,10 @@
 import { z } from "zod";
+export { normalizeNarration, displayTimingsFromSpeech, SpeechNormalizationSchema, type SpeechNormalization } from "./speech-normalization.js";
 
 export const SceneNarrationSchema = z.object({
   text: z.string().min(1).max(500),
-  sourceUrl: z.string().url()
+  sourceUrl: z.string().url(),
+  scriptRange: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).refine((range) => range.end > range.start, { message: "SCRIPT_RANGE_INVALID" }).optional()
 });
 
 export const SceneOverlaySchema = z.object({
@@ -11,6 +13,7 @@ export const SceneOverlaySchema = z.object({
 }).strict();
 
 export const SceneSchema = z.object({
+  visualRequirements: z.object({ subject: z.string().max(500), setting: z.string().max(300), continuityKey: z.string().max(191), avoid: z.array(z.string().max(200)).max(20) }).optional(),
   role: z.enum(["HOOK", "COMPARISON", "PROCESS", "METRIC", "REVEAL"]).optional(),
   visualMode: z.enum(["IMAGE", "GRAPHIC"]).optional(),
   id: z.string().min(1).max(80),
@@ -37,6 +40,9 @@ export const AudioStyleSchema = z.object({ bgmAssetId: z.string().min(1).max(80)
 export const aiSceneCount = (sceneCount: number, aiStockRatio: number): number => Math.round(sceneCount * Math.max(0, Math.min(1, aiStockRatio)));
 
 export const SceneDocumentSchema = z.object({
+  visualGuide: z.object({ version: z.literal("visual-guide-v1"), style: z.string().max(500), era: z.string().max(200).nullable(), location: z.string().max(200).nullable(),
+    palette: z.array(z.string().max(60)).max(10), characters: z.array(z.string().max(500)).max(20), referenceAssetIds: z.array(z.string().max(80)).max(10),
+    referenceMode: z.literal("TEXT_DESCRIPTION_ONLY") }).optional(),
   schemaVersion: z.literal("1.0.0"),
   platform: z.enum(["YOUTUBE", "INSTAGRAM", "TIKTOK"]).optional(),
   title: z.string().min(1),
@@ -118,16 +124,43 @@ export function retimeNarration(document: SceneDocument, timings: readonly Narra
   }) });
 }
 
-// Use the script's actual spoken text rather than an independently generated paraphrase.
+// Keep exact ordered narration anchors. Only a single changed scene between
+// anchors can absorb an edit; ambiguous multi-scene edits require a new plan.
+// Offsets refer to the whitespace-normalized script passed to TTS.
 export function alignSceneNarration(document: SceneDocument, text: string): SceneDocument {
-  const words = text.trim().split(/\s+/u);
-  const scenes = document.scenes.slice(0, Math.min(words.length, document.scenes.length));
-  let start = 0;
-  return SceneDocumentSchema.parse({ ...document, scenes: scenes.map((scene, index) => {
-    const end = Math.round((index + 1) * words.length / scenes.length);
-    const startFrame = Math.round(index * document.durationInFrames / scenes.length);
-    const endFrame = Math.round((index + 1) * document.durationInFrames / scenes.length);
-    const narration = { ...scene.narration, text: words.slice(start, end).join(" ") }; start = end;
-    return { ...scene, narration, startFrame, durationInFrames: endFrame - startFrame };
+  const script = text.trim().replace(/\s+/gu, " ");
+  if (!script) throw new Error("SCENE_NARRATION_EMPTY");
+  if (document.scenes.length === 1) return SceneDocumentSchema.parse({ ...document, scenes: [{ ...document.scenes[0], narration: { ...document.scenes[0]!.narration, text: script, scriptRange: { start: 0, end: script.length } } }] });
+  const anchors: Array<{ index: number; start: number; end: number }> = [];
+  let cursor = 0;
+  for (const [index, scene] of document.scenes.entries()) {
+    const narration = scene.narration.text.trim().replace(/\s+/gu, " ");
+    const start = script.indexOf(narration, cursor);
+    if (start >= 0 && (start === 0 || script[start - 1] === " ") && (start + narration.length === script.length || script[start + narration.length] === " ")) {
+      anchors.push({ index, start, end: start + narration.length }); cursor = start + narration.length;
+    }
+  }
+  const ranges = new Map<number, { start: number; end: number }>();
+  let index = -1; let end = 0;
+  for (const anchor of [...anchors, { index: document.scenes.length, start: script.length, end: script.length }]) {
+    let gapStart = end; while (script[gapStart] === " ") gapStart++;
+    let gapEnd = anchor.start; while (gapEnd > gapStart && script[gapEnd - 1] === " ") gapEnd--;
+    const missing = anchor.index - index - 1;
+    if (missing === 1 && gapEnd > gapStart) ranges.set(index + 1, { start: gapStart, end: gapEnd });
+    else if (missing !== 0 || gapEnd > gapStart) throw new Error("SCENE_NARRATION_SEMANTIC_ALIGNMENT_REQUIRED");
+    if (anchor.index < document.scenes.length) ranges.set(anchor.index, { start: anchor.start, end: anchor.end });
+    index = anchor.index; end = anchor.end;
+  }
+  const result = SceneDocumentSchema.parse({ ...document, scenes: document.scenes.map((scene, index) => {
+    const range = ranges.get(index); if (!range) throw new Error("SCENE_NARRATION_SEMANTIC_ALIGNMENT_REQUIRED");
+    return { ...scene, narration: { ...scene.narration, text: script.slice(range.start, range.end), scriptRange: range } };
   }) });
+  if (result.scenes.map((scene) => scene.narration.text).join(" ") !== script) throw new Error("SCENE_NARRATION_COVERAGE_MISMATCH");
+  return result;
 }
+
+export const sceneReuseDecision = (before: Scene, after: Scene): { reusable: boolean; reason: string } => {
+  const reusable = before.narration.text === after.narration.text && before.narration.sourceUrl === after.narration.sourceUrl &&
+    before.visualPrompt === after.visualPrompt && before.visualMode === after.visualMode && before.role === after.role && JSON.stringify(before.overlays) === JSON.stringify(after.overlays);
+  return { reusable, reason: reusable ? "SCENE_MEANING_AND_VISUAL_INPUT_UNCHANGED" : "SCENE_INPUT_CHANGED_REGENERATE_VISUAL" };
+};

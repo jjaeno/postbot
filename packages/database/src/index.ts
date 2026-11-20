@@ -2,6 +2,8 @@ import { Prisma, PrismaClient } from "@prisma/client";
 
 export { Prisma, PrismaClient };
 export { assertJobScope } from "./job-scope.js";
+export { settleJobReservation } from "./cost-settlement.js";
+export { resolveSharedOAuthCredential, OAuthReauthenticationRequired } from "./oauth-refresh.js";
 export { assertExecutionOwner, jobExecution } from "./job-execution.js";
 
 export type DatabaseClient = PrismaClient;
@@ -19,3 +21,7 @@ export const withTransaction = async <Result>(
   client: PrismaClient,
   operation: (tx: TransactionClient) => Promise<Result>
 ): Promise<Result> => client.$transaction(operation);
+
+export { hasRecoverableResult } from "./recoverable-result.js";
+
+export { pruneDiscoveryChannel } from "./discovery-retention.js";

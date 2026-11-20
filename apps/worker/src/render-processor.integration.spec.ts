@@ -1,9 +1,11 @@
-import { PrismaClient, jobExecution } from "@postbot/database";
+import { Prisma, PrismaClient, jobExecution } from "@postbot/database";
 import { AssetRepository } from "@postbot/asset-library";
 import { FakeStorageProvider, FakeTtsProvider } from "@postbot/providers";
 import type { SceneDocument } from "@postbot/scene-schema";
+import { normalizeNarration } from "@postbot/scene-schema";
 import { randomUUID } from "node:crypto";
-import { copyFile, writeFile } from "node:fs/promises";
+import { access, copyFile, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { RenderProcessor, sceneIdFromImagePurpose, type MediaPostProcessor } from "./render-processor.js";
 import { DeterministicJobProcessor } from "./job-processor.js";
@@ -24,6 +26,57 @@ const postProcessor: MediaPostProcessor = {
 
 enabled("render processor integration", () => {
   afterAll(async () => prisma.$disconnect());
+  it("renders original numeric captions from normalized speech and holds inconsistent timing evidence", async () => {
+    const key = randomUUID();
+    const user = await prisma.user.create({ data: { email: `${key}@speech.test`, displayName: "Fixture", passwordHash: "fixture" } });
+    const workspace = await prisma.workspace.create({ data: { ownerId: user.id, name: "Fixture", slug: key } });
+    const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Fixture", slug: key } });
+    const content = await prisma.contentItem.create({ data: { channelId: channel.id, title: "2026년 NASA", topicKey: key } });
+    const document = scene(content.title); document.scenes[0]!.visualMode = "GRAPHIC";
+    const version = await prisma.sceneVersion.create({ data: { contentItemId: content.id, version: 1, schemaVersion: "1.0.0", sceneDocument: document } });
+    const normalization = normalizeNarration(content.title, "ko");
+    const speech = await new FakeTtsProvider().synthesize({ text: normalization.speech, voice: "fixture", model: "fixture", idempotencyKey: key });
+    const storage = new FakeStorageProvider();
+    const audio = await prisma.asset.create({ data: { channelId: channel.id, kind: "AUDIO", origin: "INTERNAL", storageKey: key, checksumSha256: key, mimeType: "audio/wav" } });
+    await storage.upload({ key, body: speech.bytes, mimeType: "audio/wav" });
+    const assets = new AssetRepository(prisma, storage);
+    await assets.attachUsage({ assetId: audio.id, contentItemId: content.id, sceneVersionId: version.id, purpose: "tts-narration", snapshot: { normalization, timings: speech.timings } });
+    const payload = { render: { channelId: channel.id, contentItemId: content.id, sceneVersionId: version.id, idempotencyKey: key } };
+    const job = await prisma.productionJob.create({ data: { channelId: channel.id, contentItemId: content.id, type: "RENDER", queueName: "render", idempotencyKey: key, payload } });
+    let displayed = "";
+    const processor = new RenderProcessor(prisma, { storage, postProcessor: { ...postProcessor, probe: () => Promise.resolve({ width: 1080, height: 1920, hasAudio: true, durationSeconds: speech.durationSeconds }) }, renderer: { render: async ({ captions, outputLocation }) => {
+      displayed = captions.map((caption) => caption.text).join(""); await writeFile(outputLocation, new Uint8Array([1])); return { outputLocation, rendererVersion: "fixture" };
+    } } });
+    await processor.process(payload, job.id);
+    expect(displayed.replace(/\s/g, "")).toBe(content.title.replace(/\s/g, ""));
+    expect(normalization.speech).not.toBe(content.title);
+    await prisma.sceneVersion.update({ where: { id: version.id }, data: { renderManifest: Prisma.DbNull } });
+    await assets.attachUsage({ assetId: audio.id, contentItemId: content.id, sceneVersionId: version.id, purpose: "tts-narration", snapshot: { normalization, timings: [{ text: "incorrect", startSeconds: 0, endSeconds: 1 }] } });
+    await expect(processor.process(payload, job.id)).rejects.toMatchObject({ findings: [{ code: "SPEECH_ALIGNMENT_REVIEW_REQUIRED" }] });
+  });
+  it("cancels the active renderer and awaits its shutdown before deleting temporary files", async () => {
+    const key = randomUUID();
+    const user = await prisma.user.create({ data: { email: `${key}@render-cancel.test`, displayName: "Fixture", passwordHash: "fixture" } });
+    const workspace = await prisma.workspace.create({ data: { ownerId: user.id, name: "Fixture", slug: key } });
+    const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Fixture", slug: key } });
+    const content = await prisma.contentItem.create({ data: { channelId: channel.id, title: "Cancel", topicKey: key } });
+    const document = scene("Cancel"); document.durationInFrames = 270; document.scenes[0]!.durationInFrames = 270; document.scenes[0]!.visualMode = "GRAPHIC";
+    const version = await prisma.sceneVersion.create({ data: { contentItemId: content.id, version: 1, schemaVersion: "1.0.0", sceneDocument: document } });
+    const payload = { render: { channelId: channel.id, contentItemId: content.id, sceneVersionId: version.id, idempotencyKey: key } };
+    const job = await prisma.productionJob.create({ data: { channelId: channel.id, contentItemId: content.id, type: "RENDER", queueName: "render", status: "RUNNING", idempotencyKey: key, payload } });
+    let started = () => {}; let stopped = false; let output = "";
+    const entered = new Promise<void>((resolve) => { started = resolve; });
+    const renderer = { render: ({ signal, outputLocation }: { signal?: AbortSignal; outputLocation: string }) => new Promise<{ outputLocation: string; rendererVersion: string }>((_resolve, reject) => {
+      output = outputLocation; started();
+      signal?.addEventListener("abort", () => { setTimeout(() => { void writeFile(outputLocation, "shutdown-complete").then(() => { stopped = true; reject(new Error("stopped")); }, reject); }, 50); }, { once: true });
+    }) };
+    const running = new RenderProcessor(prisma, { storage: new FakeStorageProvider(), renderer, postProcessor }).process(payload, job.id);
+    const outcome = running.catch((error: unknown) => error); await entered;
+    await prisma.productionJob.update({ where: { id: job.id }, data: { status: "CANCEL_REQUESTED" } });
+    expect(await outcome).toMatchObject({ message: "RENDER_CANCELLED" }); expect(stopped).toBe(true);
+    await expect(access(dirname(output))).rejects.toThrow();
+    expect((await prisma.sceneVersion.findUniqueOrThrow({ where: { id: version.id } })).renderManifest).toBeNull();
+  });
   it("renders the same input once and persists a versioned manifest", async () => {
     const suffix = randomUUID();
     const user = await prisma.user.create({ data: { email: `${suffix}@render.test`, displayName: "Render", passwordHash: "test" } });

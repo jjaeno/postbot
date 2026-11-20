@@ -1,0 +1,32 @@
+import { PrismaClient } from "@postbot/database";
+import { FakeStorageProvider } from "@postbot/providers";
+import { createHash, randomUUID } from "node:crypto";
+import { afterAll, describe, expect, it } from "vitest";
+import { auditStorage, restoreStorageRecord } from "./storage-audit.js";
+const prisma = new PrismaClient();
+describe.skipIf(process.env.RUN_DB_INTEGRATION !== "1")("missing storage and safe restoration", () => {
+ afterAll(() => prisma.$disconnect());
+ it("removes missing results from readiness, detects orphan candidates and verifies original checksums", async () => {
+  const key = randomUUID(); const user = await prisma.user.create({ data: { email: `${key}@storage.test`, displayName: "Fixture", passwordHash: "fixture" } });
+  const workspace = await prisma.workspace.create({ data: { ownerId: user.id, name: "Fixture", slug: key } });
+  const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Fixture", slug: key } });
+  const content = await prisma.contentItem.create({ data: { channelId: channel.id, title: "Fixture", topicKey: key } });
+  const bytes = new Uint8Array([1,2,3]); const checksum = createHash("sha256").update(bytes).digest("hex"); const storageKey = `renders/${key}.mp4`;
+  const scene = await prisma.sceneVersion.create({ data: { contentItemId: content.id, version: 1, schemaVersion: "1", sceneDocument: {}, renderManifest: { videoKey: storageKey, videoChecksumSha256: checksum } } });
+  const storage = new FakeStorageProvider(); await storage.upload({ key: `renders/orphan-${key}`, body: bytes, mimeType: "video/mp4" });
+  const scoped = await auditStorage(prisma, storage, workspace.id);
+  expect(scoped.unreferencedObjectHashes).toEqual([]);
+  const result = await auditStorage(prisma, storage, workspace.id, {}, { scanGlobalOrphans: true });
+  expect(scoped).toMatchObject({ missingRenders: 1, orphanAction: "GLOBAL_SCAN_REQUIRES_OPERATOR_CLI" });
+  expect(result).toMatchObject({ orphanAction: "REVIEW_ONLY_OWNERSHIP_UNKNOWN_NO_AUTOMATIC_DELETE" });
+  expect(result.unreferencedObjectHashes).toHaveLength(1);
+  expect((await prisma.sceneVersion.findUniqueOrThrow({ where: { id: scene.id } })).renderManifest).toBeNull();
+  await storage.upload({ key: storageKey, body: new Uint8Array([9]), mimeType: "video/mp4" });
+  await expect(restoreStorageRecord(prisma, storage, workspace.id, "RENDER", scene.id, "a".repeat(64))).rejects.toThrow("CHECKSUM_MISMATCH");
+  await storage.upload({ key: storageKey, body: bytes, mimeType: "video/mp4" });
+  await expect(restoreStorageRecord(prisma, storage, "foreign", "RENDER", scene.id, "a".repeat(64))).rejects.toThrow("NOT_FOUND");
+  expect(await restoreStorageRecord(prisma, storage, workspace.id, "RENDER", scene.id, "a".repeat(64))).toMatchObject({ restored: true, approvalChanged: false });
+  expect(await prisma.sceneVersion.findUniqueOrThrow({ where: { id: scene.id } })).toMatchObject({ retentionState: "ACTIVE", renderManifest: { videoKey: storageKey } });
+  expect((await prisma.contentItem.findUniqueOrThrow({ where: { id: content.id } })).status).toBe("IDEA");
+ });
+});

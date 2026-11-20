@@ -1,27 +1,28 @@
+import { analysisReadiness } from "./schedule-analysis.js";
 import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { Prisma, type PrismaClient } from "@postbot/database";
 import { AssignExperimentRequestSchema, CreateExperimentRequestSchema, ExperimentActionRequestSchema, ExperimentResponseSchema, GenerateSuggestionsRequestSchema, OptimizationSettingsSchema, OptimizationSuggestionResponseSchema, SuggestionActionRequestSchema, UpdateOptimizationSettingsRequestSchema, type ExperimentResponse, type OptimizationSettings, type OptimizationSuggestionResponse } from "@postbot/contracts";
-import { createHash } from "node:crypto";
 import { OperationsService } from "../operations/operations.service.js";
-import { assignProductionExperiment, compareExperimentArms, observationCohortKey, publishedFeatures, durationCompliance } from "@postbot/optimization";
+import { generateOptimization, assignProductionExperiment, compareExperimentArms, observationCohortKey, publishedFeatures, durationCompliance } from "@postbot/optimization";
 export { deterministicExperimentArm } from "@postbot/optimization";
 
-const MIN_SAMPLE_SIZE = 4;
-const RULE_VERSION = "optimization-rules-v2";
+const RULE_VERSION = "optimization-rules-v3";
 const METRIC_VERSION = "analytics-mapping-v3";
 const terminalSuggestion = new Set(["REJECTED", "APPLIED", "EXPIRED"]);
 const terminalExperiment = new Set(["COMPLETED", "CANCELLED", "STOPPED", "INCONCLUSIVE"]);
 const asRecord = (value: Prisma.JsonValue | null): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value : {};
 const toInputJson = (value: unknown): Prisma.InputJsonValue => JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
-const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
-const isProtected = (content: { title: string; topicKey: string }, settings: OptimizationSettings): boolean => {
-  const text = `${content.title} ${content.topicKey}`.toLocaleLowerCase();
-  return [...settings.protectedTopics, ...settings.protectedBrandPhrases, ...settings.prohibitedPatterns].some((entry) => text.includes(entry.toLocaleLowerCase()));
-};
+
 
 @Injectable()
 export class OptimizationService {
   constructor(@Inject("PRISMA_CLIENT") private readonly prisma: PrismaClient, private readonly operations: OperationsService) {}
+
+  async analysisStatus(workspaceId: string, channelId: string) {
+    await this.channel(workspaceId, channelId);
+    const { eligible, ...status } = await analysisReadiness(this.prisma, channelId);
+    return { ...status, eligibleCohorts: eligible.length };
+  }
 
   async getSettings(workspaceId: string, channelId: string): Promise<OptimizationSettings> {
     const channel = await this.channel(workspaceId, channelId);
@@ -39,48 +40,12 @@ export class OptimizationService {
 
   async generate(workspaceId: string, raw: unknown): Promise<OptimizationSuggestionResponse> {
     const input = GenerateSuggestionsRequestSchema.parse(raw);
-    const existing = await this.prisma.optimizationSuggestion.findUnique({ where: { suggestionKey: hash(input.idempotencyKey) } });
-    if (existing) {
-      if (existing.channelId !== input.channelId) throw new ConflictException("OPTIMIZATION_IDEMPOTENCY_CONFLICT");
-      await this.channel(workspaceId, existing.channelId);
-      return this.suggestionResponse(existing);
-    }
     const channel = await this.channel(workspaceId, input.channelId);
     const settings = OptimizationSettingsSchema.parse(asRecord(channel.optimizationSettings));
-    const snapshots = await this.prisma.analyticsMetricSnapshot.findMany({
-      where: { metric: input.metric, status: "AVAILABLE", value: { not: null }, collectedAt: { gte: new Date(input.periodStart), lte: new Date(input.periodEnd) }, platformPost: { platform: input.platform, publishPlan: { contentItem: { channelId: channel.id } } } },
-      include: { platformPost: { include: { publishPlan: { include: { contentItem: true } } } } },
-      orderBy: [{ observedAt: "desc" }, { revision: "desc" }]
+    const suggestion = await generateOptimization(this.prisma, channel, input, settings).catch((error: unknown) => {
+      if (error instanceof Error && error.message === "OPTIMIZATION_IDEMPOTENCY_CONFLICT") throw new ConflictException(error.message);
+      throw error;
     });
-    const usable = snapshots.flatMap((snapshot) => {
-      const post = snapshot.platformPost; const features = publishedFeatures(post.productionSnapshot);
-      const cohort = observationCohortKey({ ...snapshot, platform: post.platform, publishedAt: post.publishedAt });
-      if (!features || !cohort || features.sceneVersionId !== snapshot.sceneVersionId || features.scriptVersionId !== snapshot.scriptVersionId || isProtected(post.publishPlan.contentItem, settings)) return [];
-      return [{ snapshot, features, cohort }];
-    });
-    const latest = new Map<string, typeof usable[number]>();
-    for (const item of usable) { const key = `${item.snapshot.platformPostId}:${item.cohort}`; if (!latest.has(key)) latest.set(key, item); }
-    const cohorts = new Map<string, typeof usable>();
-    for (const item of latest.values()) cohorts.set(item.cohort, [...(cohorts.get(item.cohort) ?? []), item]);
-    const selectedCohort = [...cohorts.entries()].sort((left, right) => right[1].length - left[1].length || left[0].localeCompare(right[0]))[0];
-    const comparable = selectedCohort?.[1] ?? [];
-    const values = comparable.map((item) => Number(item.snapshot.value));
-    const mean = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
-    const standardDeviation = values.length > 1 ? Math.sqrt(values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1)) : 0;
-    const sorted = [...comparable].sort((left, right) => Number(right.snapshot.value) - Number(left.snapshot.value) || left.snapshot.platformPostId.localeCompare(right.snapshot.platformPostId));
-    const split = Math.max(1, Math.floor(sorted.length / 2)); const top = sorted.slice(0, split); const bottom = sorted.slice(-split);
-    const averageDuration = (items: typeof sorted): number => items.length ? items.reduce((sum, item) => sum + item.features.actualDurationSeconds, 0) / items.length : 0;
-    const topDuration = averageDuration(top); const bottomDuration = averageDuration(bottom);
-    const sufficient = sorted.length >= MIN_SAMPLE_SIZE && standardDeviation > 0 && Math.abs(topDuration - bottomDuration) >= 0.1;
-    const targetDuration = bottomDuration ? Math.round(bottomDuration * (1 + Math.max(-settings.maxChangeRatio, Math.min(settings.maxChangeRatio, (topDuration - bottomDuration) / bottomDuration)))) : 0;
-    const featureAnalysis = ["hookType", "sceneTemplates", "transitionsPerMinute", "subtitles", "voice"].map((field) => {
-      const groups = new Map<string, number[]>();
-      for (const item of comparable) { const value = item.features[field]; if (value === undefined || value === null) continue; const key = JSON.stringify(value); groups.set(key, [...(groups.get(key) ?? []), Number(item.snapshot.value)]); }
-      return { field, status: groups.size >= 2 && [...groups.values()].every((values) => values.length >= MIN_SAMPLE_SIZE) ? "DESCRIPTIVE_HYPOTHESIS" : "HELD_INSUFFICIENT_COMPARABLE_SAMPLES", groups: [...groups.entries()].map(([featureValue, values]) => ({ featureValue, sampleSize: values.length, mean: values.reduce((sum, value) => sum + value, 0) / values.length })), causalClaim: false };
-    });
-    const evidence = { platform: input.platform, metric: input.metric, collectionPeriod: { start: input.periodStart, end: input.periodEnd }, observationCohort: selectedCohort?.[0] ?? null, cohortSelection: "LARGEST_COUNT_THEN_KEY_WITHOUT_USING_OUTCOME_VALUES", baseline: { mean, standardDeviation, bottomDuration, topDuration }, sampleSize: comparable.length, excludedUnknownOrUnbound: snapshots.length - usable.length, excludedOtherObservationCohorts: latest.size - comparable.length, featureAnalysis, denominator: input.metric === "engagement_rate" ? input.platform === "INSTAGRAM" ? "provider_interactions_per_reached_account" : "provider_interactions_per_view" : input.metric === "average_view_ratio" ? "provider_average_watch_fraction_not_completion_probability" : "provider_metric_definition", completeness: { total: snapshots.length, comparable: comparable.length }, limitations: ["CORRELATION_NOT_CAUSATION", "NO_CALIBRATED_CONFIDENCE_LEVEL", "NO_AUTOMATIC_BROAD_STRATEGY_APPLICATION"], conclusion: sufficient ? "descriptive_hypothesis" : "insufficient_comparable_sample_or_variation" };
-    const suggestion = await this.prisma.optimizationSuggestion.create({ data: { channelId: channel.id, suggestionKey: hash(input.idempotencyKey), status: sufficient ? "PENDING" : "HELD", title: sufficient ? "Test a bounded duration adjustment" : "Collect more comparable performance data", rationale: sufficient ? "A descriptive association using immutable published features. Run a bounded experiment before applying a strategy." : "Comparable observations, published features or metric variation are insufficient.", evidence: toInputJson(evidence), sampleSize: comparable.length, confidenceScore: null, expectedImpact: { metric: input.metric, direction: topDuration >= bottomDuration ? "increase" : "decrease", hypothesisOnly: true }, targetStrategy: sufficient && settings.autoApplyFields.includes("durationSeconds") ? toInputJson({ durationSeconds: targetDuration, maxChangeRatio: settings.maxChangeRatio }) : Prisma.DbNull, risk: { requiresExperiment: true, rollback: "restore previous StrategyVersion" }, inputSnapshot: { snapshotIds: sorted.map((item) => item.snapshot.id), metricVersion: METRIC_VERSION, ruleVersion: RULE_VERSION }, metricVersion: METRIC_VERSION, ruleVersion: RULE_VERSION, expiresAt: new Date(Date.now() + 30 * 86_400_000) } });
-
     return this.suggestionResponse(suggestion);
   }
 
@@ -103,23 +68,24 @@ export class OptimizationService {
     const input = SuggestionActionRequestSchema.parse(raw);
     const suggestion = await this.prisma.optimizationSuggestion.findFirst({ where: { id: suggestionId, channel: { workspaceId } } });
     if (!suggestion) throw new NotFoundException("OPTIMIZATION_SUGGESTION_NOT_FOUND");
+    if (input.action === "apply" && suggestion.status === "APPLIED") return this.suggestionResponse(suggestion);
     if (terminalSuggestion.has(suggestion.status)) throw new ConflictException("SUGGESTION_TERMINAL");
-    if (suggestion.expiresAt && suggestion.expiresAt < new Date()) return this.suggestionResponse(await this.prisma.optimizationSuggestion.update({ where: { id: suggestion.id }, data: { status: "EXPIRED", decidedAt: new Date() } }));
+    if (suggestion.expiresAt && suggestion.expiresAt < new Date()) return this.suggestionResponse(await this.transitionSuggestion(suggestion.id, suggestion.status, { status: "EXPIRED", decidedAt: new Date() }));
     if (input.action === "reject" || input.action === "expire") {
       const status = input.action === "reject" ? "REJECTED" : "EXPIRED";
-      const updated = await this.prisma.optimizationSuggestion.update({ where: { id: suggestion.id }, data: { status, decidedAt: new Date(), risk: { ...asRecord(suggestion.risk), decisionReason: input.reason ?? null } } });
+      const updated = await this.transitionSuggestion(suggestion.id, suggestion.status, { status, decidedAt: new Date(), risk: { ...asRecord(suggestion.risk), decisionReason: input.reason ?? null } });
       await this.operations.audit(workspaceId, userId, `optimization.suggestion.${input.action}`, "optimization_suggestion", updated.id);
       return this.suggestionResponse(updated);
     }
+    if (["approve", "apply"].includes(input.action) && asRecord(suggestion.evidence).platform === "YOUTUBE") throw new ConflictException("YOUTUBE_DERIVED_DATA_RESTRICTED");
     if (input.action === "approve" && suggestion.status === "HELD") throw new ConflictException("INSUFFICIENT_COMPARABLE_EVIDENCE");
-    if (input.action === "approve") { const updated = await this.prisma.optimizationSuggestion.update({ where: { id: suggestion.id }, data: { status: "APPROVED", decidedAt: new Date() } }); await this.operations.audit(workspaceId, userId, "optimization.suggestion.approve", "optimization_suggestion", updated.id); return this.suggestionResponse(updated); }
+    if (input.action === "approve") { const updated = await this.transitionSuggestion(suggestion.id, suggestion.status, { status: "APPROVED", decidedAt: new Date() }); await this.operations.audit(workspaceId, userId, "optimization.suggestion.approve", "optimization_suggestion", updated.id); return this.suggestionResponse(updated); }
     if (suggestion.status !== "APPROVED") throw new ConflictException("SUGGESTION_REQUIRES_APPROVAL");
     if (suggestion.ruleVersion !== RULE_VERSION) throw new ConflictException("LEGACY_EVIDENCE_REQUIRES_NEW_SUGGESTION");
-    const evidence = asRecord(suggestion.evidence);
-    if (suggestion.metricVersion !== METRIC_VERSION && ((evidence.platform === "YOUTUBE" && evidence.metric === "completion_rate") || (evidence.platform === "INSTAGRAM" && evidence.metric === "impressions"))) throw new ConflictException("LEGACY_METRIC_REQUIRES_RESYNC_AND_NEW_SUGGESTION");
+    if (suggestion.metricVersion !== METRIC_VERSION) throw new ConflictException("LEGACY_METRIC_REQUIRES_RESYNC_AND_NEW_SUGGESTION");
     const applied = await this.applyStrategy(suggestion);
-    await this.operations.audit(workspaceId, userId, "optimization.suggestion.apply", "optimization_suggestion", applied.id);
-    return this.suggestionResponse(applied);
+    if (applied.applied) await this.operations.audit(workspaceId, userId, "optimization.suggestion.apply", "optimization_suggestion", applied.suggestion.id);
+    return this.suggestionResponse(applied.suggestion);
   }
 
   async createExperiment(workspaceId: string, role: string, raw: unknown): Promise<ExperimentResponse> {
@@ -150,6 +116,7 @@ export class OptimizationService {
       const allocation = asRecord(experiment.allocation);
       const platform = allocation.platform;
       if (platform !== "YOUTUBE" && platform !== "INSTAGRAM" && platform !== "TIKTOK") throw new ConflictException("EXPERIMENT_PLATFORM_REQUIRED");
+      if (platform === "YOUTUBE") throw new ConflictException("YOUTUBE_DERIVED_DATA_RESTRICTED");
       const now = new Date();
       const plannedEnd = new Date(experiment.startedAt.getTime() + (typeof allocation.periodDays === "number" ? allocation.periodDays : 30) * 86_400_000);
       const end = new Date(Math.min(now.getTime(), plannedEnd.getTime()));
@@ -174,7 +141,7 @@ export class OptimizationService {
         for (const plan of assignment.contentItem.publishPlans) {
           const post = plan.platformPost; const features = post ? publishedFeatures(post.productionSnapshot) : null;
           const featureExperiment = asRecord(features?.experiment ?? null);
-          if (!post || !features || features.platform !== platform || features.sceneVersionId !== plan.sceneVersionId || featureExperiment.assignmentKey !== assignment.assignmentKey || featureExperiment.compliant !== true || typeof target !== "number" || !durationCompliance(features.actualDurationSeconds, target, tolerance) || post.publishedAt < assignment.assignedAt || post.publishedAt > end) continue;
+          if (!post?.publishedAt || post.publicationState !== "PUBLISHED" || !features || features.platform !== platform || features.sceneVersionId !== plan.sceneVersionId || featureExperiment.assignmentKey !== assignment.assignmentKey || featureExperiment.compliant !== true || typeof target !== "number" || !durationCompliance(features.actualDurationSeconds, target, tolerance) || post.publishedAt < assignment.assignedAt || post.publishedAt > end) continue;
           for (const snapshot of post.analyticsSnapshots) {
             const cohort = observationCohortKey({ ...snapshot, platform: post.platform, publishedAt: post.publishedAt });
             if (cohort && snapshot.sceneVersionId === features.sceneVersionId && snapshot.scriptVersionId === features.scriptVersionId) records.push({ assignment, snapshot, features, cohort });
@@ -238,29 +205,52 @@ export class OptimizationService {
   async rollback(workspaceId: string, role: string, userId: string, channelId: string, version: number): Promise<{ id: string; version: number }> {
     this.requireOwner(role);
     await this.channel(workspaceId, channelId);
-    const previous = await this.prisma.strategyVersion.findUnique({ where: { channelId_version: { channelId, version } } });
-    if (!previous) throw new NotFoundException("STRATEGY_VERSION_NOT_FOUND");
-    const next = await this.prisma.strategyVersion.aggregate({ where: { channelId }, _max: { version: true } });
-    const restored = await this.prisma.strategyVersion.create({ data: { channelId, version: (next._max.version ?? 0) + 1, name: `Rollback of ${previous.name}`, strategy: toInputJson(previous.strategy), promptVersion: previous.promptVersion, appliedAt: new Date() } });
-    await this.operations.audit(workspaceId, userId, "strategy.rollback", "strategy_version", restored.id, { restoredFromVersion: version });
-    return { id: restored.id, version: restored.version };
+    const result = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM channels WHERE id = ${channelId} FOR UPDATE`;
+      const previous = await tx.strategyVersion.findUnique({ where: { channelId_version: { channelId, version } } });
+      if (!previous) throw new NotFoundException("STRATEGY_VERSION_NOT_FOUND");
+      const latest = await tx.strategyVersion.findFirst({ where: { channelId }, orderBy: { version: "desc" } });
+      if (latest && JSON.stringify(latest.strategy) === JSON.stringify(previous.strategy)) return { restored: latest, changed: false };
+      const restored = await tx.strategyVersion.create({ data: { channelId, version: (latest?.version ?? 0) + 1, name: `Rollback of ${previous.name}`, strategy: toInputJson(previous.strategy), promptVersion: previous.promptVersion, appliedAt: new Date() } });
+      return { restored, changed: true };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    if (result.changed) await this.operations.audit(workspaceId, userId, "strategy.rollback", "strategy_version", result.restored.id, { restoredFromVersion: version });
+    return { id: result.restored.id, version: result.restored.version };
+  }
+
+  private async transitionSuggestion(id: string, status: Prisma.OptimizationSuggestionGetPayload<Record<string, never>>["status"], data: Prisma.OptimizationSuggestionUpdateManyMutationInput) {
+    const changed = await this.prisma.optimizationSuggestion.updateMany({ where: { id, status }, data });
+    if (changed.count !== 1) throw new ConflictException("SUGGESTION_STATE_CHANGED");
+    return this.prisma.optimizationSuggestion.findUniqueOrThrow({ where: { id } });
   }
 
   private async applyStrategy(suggestion: { id: string; channelId: string; targetStrategy: Prisma.JsonValue | null }) {
     const target = asRecord(suggestion.targetStrategy);
     if (typeof target.durationSeconds !== "number" || !Number.isFinite(target.durationSeconds) || target.durationSeconds <= 0 || Object.keys(target).some((field) => !["durationSeconds", "maxChangeRatio"].includes(field))) throw new ConflictException("UNSAFE_STRATEGY_FIELD");
+    const duration = target.durationSeconds;
     return this.prisma.$transaction(async (tx) => {
-      let current = await tx.strategyVersion.aggregate({ where: { channelId: suggestion.channelId }, _max: { version: true } });
-      if (!current._max.version) {
-        const profile = await tx.platformOutputProfile.findFirst({ where: { channelId: suggestion.channelId, isActive: true }, orderBy: { version: "desc" } });
-        if (!profile) throw new ConflictException("OUTPUT_PROFILE_REQUIRED");
-        await tx.strategyVersion.create({ data: { channelId: suggestion.channelId, version: 1, name: "Initial channel settings", strategy: { durationSeconds: (profile.minDurationSeconds + profile.maxDurationSeconds) / 2 }, appliedAt: new Date() } });
-        current = { _max: { version: 1 } };
-      }
-      const version = await tx.strategyVersion.create({ data: { channelId: suggestion.channelId, version: (current._max.version ?? 0) + 1, name: "Approved optimization", strategy: toInputJson(target), appliedAt: new Date() } });
-      return tx.optimizationSuggestion.update({ where: { id: suggestion.id }, data: { status: "APPLIED", appliedAt: new Date(), strategyVersionId: version.id, rollbackStrategyVersionId: (current._max.version ?? 0) > 0 ? (await tx.strategyVersion.findUnique({ where: { channelId_version: { channelId: suggestion.channelId, version: current._max.version ?? 0 } }, select: { id: true } }))?.id ?? null : null } });
-    });
+      await tx.$queryRaw`SELECT id FROM channels WHERE id = ${suggestion.channelId} FOR UPDATE`;
+      await tx.$queryRaw`SELECT id FROM optimization_suggestions WHERE id = ${suggestion.id} FOR UPDATE`;
+      const locked = await tx.optimizationSuggestion.findUniqueOrThrow({ where: { id: suggestion.id } });
+      if (locked.status === "APPLIED") return { suggestion: locked, applied: false };
+      if (locked.status !== "APPROVED" || locked.expiresAt && locked.expiresAt <= new Date()) throw new ConflictException("SUGGESTION_REQUIRES_CURRENT_APPROVAL");
+      if (locked.sampleSize < 4 || locked.ruleVersion !== RULE_VERSION || locked.metricVersion !== METRIC_VERSION || asRecord(locked.evidence).platform === "YOUTUBE") throw new ConflictException("CURRENT_COMPARABLE_EVIDENCE_REQUIRED");
+      const channel = await tx.channel.findUniqueOrThrow({ where: { id: suggestion.channelId } });
+      const settings = OptimizationSettingsSchema.parse(asRecord(channel.optimizationSettings));
+      if (!settings.autoApplyFields.includes("durationSeconds")) throw new ConflictException("STRATEGY_FIELD_NOT_CURRENTLY_ALLOWED");
+      const profiles = await tx.platformOutputProfile.findMany({ where: { channelId: channel.id, isActive: true }, orderBy: { version: "desc" } });
+      const seen = new Set<string>(); const latestProfiles = profiles.filter((profile) => { if (seen.has(profile.platform)) return false; seen.add(profile.platform); return true; });
+      if (!latestProfiles.length || latestProfiles.some((profile) => duration < profile.minDurationSeconds || duration > profile.maxDurationSeconds)) throw new ConflictException("STRATEGY_DURATION_OUTSIDE_CURRENT_PROFILE");
+      let current = await tx.strategyVersion.findFirst({ where: { channelId: channel.id }, orderBy: { version: "desc" } });
+      const baseline = current ? asRecord(current.strategy).durationSeconds : ((latestProfiles[0]?.minDurationSeconds ?? 0) + (latestProfiles[0]?.maxDurationSeconds ?? 0)) / 2;
+      if (typeof baseline !== "number" || baseline <= 0 || Math.abs(duration - baseline) / baseline > settings.maxChangeRatio + 1e-9) throw new ConflictException("STRATEGY_CHANGE_EXCEEDS_CURRENT_LIMIT");
+      if (!current) current = await tx.strategyVersion.create({ data: { channelId: channel.id, version: 1, name: "Initial channel settings", strategy: { durationSeconds: baseline }, appliedAt: new Date() } });
+      const next = await tx.strategyVersion.create({ data: { channelId: channel.id, version: current.version + 1, name: "Approved optimization", strategy: toInputJson(target), appliedAt: new Date() } });
+      const applied = await tx.optimizationSuggestion.update({ where: { id: locked.id }, data: { status: "APPLIED", appliedAt: new Date(), strategyVersionId: next.id, rollbackStrategyVersionId: current.id } });
+      return { suggestion: applied, applied: true };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
   }
+
 
   private async channel(workspaceId: string, channelId: string) { const channel = await this.prisma.channel.findFirst({ where: { id: channelId, workspaceId } }); if (!channel) throw new NotFoundException("CHANNEL_NOT_FOUND"); return channel; }
   private requireOwner(role: string): void { if (role !== "OWNER") throw new ForbiddenException("OWNER_ROLE_REQUIRED"); }

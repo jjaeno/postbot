@@ -35,6 +35,22 @@ const seed = async () => {
 
 suite("rights proof recovery and platform isolation", () => {
   afterAll(() => prisma.$disconnect());
+  it("reuses only the unchanged scene image after an unequal semantic script edit", async () => {
+    const fixture = await seed(); const sourceUrl = "https://example.com/rome-egypt";
+    await prisma.sourceReference.create({ data: { contentItemId: fixture.content.id, kind: "OFFICIAL", url: sourceUrl, urlHash: fixture.key, title: "History", sourceName: "Fixture" } });
+    const texts = ["Rome built roads.", "Egypt used the river.", "Read the original source."];
+    const document = { schemaVersion: "1.0.0", title: "History", width: 1080, height: 1920, fps: 30, durationInFrames: 900,
+      scenes: texts.map((text, index) => ({ id: `history-${index}`, startFrame: index * 300, durationInFrames: 300, visualPrompt: text, narration: { text, sourceUrl }, overlays: [{ kind: "fact", text }] })) };
+    await prisma.sceneVersion.update({ where: { id: fixture.scenes[0]!.id }, data: { sceneDocument: document } });
+    for (const scene of document.scenes) await fixture.assets.attachUsage({ assetId: fixture.pending.assetId, contentItemId: fixture.content.id, sceneVersionId: fixture.scenes[0]!.id, purpose: `scene-image:YOUTUBE:${scene.id}`, snapshot: {} });
+    const body = "Egypt used the Nile river to move building materials and irrigate farms over a long distance.";
+    await new PrismaReviewRepository(prisma).updateScript(fixture.workspace.id, fixture.user.id, fixture.content.id, { platform: "YOUTUBE", hook: texts[0]!, body, callToAction: texts[2]!, sourceUrl, confirmFacts: true });
+    const next = await prisma.sceneVersion.findFirstOrThrow({ where: { contentItemId: fixture.content.id, platform: "YOUTUBE" }, orderBy: { version: "desc" }, include: { assetUsages: true } });
+    expect(next.assetUsages).toHaveLength(2);
+    expect(next.assetUsages.map((usage) => usage.usageSnapshot)).toEqual(expect.arrayContaining([expect.objectContaining({ originalPurpose: "scene-image:YOUTUBE:history-0", reuseReason: "SCENE_MEANING_AND_VISUAL_INPUT_UNCHANGED" })]));
+    expect(JSON.stringify(next.assetUsages)).not.toContain("scene-image:YOUTUBE:history-1");
+    expect(next.sceneDocument).toMatchObject({ scenes: [{ narration: { text: texts[0] } }, { narration: { text: body }, visualPrompt: body }, { narration: { text: texts[2] } }] });
+  });
   it("versions source-confirmed script edits without changing sibling evidence or exposing foreign sources", async () => {
     const fixture = await seed();
     const repository = new PrismaReviewRepository(prisma);
@@ -58,6 +74,8 @@ suite("rights proof recovery and platform isolation", () => {
     const fixture = await seed();
     const repository = new PrismaReviewRepository(prisma);
     await repository.updateMetadata(fixture.workspace.id, fixture.content.id, { platform: "YOUTUBE", title: "Only YouTube", description: "AI generated", hashtags: ["edited"] });
+    const metadataScene = await prisma.sceneVersion.findFirstOrThrow({ where: { contentItemId: fixture.content.id, platform: "YOUTUBE" }, orderBy: { version: "desc" }, include: { scriptVersion: true } });
+    expect(metadataScene.scriptVersion?.version).toBe(2);
     const review = await repository.get(fixture.workspace.id, fixture.content.id);
     expect(review?.title).toBe("Fixture");
     expect(review?.outputs.find((output) => output.platform === "YOUTUBE")?.title).toBe("Only YouTube");

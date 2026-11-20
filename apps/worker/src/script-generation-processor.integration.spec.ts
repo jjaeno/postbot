@@ -72,6 +72,7 @@ describeIntegration("SCRIPT generation worker integration", () => {
     expect(contentItem.status).toBe("REVIEW_REQUIRED");
     expect(contentItem.scriptVersions).toHaveLength(1);
     expect(contentItem.sceneVersions).toHaveLength(1);
+    expect(contentItem.scriptVersions[0]?.qualitySnapshot).toMatchObject({ planning: { title: idea.title, summary: idea.summary }, screenTitle: idea.title, reviewTitle: idea.title });
     expect(completed.providerUsages).toHaveLength(1);
     expect(completed.providerUsages[0]?.costLedger).toHaveLength(1);
     await new DeterministicJobProcessor(prisma).process(input);

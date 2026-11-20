@@ -11,7 +11,7 @@ export interface ShortCompositionProps extends Record<string, unknown> {
   readonly sceneAssets?: Readonly<Record<string, string>>;
   readonly brandLogo?: string;
 }
-const textStyle = (text: string, width: number, height: number, preferred: number, minimum = 30): CSSProperties => ({ fontSize: fittedFontSize(text, width, height, preferred, minimum) ?? minimum, lineHeight: 1.22, margin: 0, overflowWrap: "anywhere", whiteSpace: "pre-wrap", wordBreak: "normal" });
+const textStyle = (text: string, width: number, height: number, preferred: number, minimum = 30): CSSProperties => ({ fontSize: fittedFontSize(text, width, height, preferred, minimum) ?? minimum, lineHeight: 1.22, margin: 0, overflowWrap: "anywhere", whiteSpace: "pre-wrap", wordBreak: "keep-all", textWrap: "balance" });
 
 export const ShortComposition = ({ sceneDocument, captions, sceneAssets = {}, brandLogo }: ShortCompositionProps): ReactElement => {
   const frame = useCurrentFrame(); const style = VideoStyleSchema.parse(sceneDocument.style ?? {});

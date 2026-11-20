@@ -1,4 +1,4 @@
-import { TopicSelectionPolicySchema } from "@postbot/contracts";
+import { ChannelCollectionProfileSchema, TopicSelectionPolicySchema } from "@postbot/contracts";
 import { Inject, Injectable } from "@nestjs/common";
 import type { CollectIdeasResponse, ContentIdea, IdeaStatus, UpdateIdeaStatusRequest } from "@postbot/contracts";
 import { Prisma, type PrismaClient } from "@postbot/database";
@@ -53,15 +53,18 @@ export class PrismaIdeasRepository implements IdeasRepository {
       return null;
     }
     const collectionRule = channel.collectionRules[0];
+    const parsed = ChannelCollectionProfileSchema.safeParse(collectionRule?.profile);
+    const profile = parsed.success ? parsed.data : null;
     return {
       channelId: channel.id,
       topic: channel.topic ?? channel.name,
       excludedTopics: jsonArray(channel.excludedTopics),
-      keywords: jsonArray(collectionRule?.keywords),
-      excludedKeywords: jsonArray(collectionRule?.excludedKeywords),
+      keywords: profile?.subtopics ?? jsonArray(collectionRule?.keywords),
+      excludedKeywords: profile?.exclusions ?? jsonArray(collectionRule?.excludedKeywords),
       allowedSources: jsonArray(collectionRule?.allowedSources),
       excludedSources: jsonArray(collectionRule?.excludedSources),
-      selectionPolicy: TopicSelectionPolicySchema.parse(collectionRule?.selectionPolicy ?? {}),
+      selectionPolicy: TopicSelectionPolicySchema.parse(profile ? { freshness: profile.freshness } : collectionRule?.selectionPolicy ?? {}),
+      requireVisualEvidence: profile?.production.requireVisualEvidence ?? false,
       recencyHours: collectionRule?.recencyHours ?? 72
     };
   }

@@ -300,12 +300,19 @@ test("saves operational controls without overwriting independent platform settin
   await mockApi(page);
   let saved = false;
   await page.route(/^https?:\/\/[^/]+\/channels\/channel-1$/, async (route) => {
-    expect(route.request().postDataJSON()).toMatchObject({ topic: "Verified rocket", collectionRule: { keywords: ["rocket", "space"], allowedSources: ["https://example.com"] }, outputProfiles: [{ platform: "YOUTUBE", hookStyle: "YT only" }], automation: { minInventoryCount: 3 } });
+    expect(route.request().postDataJSON()).toMatchObject({ topic: "Verified rocket", collectionRule: { keywords: ["rocket", "space"], allowedSources: ["https://example.com"], profile: { language: "fr", subtopics: ["Roman history", "Egyptian history"], cadence: { collectMinutes: 360, selectMinutes: 60, produceMinutes: 120 } } }, outputProfiles: [{ platform: "YOUTUBE", hookStyle: "YT only" }], automation: { minInventoryCount: 3 } });
+    expect(route.request().postDataJSON()).toMatchObject({ collectionRule: { profile: { production: { producerConcurrency: 2, reviewCap: 7, scheduledBufferHours: 12 } } } });
     saved = true; await route.fulfill({ json: channel("Science Today") });
   });
   await page.setViewportSize({ width: 390, height: 844 }); await page.goto("/#channels");
   await page.getByTestId("edit-channel-channel-1").click();
   const editor = page.getByTestId("channel-operations-editor");
+  await editor.getByRole("button", { name: "역사 초기값", exact: true }).click();
+  await editor.getByLabel("제작·검색 언어", { exact: true }).fill("fr");
+  await editor.getByLabel("동시 제작 상한", { exact: true }).fill("2");
+  await editor.getByLabel("검수 대기 상한", { exact: true }).fill("7");
+  await editor.getByLabel("재고에 포함할 가까운 예약 (시간)", { exact: true }).fill("12");
+  await editor.getByLabel("세부 주제 (한 줄에 하나)", { exact: true }).fill("Roman history\nEgyptian history");
   await editor.getByLabel("주제", { exact: true }).fill("Verified rocket");
   await editor.getByLabel("수집 키워드 (쉼표 구분)").fill("rocket,space");
   await editor.getByLabel("허용 출처 URL (쉼표 구분)").fill("https://example.com");
@@ -609,6 +616,30 @@ test("recovers a held plan from the calendar without typing an internal identifi
   await expect(page.getByLabel("검토할 콘텐츠")).toHaveValue("content-1");
 });
 
+test("confirms an ambiguous publication with local evidence on mobile", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockApi(page);
+  await page.route("**/publishing/plans", (route) => route.fulfill({ json: [{ id: "held-plan", contentItemId: "content-1", channelId: "channel-1", platform: "YOUTUBE", status: "HELD", scheduledAt: "2026-11-01T00:00:00.000Z", title: "확인이 필요한 게시", postUrl: null, publishedAt: null, failureReason: null, reconciliationRequired: true }] }));
+  let submitted: { externalVideoId: string; evidenceHash: string; idempotencyKey: string } | undefined;
+  await page.route("**/publishing/plans/held-plan/reconcile", (route) => {
+    submitted = route.request().postDataJSON() as typeof submitted;
+    return route.fulfill({ json: { jobId: "confirmation-job", publishPlanId: "held-plan" } });
+  });
+  await page.goto("/#calendar");
+  await expect(page.getByTestId("calendar-panel")).toContainText("공개 완료 미확인");
+  const button = page.getByRole("button", { name: "플랫폼 상태 확인", exact: true });
+  await expect(button).toBeDisabled();
+  await page.getByLabel("확인한 게시물 ID", { exact: true }).fill("verified-video-id");
+  await page.getByLabel("게시 결과 확인 자료").setInputFiles({ name: "proof.txt", mimeType: "text/plain", buffer: Buffer.from("local-proof") });
+  await expect(button).toBeEnabled();
+  await button.click();
+  await expect(page.getByRole("status")).toContainText("상태 확인 작업을 등록했습니다.");
+  expect(submitted?.externalVideoId).toBe("verified-video-id");
+  expect(submitted?.evidenceHash).toMatch(/^[a-f0-9]{64}$/);
+  expect(submitted?.idempotencyKey).toBeTruthy();
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+});
+
 test("distinguishes per-video snapshots, native metrics and collection failure", async ({ page }) => {
   await mockApi(page);
   const base = { metric: "average_view_ratio", status: "AVAILABLE", value: 0.5, unit: "ratio", aggregation: "average", unavailableReason: null, observedAt: "2026-10-05T00:00:00.000Z", revision: 1, mappingVersion: "v2", platform: "YOUTUBE", periodStart: "2026-10-01", periodEnd: "2026-10-05" };
@@ -618,4 +649,37 @@ test("distinguishes per-video snapshots, native metrics and collection failure",
   await expect(panel).toContainText("첫 영상"); await expect(panel).toContainText("둘째 영상");
   await expect(panel).toContainText("이전 스냅샷"); await expect(panel).toContainText("post-two");
   await expect(panel).toContainText("ANALYTICS_SYNC_FAILED"); await expect(panel).toContainText("완주율·노출 수와 다릅니다");
+});
+
+test("shows the next analysis condition and policy boundary on mobile", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockApi(page);
+  await page.route("**/optimization/channels/channel-1/analysis-status", (route) => route.fulfill({ json: { status: "WAITING_FOR_FRESH_COMPARABLE_DATA", requiredDistinctPosts: 4, maximumComparablePosts: 2, nextCheckAt: "2026-11-19T00:00:00Z" } }));
+  await page.goto("/#insights");
+  await page.getByLabel("분석할 채널", { exact: true }).selectOption("channel-1");
+  const panel = page.getByTestId("optimization-panel");
+  await expect(panel).toContainText("비교 가능 2편 · 필요 4편");
+  await expect(panel).toContainText("다음 확인");
+  await expect(panel).toContainText("정책상 제한되는 파생 분석은 보류");
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+});
+
+test("shows business stalls separately from server health on mobile", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 }); await mockApi(page);
+  await page.route("**/operations/channels/channel-1/business-health", (route) => route.fulfill({ json: { state: "ATTENTION_REQUIRED", issues: ["MISSED_PUBLICATION", "ACCOUNT_REAUTH_REQUIRED"], lastCollectionAt: null, lastProductionAt: null, lastPublicationAt: null, externalNotifications: "NOT_CONFIGURED", backup: { state: "NOT_CONFIGURED" }, dailySummary: { recordedCost: "0.000000", currency: "USD" } } }));
+  await page.goto("/#settings"); const panel = page.getByTestId("business-health-panel");
+  await expect(panel).toContainText("게시 예정 시각 누락 · 계정 재인증 필요");
+  await expect(panel).toContainText("외부 알림: 미설정 · 백업: 미설정");
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+});
+
+test("explains absent collection jobs, production holds and recovery on mobile", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 }); await mockApi(page);
+  let recovered = false;
+  const progress = { state: "STALLED", reason: "EXPECTED_CYCLE_ELAPSED_WITHOUT_SUCCESS_OR_ACTIVE_WORK", cadenceMinutes: 360, graceMinutes: 375, expectedAt: "2026-11-19T12:00:00Z", lastAttemptAt: null, lastSuccessAt: null, delayMinutes: 1440 };
+  await page.route("**/operations/channels/channel-1/business-health", (route) => route.fulfill({ json: { state: recovered ? "PROGRESS_OBSERVED" : "ATTENTION_REQUIRED", issues: recovered ? [] : ["COLLECTION_STALLED"], lastCollectionAt: recovered ? "2026-11-20T12:00:00Z" : null, lastExternalSuccessAt: recovered ? "2026-11-20T12:00:00Z" : null, lastProductionAt: null, lastPublicationAt: null, collectionProgress: { ...progress, ...(recovered ? { state: "AWAITING_NEXT_CYCLE", lastSuccessAt: "2026-11-20T12:00:00Z", delayMinutes: 0 } : {}) }, productionProgress: { ...progress, state: "REVIEW_HOLD", reason: "REVIEW_HOLD" }, externalNotifications: "NOT_CONFIGURED", backup: { state: "NOT_CONFIGURED" }, dailySummary: { recordedCost: "0.000000", currency: "USD" } } }));
+  await page.goto("/#settings"); const panel = page.getByTestId("business-health-panel");
+  await expect(panel).toContainText("수집 주기 중단"); await expect(panel).toContainText("기대 실행:"); await expect(panel).toContainText("마지막 시도: 기록 없음"); await expect(panel).toContainText("판정 근거:"); await expect(panel).toContainText("검수 대기 또는 검수 상한");
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  recovered = true; await page.reload(); await expect(panel).toContainText("다음 주기 대기"); await expect(panel).not.toContainText("수집 주기 중단");
 });

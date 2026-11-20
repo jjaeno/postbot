@@ -2,13 +2,13 @@ import { describe, expect, it } from "vitest";
 import { automationStages, evaluateAutomationBranches, inventoryDeficit, isAbandonedAutomationClaim } from "./automation.service.js";
 
 describe("automation inventory", () => {
-  it("creates only the missing inventory and never double counts scheduled content", () => {
-    expect(inventoryDeficit(5, 1, 1, 1, 1)).toBe(1);
-    expect(inventoryDeficit(5, 1, 1, 1, 2)).toBe(0);
+  it("keeps review inventory separate from the ready buffer", () => {
+    expect(inventoryDeficit(5, 1, 1, 1, 1)).toBe(2);
+    expect(inventoryDeficit(5, 1, 1, 1, 2)).toBe(1);
   });
 
   it("does not create work when the minimum inventory is already met", () => {
-    expect(inventoryDeficit(3, 0, 1, 1, 1)).toBe(0);
+    expect(inventoryDeficit(3, 0, 1, 2, 1)).toBe(0);
   });
 
   it("reclaims only stale queue claims after a worker/API restart", () => {

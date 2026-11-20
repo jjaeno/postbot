@@ -21,7 +21,16 @@ const EnvSchema = z.object({
   S3_ACCESS_KEY_ID: z.string().min(1).default("postbot"),
   S3_SECRET_ACCESS_KEY: z.string().min(1).default("postbot-password"),
   STORAGE_PROVIDER: z.enum(["fake", "s3"]).default("s3"),
-  TOPIC_SOURCE_PROVIDER: z.enum(["fixture", "rss"]).default("fixture"),
+  OPERATIONS_NOTIFICATION_PROVIDER: z.enum(["disabled", "mock"]).default("disabled"),
+  OPERATIONS_MIN_FREE_BYTES: z.coerce.number().int().nonnegative().default(1073741824),
+  BACKUP_STATUS_FILE: z.string().default(""),
+  BACKUP_MAX_AGE_HOURS: z.coerce.number().positive().default(26),
+  TOPIC_SOURCE_PROVIDER: z.enum(["fixture", "rss", "profile"]).default("fixture"),
+  YOUTUBE_DISCOVERY_API_KEY: z.string().default(""),
+  IMAGE_PROVIDER_ACCOUNT_REF: z.string().max(120).default(""),
+  IMAGE_PROVIDER_CONTRACT_VERSION: z.string().max(120).default(""),
+  TTS_PROVIDER_ACCOUNT_REF: z.string().max(120).default(""),
+  TTS_PROVIDER_CONTRACT_VERSION: z.string().max(120).default(""),
   TOPIC_SOURCE_FEED_URLS: z.string().default(""),
   TOPIC_SOURCE_TIMEOUT_MS: z.coerce.number().int().positive().max(120_000).default(15_000),
   TOPIC_SOURCE_MAX_RETRIES: z.coerce.number().int().min(0).max(5).default(2),
@@ -133,9 +142,9 @@ export const operationalIssues = (config: AppConfig): PreflightIssue[] => {
       if (config[selector] !== real) add(selector, "Fake results are not production evidence", `Select ${real}; use explicit STAGING_FAKE_CANARY=true only in isolated staging`);
       for (const key of keys) require(key);
     }
-    if (config.TOPIC_SOURCE_PROVIDER !== "rss") add("TOPIC_SOURCE_PROVIDER", "Fixture sources are not live input", "Select rss and configure real feeds");
+    if (config.TOPIC_SOURCE_PROVIDER === "fixture") add("TOPIC_SOURCE_PROVIDER", "Fixture sources are not live input", "Select rss or profile and configure real sources");
     const feeds = config.TOPIC_SOURCE_FEED_URLS.split(",").map((feed) => feed.trim()).filter(Boolean);
-    if (!feeds.length || feeds.some((feed) => { try { const u = new URL(feed); return u.protocol !== "https:" || !!u.username || !!u.password; } catch { return true; } })) add("TOPIC_SOURCE_FEED_URLS", "Valid HTTPS RSS feeds required", "Supply comma-separated real feed URLs");
+    if (config.TOPIC_SOURCE_PROVIDER === "rss" && (!feeds.length || feeds.some((feed) => { try { const u = new URL(feed); return u.protocol !== "https:" || !!u.username || !!u.password; } catch { return true; } }))) add("TOPIC_SOURCE_FEED_URLS", "Valid HTTPS RSS feeds required", "Supply comma-separated real feed URLs");
     for (const key of ["LLM_INPUT_USD_PER_MILLION_TOKENS", "LLM_OUTPUT_USD_PER_MILLION_TOKENS", "IMAGE_USD_PER_OUTPUT", "TTS_USD_PER_THOUSAND_CHARACTERS"] as const) if (config[key] <= 0) add(key, "Provider price is unconfirmed", "Enter your verified contract price before paid work");
   }
   if (config.RENDER_COST_MODE === "priced" && config.RENDER_USD_PER_MINUTE <= 0) add("RENDER_USD_PER_MINUTE", "Render cost is unconfirmed", "Set measured cost or explicitly select RENDER_COST_MODE=free");

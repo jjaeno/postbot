@@ -16,6 +16,12 @@ const generated = {
 };
 
 describe("ScriptGenerationProcessor", () => {
+  it("retains generated planning separately from screen and publish metadata", () => {
+    const result = new ScriptGenerationProcessor({} as PrismaClient).merge("full", generated, null, null);
+    expect(result.planning).toEqual({ title: "new", summary: "new summary" });
+    expect(result.sceneDocument.title).toBe("new scene");
+    expect(result.metadata.description).toBe("new metadata");
+  });
   it("keeps every unselected field during partial regeneration", () => {
     const processor = new ScriptGenerationProcessor({} as PrismaClient);
     const previousScene = scene("previous scene");

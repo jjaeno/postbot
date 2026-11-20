@@ -3,6 +3,15 @@ import { observationCohortKey, durationCompliance, publishedFeatures } from "./c
 import { compareExperimentArms } from "./index.js";
 const input = { platform: "YOUTUBE", metric: "views", mappingVersion: "v3", unit: "count", aggregation: "sum", observationKind: "PERIOD_TOTAL", periodStart: new Date("2026-11-01T08:00:00Z"), periodEnd: new Date("2026-11-02T08:00:00Z"), collectedAt: new Date("2026-11-05T08:00:00Z"), publishedAt: new Date("2026-11-01T08:00:00Z"), rawSnapshot: {} };
 describe("comparable observations and frozen features", () => {
+  it("compares complete relative calendar days across dates and DST without calling them exact 24 hours", () => {
+    const rawSnapshot = { reportingTimezone: "America/Los_Angeles", coverageVerified: true };
+    const first = { ...input, publishedAt: new Date("2026-10-31T19:00:00Z"), periodStart: new Date("2026-11-01T07:00:00Z"), periodEnd: new Date("2026-11-02T08:00:00Z"), rawSnapshot };
+    const later = { ...input, publishedAt: new Date("2026-11-05T19:00:00Z"), periodStart: new Date("2026-11-06T08:00:00Z"), periodEnd: new Date("2026-11-07T08:00:00Z"), rawSnapshot };
+    expect(observationCohortKey(first)).toBe(observationCohortKey(later));
+    expect(observationCohortKey(first, "CALENDAR_PERIOD")).not.toBe(observationCohortKey(later, "CALENDAR_PERIOD"));
+    expect(observationCohortKey({ ...first, periodStart: first.publishedAt })).toBeNull();
+    expect(observationCohortKey({ ...first, rawSnapshot: { ...rawSnapshot, coverageVerified: false } })).toBeNull();
+  });
   it("never mixes platforms, metric definitions or represented periods", () => {
     const key = observationCohortKey(input);
     expect(observationCohortKey({ ...input, platform: "INSTAGRAM" })).not.toBe(key);

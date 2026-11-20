@@ -8,6 +8,7 @@ const prisma = new PrismaClient({
 
 const cleanDatabase = async (): Promise<void> => {
   const operations = [
+    prisma.storageDeletion.deleteMany(),
     prisma.notification.deleteMany(),
     prisma.auditLog.deleteMany(),
     prisma.budgetHistory.deleteMany(),
@@ -27,12 +28,15 @@ const cleanDatabase = async (): Promise<void> => {
     prisma.policyCheck.deleteMany(),
     prisma.policyRule.deleteMany(),
     prisma.costLedger.deleteMany(),
+    prisma.billingReconciliation.deleteMany(),
     prisma.providerUsage.deleteMany(),
     prisma.jobAttempt.deleteMany(),
     prisma.productionJob.deleteMany(),
     prisma.assetUsage.deleteMany(),
     prisma.assetLicense.deleteMany(),
     prisma.assetSource.deleteMany(),
+    prisma.assetGenerationCache.deleteMany(),
+    prisma.providerRightsPolicy.deleteMany(),
     prisma.asset.deleteMany(),
     prisma.experiment.deleteMany(),
     prisma.optimizationSuggestion.deleteMany(),
@@ -46,6 +50,8 @@ const cleanDatabase = async (): Promise<void> => {
     prisma.platformOutputProfile.deleteMany(),
     prisma.channelTemplate.deleteMany(),
     prisma.collectionRule.deleteMany(),
+    prisma.sourceFetch.deleteMany(),
+    prisma.researchQuestion.deleteMany(),
     prisma.oAuthCredential.deleteMany(),
     prisma.platformAccount.deleteMany(),
     prisma.oAuthConnectionState.deleteMany(),

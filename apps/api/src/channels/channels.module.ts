@@ -5,9 +5,10 @@ import { PrismaChannelsRepository } from "./prisma-channels.repository.js";
 import { ChannelsService } from "./channels.service.js";
 import { StockAssetsController } from "./stock-assets.controller.js";
 import { AudioAssetsController } from "./audio-assets.controller.js";
+import { ResearchQuestionsController } from "./research-questions.controller.js";
 
 @Module({
-  controllers: [ChannelsController, StockAssetsController, AudioAssetsController],
+  controllers: [ChannelsController, StockAssetsController, AudioAssetsController, ResearchQuestionsController],
   providers: [
     ChannelsService,
     {

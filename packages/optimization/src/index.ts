@@ -59,3 +59,5 @@ export const compareExperimentArms = (control: readonly number[], variant: reado
   const winner = !sufficient || !quality || relativeChange === null || !range || threshold === null ? "inconclusive" : range[0]! >= threshold ? "variant" : range[1]! <= -threshold ? "control" : "inconclusive";
   return { control: c, variant: v, minimumPerArm, relativeChange, direction, minRelativeImprovement, winner, sufficient, balanced, uncertainty: { method: "TWO_STANDARD_ERROR_DESCRIPTIVE", standardError, directionalMeanDifference: difference, range, calibratedConfidenceLevel: null }, decisionLimitations: ["OBSERVATIONAL_ASSOCIATION_NOT_CAUSATION", ...(!balanced ? ["ALLOCATION_IMBALANCE"] : []), ...(c.outliers + v.outliers ? ["OUTLIERS_PRESENT"] : [])], hypothesisOnly: true, causalClaim: false };
 };
+
+export { generateOptimization, type AnalysisInput } from "./generate.js";

@@ -47,10 +47,11 @@ enabled("asset and TTS worker integration", () => {
     await prisma.sceneVersion.update({ where: { id: fixture.sceneVersion.id }, data: { sceneDocument } });
     const payload = { assetPreparation: { channelId: fixture.channel.id, contentItemId: fixture.contentItem.id, sceneVersionId: fixture.sceneVersion.id, platform: "YOUTUBE", prompt: fixture.suffix, idempotencyKey: `mix-${fixture.suffix}` } };
     const job = await prisma.productionJob.create({ data: { channelId: fixture.channel.id, contentItemId: fixture.contentItem.id, type: "ASSET", queueName: "asset", idempotencyKey: `mix-${fixture.suffix}`, payload } });
-    const processor = new AssetPreparationProcessor(prisma);
+    const storage = new FakeStorageProvider();
+    const processor = new AssetPreparationProcessor(prisma, { storage });
     expect(await processor.processAsset(payload, job.id)).toMatchObject({ assets: [], needsReview: true, reviewCode: "STOCK_ASSET_REQUIRED" });
     expect(await prisma.providerUsage.count({ where: { productionJobId: job.id } })).toBe(0);
-    const assets = new AssetRepository(prisma, new FakeStorageProvider());
+    const assets = new AssetRepository(prisma, storage);
     const stock = await assets.store({ channelId: fixture.channel.id, kind: "IMAGE", origin: "STOCK_FREE", key: `stock-${fixture.suffix}`, body: new TextEncoder().encode(`stock-${fixture.suffix}`), mimeType: "image/png", source: { provider: "fixture" }, license: { status: "verified", commercialUseAllowed: true, derivativeAllowed: true, attributionRequired: false, attributionText: null, proofUrl: "https://example.com/license" } });
     expect(await processor.processAsset(payload, job.id)).toMatchObject({ needsReview: true, reviewCode: "STOCK_MATCH_REQUIRED", metadataMissing: true });
     await prisma.assetSource.create({ data: { assetId: stock.assetId, provider: "owner-metadata", providerResponse: { description: "Unrelated ocean wildlife", tags: ["ocean"] } } });

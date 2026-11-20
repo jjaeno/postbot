@@ -7,6 +7,7 @@ import { OptimizationService } from "./optimization.service.js";
 @UseGuards(AccessTokenGuard)
 export class OptimizationController {
   constructor(@Inject(OptimizationService) private readonly optimization: OptimizationService) {}
+  @Get("channels/:channelId/analysis-status") analysisStatus(@Req() req: AuthenticatedRequest, @Param("channelId") channelId: string) { return this.optimization.analysisStatus(req.auth.workspaceId, channelId); }
   @Get("settings") settings(@Req() req: AuthenticatedRequest, @Query("channelId") channelId: string) { return this.optimization.getSettings(req.auth.workspaceId, channelId); }
   @Post("settings") updateSettings(@Req() req: AuthenticatedRequest, @Body() body: unknown) { return this.optimization.updateSettings(req.auth.workspaceId, req.auth.workspace.role, req.auth.userId, body); }
   @Post("suggestions/generate") generate(@Req() req: AuthenticatedRequest, @Body() body: unknown) { return this.optimization.generate(req.auth.workspaceId, body); }

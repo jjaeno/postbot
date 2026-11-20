@@ -1,4 +1,6 @@
+import { hasRecoverableResult } from "@postbot/database";
 import { Inject, Injectable } from "@nestjs/common";
+import { productionJobRequestIntent, jobDomainPayload } from "@postbot/jobs";
 import type {
   JobAttemptResponse,
   JobProgressEvent,
@@ -20,7 +22,7 @@ const nullableJsonObject = (value: Prisma.JsonValue | null): Record<string, unkn
 
 const payloadWithoutTrace = (value: Prisma.JsonValue | Record<string, unknown>): Record<string, unknown> => {
   const payload = jsonObject(value as Prisma.JsonValue);
-  return Object.fromEntries(Object.entries(payload).filter(([key]) => key !== "_trace"));
+  return jobDomainPayload(payload);
 };
 
 const canonicalJson = (value: unknown): unknown => {
@@ -31,7 +33,10 @@ const canonicalJson = (value: unknown): unknown => {
   return value;
 };
 
+const requestIntent = productionJobRequestIntent;
+
 const hasSameJobIntent = (job: JobWithAttempts, input: CreateJobRecordInput): boolean =>
+  typeof jsonObject(job.payload)._requestIntent === "string" ? jsonObject(job.payload)._requestIntent === requestIntent(input) :
   job.channelId === input.channelId &&
   job.contentItemId === (input.contentItemId ?? null) &&
   job.type === input.type &&
@@ -101,6 +106,7 @@ export class PrismaJobsRepository implements JobsRepository {
           if (!hasSameJobIntent(existing, input)) {
             throw new Error("IDEMPOTENCY_CONFLICT");
           }
+          if (typeof jsonObject(existing.payload)._requestIntent !== "string") await tx.productionJob.update({ where: { id: existing.id }, data: { payload: { ...jsonObject(existing.payload), _requestIntent: requestIntent(input) } } });
           return { job: toJobResponse(existing, true), created: false };
         }
 
@@ -112,7 +118,7 @@ export class PrismaJobsRepository implements JobsRepository {
             status: "QUEUED",
             queueName: input.queueName,
             idempotencyKey: input.idempotencyKey,
-            payload: input.payload as Prisma.InputJsonObject,
+            payload: { ...input.payload, _requestIntent: requestIntent(input) },
             runAfter: input.runAfterDate
           }
         });
@@ -167,6 +173,12 @@ export class PrismaJobsRepository implements JobsRepository {
     return this.findForWorkspace(workspaceId, jobId);
   }
 
+  async canRecoverKnownResult(workspaceId: string, jobId: string): Promise<boolean> {
+    if (!await this.findForWorkspace(workspaceId, jobId)) return false;
+    const job = await this.prisma.productionJob.findUnique({ where: { id: jobId } });
+    return job ? hasRecoverableResult(this.prisma, job) : false;
+  }
+
   async recover(workspaceId: string, jobId: string, runAfter: Date | null): Promise<ProductionJobResponse | null> {
     const existing = await this.findForWorkspace(workspaceId, jobId);
     if (!existing) {
@@ -175,7 +187,7 @@ export class PrismaJobsRepository implements JobsRepository {
     if (!["FAILED", "CANCELLED", "NEEDS_REVIEW"].includes(existing.status)) {
       return existing;
     }
-    if (existing.result?.reconciliationRequired === true || existing.errorCode?.includes("RECONCILIATION_REQUIRED")) throw new Error("RECONCILIATION_REQUIRED");
+    if ((existing.result?.reconciliationRequired === true || existing.errorCode?.includes("RECONCILIATION_REQUIRED")) && !await this.canRecoverKnownResult(workspaceId, jobId)) throw new Error("RECONCILIATION_REQUIRED");
     await this.prisma.productionJob.updateMany({
       where: { id: jobId, status: existing.status, updatedAt: new Date(existing.updatedAt) },
       data: {

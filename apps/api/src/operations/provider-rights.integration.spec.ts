@@ -1,0 +1,41 @@
+import "reflect-metadata";
+import { PrismaClient } from "@postbot/database";
+import { AssetPreparationService, AssetRepository } from "@postbot/asset-library";
+import { FakeImageProvider, FakeStorageProvider, FakeTtsProvider } from "@postbot/providers";
+import { randomUUID } from "node:crypto";
+import { afterAll, describe, expect, it } from "vitest";
+import type { AuthenticatedRequest } from "../auth/request-types.js";
+import { ProviderRightsController } from "./provider-rights.controller.js";
+const prisma = new PrismaClient();
+const suite = process.env.RUN_DB_INTEGRATION === "1" ? describe : describe.skip;
+suite("bounded provider rights evidence", () => {
+  afterAll(() => prisma.$disconnect());
+  it("requires owner proof and exact account/model/contract bounds and holds reservations on revocation", async () => {
+    const key = randomUUID();
+    const user = await prisma.user.create({ data: { email: `${key}@rights.test`, displayName: "Fixture", passwordHash: "fixture" } });
+    const workspace = await prisma.workspace.create({ data: { ownerId: user.id, name: "Fixture", slug: key } });
+    const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Fixture", slug: key } });
+    const content = await prisma.contentItem.create({ data: { channelId: channel.id, title: "Rights", topicKey: key } });
+    const scene = await prisma.sceneVersion.create({ data: { contentItemId: content.id, version: 1, platform: "YOUTUBE", schemaVersion: "1.0.0", sceneDocument: {} } });
+    const req = { auth: { workspaceId: workspace.id, userId: user.id, workspace: { role: "OWNER" } } } as unknown as AuthenticatedRequest;
+    const controller = new ProviderRightsController(prisma);
+    const input = { provider: "google", model: "image-v1", accountRef: "paid-account", contractVersion: "contract-v1", proofUrl: "https://example.com/specific-contract", evidence: { documentSha256: "a".repeat(64), termsVersion: "2026-11", note: "Reviewed paid account image contract scope" }, commercialUseAllowed: true, derivativeAllowed: true, attributionRequired: false, attributionText: null,
+      validFrom: new Date(Date.now() - 60000).toISOString(), validUntil: new Date(Date.now() + 86400000).toISOString(), confirmRights: true };
+    await expect(controller.create(req, channel.id, { ...input, evidence: {} })).rejects.toThrow("RIGHTS_PROOF");
+    await expect(controller.create({ auth: { ...req.auth, workspace: { role: "MEMBER" } } } as unknown as AuthenticatedRequest, channel.id, input)).rejects.toThrow("OWNER_ROLE_REQUIRED");
+    const policy = await controller.create(req, channel.id, input);
+    const assets = new AssetRepository(prisma, new FakeStorageProvider());
+    const scope = { channelId: channel.id, provider: "google", model: "image-v1", accountRef: "paid-account", contractVersion: "contract-v1" };
+    expect(await assets.generationLicense(scope)).toMatchObject({ status: "verified", rightsPolicyId: policy.id });
+    for (const changed of [{ model: "different" }, { accountRef: "free-account" }, { contractVersion: "different" }]) expect((await assets.generationLicense({ ...scope, ...changed })).status).toBe("unknown");
+    const image = { generate: async (request: Parameters<FakeImageProvider["generate"]>[0]) => ({ ...await new FakeImageProvider().generate(request), provider: "google" }) };
+    const prepared = await new AssetPreparationService(assets, image, new FakeTtsProvider(), { imageProvider: "google", ttsProvider: "fake", imageAccountRef: "paid-account", ttsAccountRef: "", imageContractVersion: "contract-v1", ttsContractVersion: "" }).prepareImage({ channelId: channel.id, contentItemId: content.id, sceneVersionId: scene.id, model: "image-v1", prompt: "Rights test", key, idempotencyKey: key, purpose: "scene-image:YOUTUBE:one", holdOnFailure: true });
+    expect(prepared.needsReview).toBe(false);
+    const account = await prisma.platformAccount.create({ data: { workspaceId: workspace.id, channelId: channel.id, platform: "YOUTUBE", externalAccountId: key } });
+    const plan = await prisma.publishPlan.create({ data: { contentItemId: content.id, sceneVersionId: scene.id, platformAccountId: account.id, platform: "YOUTUBE", status: "SCHEDULED", scheduledAt: new Date(Date.now() + 3600000), title: "Rights", idempotencyKey: key } });
+    expect(await controller.revoke(req, channel.id, policy.id)).toMatchObject({ revoked: true, heldPlans: 1 });
+    expect((await assets.getLicense(prepared.assetId))?.status).not.toBe("verified");
+    expect((await prisma.publishPlan.findUniqueOrThrow({ where: { id: plan.id } })).status).toBe("HELD");
+    expect(await controller.revoke(req, channel.id, policy.id)).toEqual({ revoked: true, heldPlans: 0 });
+  });
+});

@@ -11,7 +11,17 @@ export const canonicalizeTopicUrl = (raw: string): string => {
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
 const clamp = (value: number): number => Math.max(0, Math.min(1, value));
 
-export type TopicSelectionPolicy = { freshness?: "NEWS" | "EVERGREEN"; keywordMatch?: "REQUIRED" | "PREFER"; semanticDuplicateThreshold?: number; recentTopicDays?: number };
+export type TopicSelectionPolicy = { freshness?: "NEWS" | "EVERGREEN" | "MIXED"; keywordMatch?: "REQUIRED" | "PREFER"; semanticDuplicateThreshold?: number; recentTopicDays?: number };
+export function topicSourceAllowed(raw: string, name: string, settings: { allowedSources: readonly string[]; excludedSources: readonly string[] }, discovery = false): boolean {
+  try {
+    const url = new URL(raw);
+    const matches = (source: string, allow: boolean) => {
+      if (/^https?:\/\//i.test(source)) { const scope = new URL(source); return url.hostname === scope.hostname && (discovery && allow || url.pathname === scope.pathname || url.pathname.startsWith(scope.pathname.endsWith("/") ? scope.pathname : `${scope.pathname}/`)); }
+      return url.hostname === source.toLowerCase() || url.hostname.endsWith(`.${source.toLowerCase()}`) || name.toLowerCase() === source.toLowerCase();
+    };
+    return !settings.excludedSources.some((source) => matches(source, false)) && (!settings.allowedSources.length || settings.allowedSources.some((source) => matches(source, true)));
+  } catch { return false; }
+}
 export const topicTokens = (text: string): Set<string> => new Set(text.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/u).filter((word) => word.length > 1 && !["the", "a", "an", "and", "of", "to", "in", "for", "with", "new", "news"].includes(word)));
 export const topicSimilarity = (left: string, right: string): number => {
   const a = topicTokens(left); const b = topicTokens(right);
@@ -26,16 +36,12 @@ export function scoreTopicCandidate(candidate: TopicSourceCandidate, settings: {
 }, now = Date.now()) {
   const text = `${candidate.title} ${candidate.summary} ${candidate.body}`.toLowerCase();
   const canonicalUrl = canonicalizeTopicUrl(candidate.url);
-  const host = new URL(canonicalUrl).hostname;
-  const sourceMatches = (source: string): boolean => {
-    if (/^https?:\/\//i.test(source)) {
-      const allowed = new URL(source);
-      return host === allowed.hostname && (new URL(canonicalUrl).pathname === allowed.pathname || new URL(canonicalUrl).pathname.startsWith(allowed.pathname.endsWith("/") ? allowed.pathname : `${allowed.pathname}/`));
-    }
-    return host === source.toLowerCase() || host.endsWith(`.${source.toLowerCase()}`) || candidate.sourceName.toLowerCase() === source.toLowerCase();
-  };
+  if (candidate.reliabilityMetadata?.role === "DISCOVERY") return { ...candidate, canonicalUrl, urlHash: hash(canonicalUrl), contentHash: hash(`${candidate.title}\n${candidate.summary}\n${candidate.body}`),
+    suitabilityScore: 0, freshnessScore: 0, reliabilityScore: 0, expectedValueScore: 0,
+    components: { channelFit: null, freshness: null, sourceReliability: null, explanationValue: null, visualizability: null, productionCost: null, historicalPerformance: null },
+    scoringMethod: "DISCOVERY_ONLY_UNSCORED" as const, rejectionReason: "DISCOVERY_REQUIRES_EVIDENCE" };
   const blocked = ["politics", "medical advice", "financial advice", "legal advice", ...settings.excludedKeywords, ...settings.excludedTopics].find((term) => term && text.includes(term.toLowerCase()));
-  const sourceBlocked = settings.excludedSources.some(sourceMatches) || (settings.allowedSources.length > 0 && !settings.allowedSources.some(sourceMatches));
+  const sourceBlocked = !topicSourceAllowed(canonicalUrl, candidate.sourceName, settings);
   const suitabilityScore = settings.keywords.length ? settings.keywords.filter((term) => text.includes(term.toLowerCase())).length / settings.keywords.length : 0.5;
   // Freshness describes publication age, never the date of the historical event.
   const publishedAt = candidate.publishedAt ? Date.parse(candidate.publishedAt) : Number.NaN;
@@ -45,9 +51,10 @@ export function scoreTopicCandidate(candidate: TopicSourceCandidate, settings: {
   const visualizabilityScore = /rocket|sensor|process|compare|data|space|로켓|센서|과정|비교|우주/i.test(text) ? 1 : 0.5;
   const costScore = candidate.body.length <= 5000 ? 1 : 0.5;
   const components = { channelFit: suitabilityScore, freshness: freshnessScore, sourceReliability: reliabilityScore, explanationValue: curiosityScore, visualizability: visualizabilityScore, productionCost: costScore, historicalPerformance: null };
-  const news = (settings.selectionPolicy?.freshness ?? "NEWS") === "NEWS";
+  const freshness = settings.selectionPolicy?.freshness ?? "NEWS";
+  const news = freshness === "NEWS" || (freshness === "MIXED" && candidate.publishedAt !== null && now - Date.parse(candidate.publishedAt) <= settings.recencyHours * 3600000);
   const stale = news && (!candidate.publishedAt || !Number.isFinite(Date.parse(candidate.publishedAt)) || now - Date.parse(candidate.publishedAt) > settings.recencyHours * 3_600_000 || Date.parse(candidate.publishedAt) > now + 300_000);
   return { ...candidate, canonicalUrl, urlHash: hash(canonicalUrl), contentHash: hash(`${candidate.title}\n${candidate.summary}\n${candidate.body}`.toLowerCase().trim()), suitabilityScore, freshnessScore, reliabilityScore,
     components, scoringMethod: "RULE_BASED_NOT_PROBABILITY" as const, expectedValueScore: clamp(suitabilityScore * 0.35 + (news ? freshnessScore : 0.7) * 0.15 + reliabilityScore * 0.2 + curiosityScore * 0.1 + visualizabilityScore * 0.1 + costScore * 0.1),
-    rejectionReason: blocked ? `Blocked term: ${blocked}` : sourceBlocked ? "SOURCE_NOT_ALLOWED" : stale ? "OUTSIDE_FRESHNESS_POLICY" : settings.keywords.length > 0 && suitabilityScore === 0 && (settings.selectionPolicy?.keywordMatch ?? "REQUIRED") === "REQUIRED" ? "KEYWORD_MISMATCH" : null };
+    rejectionReason: candidate.reliabilityMetadata?.role === "DISCOVERY" ? "DISCOVERY_REQUIRES_EVIDENCE" : blocked ? `Blocked term: ${blocked}` : sourceBlocked ? "SOURCE_NOT_ALLOWED" : stale ? "OUTSIDE_FRESHNESS_POLICY" : settings.keywords.length > 0 && suitabilityScore === 0 && (settings.selectionPolicy?.keywordMatch ?? "REQUIRED") === "REQUIRED" ? "KEYWORD_MISMATCH" : null };
 }

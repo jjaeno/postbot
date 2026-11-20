@@ -1,7 +1,9 @@
 import { useEffect, useState, type ReactElement } from "react";
 import { UpdateChannelRequestSchema, type ChannelResponse, type UpdateChannelRequest } from "@postbot/contracts";
+import { CollectionProfileEditor } from "./collection-profile-editor";
 
 export const channelOperations = (channel: ChannelResponse): UpdateChannelRequest => ({
+  language: channel.language,
   description: channel.description, topic: channel.topic, excludedTopics: channel.excludedTopics,
   collectionRule: channel.collectionRule, scheduleRules: channel.scheduleRules,
   outputProfiles: channel.outputProfiles,
@@ -22,6 +24,7 @@ export const ChannelOperationsEditor = ({ value, onChange }: { value: UpdateChan
   const validation = UpdateChannelRequestSchema.safeParse(value);
   return <div className="space-y-4" data-testid="channel-operations-editor">
     <h3 className="font-semibold">수집·일정·자동화 운영 설정</h3>
+    {collection ? <CollectionProfileEditor value={collection.profile} language={value.language ?? navigator.language} onChange={(profile) => patch({ collectionRule: { ...collection, profile } })} /> : null}
     <label className="block text-sm">주제<input className={field} value={value.topic ?? ""} onChange={(event) => patch({ topic: event.target.value })} /></label>
     <label className="block text-sm">채널 설명<textarea aria-label="채널 설명" className={field} value={value.description ?? ""} onChange={(event) => patch({ description: event.target.value })} /></label>
     <label className="block text-sm">제외 주제 (쉼표 구분)<CsvInput value={value.excludedTopics ?? []} onChange={(excludedTopics) => patch({ excludedTopics })} /></label>

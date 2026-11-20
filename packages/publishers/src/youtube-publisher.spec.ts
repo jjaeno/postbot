@@ -29,10 +29,32 @@ describe("YouTube upload safety", () => {
     await expect(provider.upload({ ...input, privacyStatus: "public", publishAt: "2099-01-01T00:00:00Z" }, "token")).rejects.toThrow("YOUTUBE_SCHEDULE_REQUIRES_FUTURE_PRIVATE_VIDEO");
     expect(request).not.toHaveBeenCalled();
   });
+  it.each([
+    ["processing", { uploadStatus: "uploaded", privacyStatus: "public" }, { processingStatus: "processing" }],
+    ["failed", { uploadStatus: "processed", privacyStatus: "public" }, { processingStatus: "failed", processingFailureReason: "transcodeFailed" }],
+    ["scheduled", { uploadStatus: "processed", privacyStatus: "private", publishAt: "2099-01-01T00:00:00Z" }, { processingStatus: "succeeded" }],
+    ["uploaded", { uploadStatus: "processed", privacyStatus: "private" }, { processingStatus: "succeeded" }],
+    ["published", { uploadStatus: "processed", privacyStatus: "public" }, { processingStatus: "succeeded" }]
+  ] as const)("maps native %s without treating upload time as public time", async (expected, status, processingDetails) => {
+    const fetchImplementation = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ items: [{ id: "video-1", snippet: { channelId: "channel-1", publishedAt: "2026-11-01T01:02:03Z" }, status, processingDetails }] }));
+    const provider = new GoogleYouTubePublisherProvider("fixture", "fixture", { fetchImplementation });
+    expect(await provider.getPublicationStatus("video-1", "fixture", "channel-1")).toMatchObject({ status: expected, publishedAt: expected === "published" ? "2026-11-01T01:02:03Z" : null });
+    const requested = fetchImplementation.mock.calls[0]?.[0];
+    if (!(requested instanceof URL)) throw new Error("Expected a structured URL");
+    expect(requested.searchParams.get("part")).toContain("processingDetails");
+  });
+  it("requires native owner identity when linking a recovered result", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ items: [{ id: "video-1", snippet: { channelId: "foreign" }, status: { uploadStatus: "processed", privacyStatus: "public" } }] }));
+    await expect(new GoogleYouTubePublisherProvider("fixture", "fixture", { fetchImplementation }).getPublicationStatus("video-1", "fixture", "owner")).rejects.toThrow("PUBLICATION_ACCOUNT_OR_ID_MISMATCH");
+  });
+  it("does not confirm an upcoming premiere as already public", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ items: [{ id: "video-1", snippet: { channelId: "owner", publishedAt: "2099-01-01T00:00:00Z", liveBroadcastContent: "upcoming" }, status: { uploadStatus: "processed", privacyStatus: "public" }, processingDetails: { processingStatus: "succeeded" } }] }));
+    expect(await new GoogleYouTubePublisherProvider("fixture", "fixture", { fetchImplementation }).getPublicationStatus("video-1", "fixture", "owner")).toMatchObject({ status: "processing", publishedAt: null });
+  });
 });
 
 describe.each([["Instagram", new FakeInstagramPublisherProvider(), instagramPublishScope], ["TikTok", new FakeTikTokPublisherProvider(), tiktokPublishScope]] as const)("%s Fake Publisher", (_name, provider, scope) => {
-  const input = { title: "Vertical short", description: "metadata", privacyStatus: "private" as const, publishAt: null, video: new Uint8Array([1]), idempotencyKey: "social-publish-key-123" };
+  const input = { title: "Vertical short", description: "metadata", privacyStatus: "public" as const, publishAt: null, video: new Uint8Array([1]), idempotencyKey: "social-publish-key-123" };
   it("validates, publishes idempotently, and exposes status", async () => {
     expect(provider.capabilities.requiredScopes).toContain(scope);
     const first = await provider.upload(input); const second = await provider.upload(input);

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { PrismaClient, jobExecution } from "@postbot/database";
-import { BullMqQueueAdapter } from "@postbot/jobs";
+import { BullMqQueueAdapter, createBullMqWorkers } from "@postbot/jobs";
 import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
 import { recoverQueues } from "./queue-recovery.js";
@@ -49,5 +49,22 @@ describe.skipIf(!enabled)("owner loss recovery with MySQL and Redis", () => {
     await recoverQueues(prisma, queue, 60_000);
     expect((await prisma.productionJob.findUniqueOrThrow({ where: { id: live.id } })).status).toBe("RUNNING");
     expect(await prisma.productionJob.findUniqueOrThrow({ where: { id: paid.id } })).toMatchObject({ status: "NEEDS_REVIEW", errorCode: "RECONCILIATION_REQUIRED" });
+  });
+  it("keeps DB idempotency after completed Redis deliveries are pruned", async () => {
+    const prefix = `prune-${randomUUID()}`; const redis = process.env.REDIS_URL ?? "redis://127.0.0.1:16379";
+    const isolated = new BullMqQueueAdapter(redis, prefix); const processor = new DeterministicJobProcessor(prisma);
+    const workers = createBullMqWorkers(redis, (job) => processor.process(job.data), ["collect"], prefix);
+    try {
+      const job = await prisma.productionJob.create({ data: { type: "COLLECT", queueName: "collect", idempotencyKey: randomUUID(), payload: {} } });
+      const input = { id: job.id, type: "COLLECT" as const, queueName: "collect" as const, payload: {}, runAfter: null };
+      await isolated.enqueue(input);
+      await expect.poll(() => isolated.state(job.id, "collect")).toBe("completed");
+      expect((await prisma.productionJob.findUniqueOrThrow({ where: { id: job.id } })).status).toBe("SUCCEEDED");
+      expect((await isolated.pruneTerminal("collect", 0, 0)).completed).toBe(1);
+      expect(await isolated.state(job.id, "collect")).toBe("unknown");
+      await isolated.enqueue(input);
+      await expect.poll(() => isolated.state(job.id, "collect")).toBe("completed");
+      expect(await prisma.jobAttempt.count({ where: { productionJobId: job.id } })).toBe(1);
+    } finally { await workers.close(); await isolated.close(); }
   });
 });

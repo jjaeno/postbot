@@ -122,6 +122,8 @@ enum PublishPlanStatus {
   DRAFT
   SCHEDULED
   PUBLISHING
+  UPLOADED
+  PROCESSING
   PUBLISHED
   FAILED
   HELD
@@ -322,6 +324,7 @@ model Membership {
 }
 
 model Channel {
+  discoveryRetentionCursor String? @db.VarChar(191)
   id                      String                   @id @default(cuid())
   workspaceId             String
   name                    String                   @db.VarChar(120)
@@ -343,6 +346,10 @@ model Channel {
   platformAccounts        PlatformAccount[]
   templates               ChannelTemplate[]
   collectionRules         CollectionRule[]
+  sourceFetches           SourceFetch[]
+  researchQuestions       ResearchQuestion[]
+  generationCaches        AssetGenerationCache[]
+  providerRightsPolicies  ProviderRightsPolicy[]
   outputProfiles          PlatformOutputProfile[]
   scheduleRules           ScheduleRule[]
   contentItems            ContentItem[]
@@ -407,6 +414,7 @@ model CollectionRule {
   excludedSources            Json?
   recencyHours               Int
   selectionPolicy            Json?
+  profile                    Json?
   collectionFrequencyMinutes Int
   isActive                   Boolean  @default(true)
   createdAt                  DateTime @default(now()) @db.DateTime(3)
@@ -416,6 +424,44 @@ model CollectionRule {
   @@unique([channelId, version])
   @@index([channelId, isActive])
   @@map("collection_rules")
+}
+
+model SourceFetch {
+  id         String   @id @default(cuid())
+  channelId  String
+  requestKey String   @db.VarChar(64)
+  source     String   @db.VarChar(40)
+  state      String   @db.VarChar(16)
+  response   Json?
+  startedAt  DateTime @default(now()) @db.DateTime(3)
+  completedAt DateTime? @db.DateTime(3)
+  expiresAt  DateTime @db.DateTime(3)
+  channel    Channel  @relation(fields: [channelId], references: [id], onDelete: Restrict)
+
+  @@unique([channelId, requestKey])
+  @@index([channelId, startedAt])
+  @@index([channelId, completedAt])
+  @@index([expiresAt])
+  @@map("source_fetches")
+}
+
+model ResearchQuestion {
+  id             String   @id @default(cuid())
+  channelId      String
+  idempotencyKey String   @db.VarChar(120)
+  question       String   @db.Text
+  subtopic       String   @db.VarChar(200)
+  origin         String   @db.VarChar(24)
+  status         String   @default("INVESTIGATE") @db.VarChar(24)
+  evidence       Json?
+  reason         String?  @db.VarChar(120)
+  createdAt      DateTime @default(now()) @db.DateTime(3)
+  updatedAt      DateTime @updatedAt @db.DateTime(3)
+  channel        Channel  @relation(fields: [channelId], references: [id], onDelete: Restrict)
+
+  @@unique([channelId, idempotencyKey])
+  @@index([channelId, status])
+  @@map("research_questions")
 }
 
 model PlatformAccount {
@@ -454,6 +500,9 @@ model OAuthCredential {
   scopes                Json
   expiresAt             DateTime?       @db.DateTime(3)
   lastRefreshedAt       DateTime?       @db.DateTime(3)
+  credentialVersion     Int             @default(0)
+  refreshLeaseToken     String?         @db.VarChar(64)
+  refreshLeaseUntil     DateTime?       @db.DateTime(3)
   createdAt             DateTime        @default(now()) @db.DateTime(3)
   updatedAt             DateTime        @updatedAt @db.DateTime(3)
   platformAccount       PlatformAccount @relation(fields: [platformAccountId], references: [id], onDelete: Restrict)
@@ -612,6 +661,7 @@ model SceneVersion {
   platform        Platform?
   sceneDocument   Json
   renderManifest  Json?
+  retentionState  String         @default("ACTIVE") @db.VarChar(24)
   durationSeconds Decimal?       @db.Decimal(8, 3)
   createdAt       DateTime       @default(now()) @db.DateTime(3)
   contentItem     ContentItem    @relation(fields: [contentItemId], references: [id], onDelete: Restrict)
@@ -621,6 +671,7 @@ model SceneVersion {
 
   @@unique([contentItemId, platform, version])
   @@index([scriptVersionId])
+  @@index([retentionState, createdAt, id])
   @@map("scene_versions")
 }
 
@@ -630,6 +681,7 @@ model Asset {
   kind            AssetKind
   origin          AssetOrigin
   storageKey      String         @db.VarChar(512)
+  retentionState  String         @default("ACTIVE") @db.VarChar(24)
   checksumSha256  String         @db.VarChar(64)
   dedupScope      String         @default("global") @db.VarChar(191)
   mimeType        String         @db.VarChar(120)
@@ -643,10 +695,28 @@ model Asset {
   sources         AssetSource[]
   licenses        AssetLicense[]
   usages          AssetUsage[]
+  generationCaches AssetGenerationCache[]
 
   @@unique([dedupScope, checksumSha256])
   @@index([channelId, kind, origin])
+  @@index([retentionState, createdAt, id])
   @@map("assets")
+}
+
+model StorageDeletion {
+  id          String   @id @default(cuid())
+  workspaceId String
+  channelId   String
+  resourceId  String
+  kind        String   @db.VarChar(24)
+  state       String   @default("MARKED") @db.VarChar(24)
+  objectKeys  Json
+  snapshot    Json?
+  createdAt   DateTime @default(now()) @db.DateTime(3)
+  updatedAt   DateTime @updatedAt @db.DateTime(3)
+  @@unique([kind, resourceId])
+  @@index([workspaceId, state, id])
+  @@map("storage_deletions")
 }
 
 model AssetSource {
@@ -667,6 +737,8 @@ model AssetSource {
 }
 
 model AssetLicense {
+  rightsPolicyId       String?
+  rightsPolicy         ProviderRightsPolicy? @relation(fields: [rightsPolicyId], references: [id], onDelete: Restrict)
   id                   String        @id @default(cuid())
   assetId              String
   status               LicenseStatus @default(PENDING)
@@ -684,6 +756,48 @@ model AssetLicense {
 
   @@index([assetId, status, checkedAt])
   @@map("asset_licenses")
+}
+
+model AssetGenerationCache {
+  id             String   @id @default(cuid())
+  channelId      String
+  inputKey       String   @db.VarChar(64)
+  state          String   @db.VarChar(24)
+  ownerKey       String   @db.VarChar(191)
+  callKey        String?  @db.VarChar(191)
+  assetId        String?
+  snapshot       Json?
+  createdAt      DateTime @default(now()) @db.DateTime(3)
+  updatedAt      DateTime @updatedAt @db.DateTime(3)
+  channel        Channel  @relation(fields: [channelId], references: [id], onDelete: Restrict)
+  asset          Asset?   @relation(fields: [assetId], references: [id], onDelete: Restrict)
+  @@unique([channelId, inputKey])
+  @@index([assetId])
+  @@map("asset_generation_caches")
+}
+
+model ProviderRightsPolicy {
+  id                   String   @id @default(cuid())
+  channelId            String
+  version              Int
+  provider             String   @db.VarChar(80)
+  model                String   @db.VarChar(120)
+  accountRef           String   @db.VarChar(120)
+  contractVersion      String   @db.VarChar(120)
+  proofUrl             String   @db.Text
+  evidence             Json
+  commercialUseAllowed Boolean
+  derivativeAllowed    Boolean
+  attributionRequired  Boolean  @default(false)
+  attributionText      String?  @db.Text
+  validFrom            DateTime @db.DateTime(3)
+  validUntil           DateTime @db.DateTime(3)
+  revokedAt            DateTime? @db.DateTime(3)
+  createdAt            DateTime @default(now()) @db.DateTime(3)
+  channel              Channel @relation(fields: [channelId], references: [id], onDelete: Restrict)
+  licenses             AssetLicense[]
+  @@unique([channelId, provider, model, accountRef, contractVersion, version], map: "provider_rights_scope_version_key")
+  @@map("provider_rights_policies")
 }
 
 model AssetUsage {
@@ -729,6 +843,8 @@ model ProductionJob {
   automationSteps AutomationStep[]
 
   @@index([queueName, status, runAfter])
+  @@index([status, heartbeatAt, id])
+  @@index([channelId, status, finishedAt])
   @@index([contentItemId, type, status])
   @@map("production_jobs")
 }
@@ -884,6 +1000,8 @@ model AutomationCostReservation {
   currency        String            @default("USD") @db.VarChar(3)
   releasedAt      DateTime?         @db.DateTime(3)
   settledAt       DateTime?         @db.DateTime(3)
+  settlementBasis String?           @db.VarChar(40)
+  accountedActual Decimal           @default(0) @db.Decimal(18, 6)
   createdAt       DateTime          @default(now()) @db.DateTime(3)
   automationRun   AutomationRun     @relation(fields: [automationRunId], references: [id], onDelete: Restrict)
 
@@ -1027,6 +1145,7 @@ model PublishAttempt {
   idempotencyKey   String               @unique @db.VarChar(191)
   requestSnapshot  Json?
   responseSnapshot Json?
+  protectedProviderEvidence Json?
   errorCode        String?              @db.VarChar(80)
   errorMessage     String?              @db.Text
   startedAt        DateTime?            @db.DateTime(3)
@@ -1046,7 +1165,13 @@ model PlatformPost {
   platform           Platform
   externalPostId     String                    @db.VarChar(191)
   postUrl            String                    @db.Text
-  publishedAt        DateTime                  @db.DateTime(3)
+  publishedAt        DateTime?                 @db.DateTime(3)
+  publicationState   String                    @default("UPLOADED") @db.VarChar(32)
+  publicationCheckedAt DateTime?               @db.DateTime(3)
+  nextPublicationCheckAt DateTime?             @db.DateTime(3)
+  publicationCheckCount Int                    @default(0)
+  publicationFailureCode String?               @db.VarChar(80)
+  visibility          String?                  @db.VarChar(16)
   policyVersion      Int
   productionSnapshot Json?
   createdAt          DateTime                  @default(now()) @db.DateTime(3)
@@ -1056,6 +1181,7 @@ model PlatformPost {
 
   @@unique([platform, externalPostId])
   @@index([platformAccountId, publishedAt])
+  @@index([publicationState, nextPublicationCheckAt])
   @@map("platform_posts")
 }
 
@@ -1124,16 +1250,35 @@ model ProviderUsage {
   currency         String         @default("USD") @db.VarChar(3)
   estimatedCost    Decimal?       @db.Decimal(18, 6)
   actualCost       Decimal?       @db.Decimal(18, 6)
+  billingState     String         @default("KNOWN_ESTIMATE") @db.VarChar(40)
+  billingRevision  Int            @default(0)
   idempotencyKey   String?        @unique @db.VarChar(191)
   providerResponse Json?
   occurredAt       DateTime       @default(now()) @db.DateTime(3)
   contentItem      ContentItem?   @relation(fields: [contentItemId], references: [id], onDelete: SetNull)
   productionJob    ProductionJob? @relation(fields: [productionJobId], references: [id], onDelete: SetNull)
   costLedger       CostLedger[]
+  billingReconciliations BillingReconciliation[]
 
   @@index([provider, operation, occurredAt])
   @@index([contentItemId])
   @@map("provider_usages")
+}
+
+model BillingReconciliation {
+  id String @id @default(cuid())
+  providerUsageId String
+  idempotencyKey String @unique @db.VarChar(191)
+  actorUserId String
+  previousAmount Decimal? @db.Decimal(18, 6)
+  actualAmount Decimal @db.Decimal(18, 6)
+  evidenceHash String @db.Char(64)
+  externalReference String @db.VarChar(191)
+  revision Int
+  createdAt DateTime @default(now()) @db.DateTime(3)
+  providerUsage ProviderUsage @relation(fields: [providerUsageId], references: [id], onDelete: Restrict)
+  @@unique([providerUsageId, revision])
+  @@map("billing_reconciliations")
 }
 
 model CostLedger {

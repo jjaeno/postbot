@@ -50,6 +50,7 @@ try {
   const account = await prisma.platformAccount.create({ data: { workspaceId: workspace.id, channelId: channel.id, platform: "YOUTUBE", externalAccountId: key } });
   const jobs = new JobsService(new PrismaJobsRepository(prisma), queue); const publishing = new PublishingService(prisma, jobs);
   const plan = await publishing.schedule(workspace.id, { contentItemId: generated.contentItemId, platformAccountId: account.id, scheduledAt: new Date(Date.now()+3600000).toISOString(), idempotencyKey: randomUUID() });
+  await prisma.publishPlan.update({ where: { id: plan.id }, data: { scheduledAt: new Date(Date.now() - 1000) } });
   const publisher = new PublishProcessor(prisma); await publisher.process({ publish: { publishPlanId: plan.id } });
   assert.equal((await publisher.process({ publish: { publishPlanId: plan.id } })).duplicate, true);
   const post = await prisma.platformPost.findUniqueOrThrow({ where: { publishPlanId: plan.id } });

@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { ChannelCollectionProfileSchema } from "./collection-profile.js";
+export { nextZonedSchedule, localPublishDay, type RecurringSchedule } from "./schedule.js";
+export { ChannelCollectionProfileSchema, collectionProfilePreset, ResearchQuestionInputSchema, type ChannelCollectionProfile } from "./collection-profile.js";
 
 export const HealthStatusSchema = z.enum(["ok"]);
 
@@ -76,8 +79,9 @@ export const ConnectionStatusSchema = z.enum(["PLANNED", "CONNECTED", "EXPIRED",
 
 export const JsonObjectSchema = z.record(z.string(), z.unknown());
 
-export const TopicSelectionPolicySchema = z.object({ freshness: z.enum(["NEWS", "EVERGREEN"]).optional(), keywordMatch: z.enum(["REQUIRED", "PREFER"]).optional(), semanticDuplicateThreshold: z.number().min(0.2).max(1).optional(), recentTopicDays: z.number().int().min(1).max(365).optional() });
+export const TopicSelectionPolicySchema = z.object({ freshness: z.enum(["NEWS", "EVERGREEN", "MIXED"]).optional(), keywordMatch: z.enum(["REQUIRED", "PREFER"]).optional(), semanticDuplicateThreshold: z.number().min(0.2).max(1).optional(), recentTopicDays: z.number().int().min(1).max(365).optional() });
 export const CollectionRuleSchema = z.object({
+  profile: ChannelCollectionProfileSchema.optional(),
   selectionPolicy: TopicSelectionPolicySchema.optional(),
   keywords: z.array(z.string().min(1).max(80)).min(1).max(20),
   excludedKeywords: z.array(z.string().min(1).max(80)).max(20).default([]),
@@ -526,6 +530,8 @@ export const AssetPreparationJobPayloadSchema = z.object({
 
 export const TtsPreparationJobPayloadSchema = z.object({
   ttsPreparation: z.object({
+    language: z.string().min(2).max(16).optional(),
+    pronunciations: z.record(z.string().min(1).max(80), z.string().min(1).max(200)).refine((entries) => Object.keys(entries).length <= 100).optional(),
     channelId: z.string().min(1),
     contentItemId: z.string().min(1),
     sceneVersionId: z.string().min(1).nullable().default(null),
@@ -551,6 +557,7 @@ export const AutomationJobContextSchema = z.object({
 
 export const CollectAutomationJobPayloadSchema = AutomationJobContextSchema.extend({
   collect: z.object({
+    mode: z.enum(["DISCOVER", "RANK", "SELECT", "COLLECT_SELECT"]).default("COLLECT_SELECT"),
     selectionPolicy: TopicSelectionPolicySchema.optional(),
     channelId: z.string().min(1),
     topic: z.string().min(1),
@@ -603,7 +610,7 @@ export const ContentReviewResponseSchema = z.object({
     durationSeconds: z.number().positive().nullable().default(null),
     reviewStatus: z.enum(["REVIEW_REQUIRED", "APPROVED", "HELD", "DISCARDED"]).default("REVIEW_REQUIRED"),
     policy: z.object({ status: PolicyVerdictSchema, findings: z.array(PolicyFindingSchema), snapshotId: z.string().nullable() }).nullable().default(null),
-    publishStatus: z.enum(["DRAFT", "SCHEDULED", "PUBLISHING", "PUBLISHED", "FAILED", "HELD", "CANCELLED"]).nullable().default(null)
+    publishStatus: z.enum(["DRAFT", "SCHEDULED", "PUBLISHING", "UPLOADED", "PROCESSING", "PUBLISHED", "FAILED", "HELD", "CANCELLED"]).nullable().default(null)
   })).default([])
 });
 export const ReviewPreviewResponseSchema = z.object({ url: z.string().url(), expiresInSeconds: z.number().int().positive() });
@@ -624,13 +631,16 @@ export type ContentItemSummary = z.infer<typeof ContentItemSummarySchema>;
 export type ContentItemListResponse = z.infer<typeof ContentItemListResponseSchema>;
 
 export const CreatePublishPlanRequestSchema = z.object({ contentItemId: z.string().min(1), platformAccountId: z.string().min(1), scheduledAt: z.string().datetime(), idempotencyKey: z.string().min(8).max(191) });
-export const PublishPlanResponseSchema = z.object({ id: z.string(), contentItemId: z.string(), platformAccountId: z.string(), platform: PlatformSchema, status: z.enum(["DRAFT", "SCHEDULED", "PUBLISHING", "PUBLISHED", "FAILED", "HELD", "CANCELLED"]), scheduledAt: z.string().datetime(), idempotencyKey: z.string(), title: z.string(), duplicate: z.boolean().optional() });
+export const ReconcilePublicationRequestSchema = z.object({ idempotencyKey: z.string().min(8).max(128), externalVideoId: z.string().regex(/^[A-Za-z0-9_-]{1,191}$/).optional(), evidenceHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict().refine((value) => !value.externalVideoId || value.evidenceHash, "EXTERNAL_RESULT_EVIDENCE_REQUIRED");
+export const PublishPlanResponseSchema = z.object({ id: z.string(), contentItemId: z.string(), platformAccountId: z.string(), platform: PlatformSchema, status: z.enum(["DRAFT", "SCHEDULED", "PUBLISHING", "UPLOADED", "PROCESSING", "PUBLISHED", "FAILED", "HELD", "CANCELLED"]), scheduledAt: z.string().datetime(), idempotencyKey: z.string(), title: z.string(), duplicate: z.boolean().optional() });
 export type CreatePublishPlanRequest = z.infer<typeof CreatePublishPlanRequestSchema>;
 export type PublishPlanResponse = z.infer<typeof PublishPlanResponseSchema>;
 export const PublishCalendarItemSchema = z.object({
   id: z.string(), contentItemId: z.string(), channelId: z.string(), platform: PlatformSchema,
-  status: z.enum(["DRAFT", "SCHEDULED", "PUBLISHING", "PUBLISHED", "FAILED", "HELD", "CANCELLED"]),
+  status: z.enum(["DRAFT", "SCHEDULED", "PUBLISHING", "UPLOADED", "PROCESSING", "PUBLISHED", "FAILED", "HELD", "CANCELLED"]),
   scheduledAt: z.string().datetime(), title: z.string(), postUrl: z.string().url().nullable(),
+  publicationState: z.string().nullable().optional(), publicationCheckedAt: z.string().datetime().nullable().optional(),
+  visibility: z.string().nullable().optional(),
   publishedAt: z.string().datetime().nullable(), failureReason: z.string().nullable(), reconciliationRequired: z.boolean().optional()
 });
 export type PublishCalendarItem = z.infer<typeof PublishCalendarItemSchema>;
@@ -648,6 +658,7 @@ export const AutomationRunRequestSchema = z.object({
 });
 export const AutomationControlRequestSchema = z.object({ action: z.enum(["pause", "resume", "drain", "kill", "retry", "hold", "skip"]), reason: z.string().max(500).optional(), stage: AutomationStageSchema.optional(), platform: PlatformSchema.optional() });
 export const AutomationRunResponseSchema = z.object({
+  productionState: z.enum(["DISCOVERY", "NOT_REQUIRED", "PRODUCING", "REVIEW_REQUIRED", "READY", "FAILED", "CANCELLED"]).optional(),
   id: z.string(), channelId: z.string(), status: AutomationRunStatusSchema, idempotencyKey: z.string(),
   createdAt: z.string().datetime().optional(), finishedAt: z.string().datetime().nullable().optional(),
   checkpoint: z.record(z.string(), z.unknown()).nullable(), failureCount: z.number().int(),
@@ -691,7 +702,7 @@ export const OptimizationSettingsSchema = z.object({
   maxChangeRatio: z.number().min(0).max(0.5).default(0.2)
 });
 export const UpdateOptimizationSettingsRequestSchema = z.object({ channelId: z.string().min(1), settings: OptimizationSettingsSchema });
-export const GenerateSuggestionsRequestSchema = z.object({ channelId: z.string().min(1), platform: PlatformSchema, metric: z.enum(["views", "impressions", "reach", "average_view_ratio", "average_watch_seconds", "completion_rate", "engagement_rate"]), periodStart: z.string().datetime(), periodEnd: z.string().datetime(), idempotencyKey: z.string().min(8).max(128) }).refine((value) => value.periodStart < value.periodEnd, { message: "periodStart must precede periodEnd" });
+export const GenerateSuggestionsRequestSchema = z.object({ comparisonPurpose: z.enum(["RELATIVE_AGE", "CALENDAR_PERIOD"]).default("RELATIVE_AGE"), channelId: z.string().min(1), platform: PlatformSchema, metric: z.enum(["views", "impressions", "reach", "average_view_ratio", "average_watch_seconds", "completion_rate", "engagement_rate"]), periodStart: z.string().datetime(), periodEnd: z.string().datetime(), idempotencyKey: z.string().min(8).max(128) }).refine((value) => value.periodStart < value.periodEnd, { message: "periodStart must precede periodEnd" });
 export const SuggestionActionRequestSchema = z.object({ action: z.enum(["approve", "reject", "apply", "expire"]), reason: z.string().min(1).max(500).optional() });
 export const ExperimentStrategySchema = z.object({ durationSeconds: z.number().positive().max(180) }).strict();
 export const CreateExperimentRequestSchema = z.object({ durationToleranceSeconds: z.number().min(0.1).max(3).optional(), channelId: z.string().min(1), name: z.string().min(1).max(120), hypothesis: z.string().min(1).max(2000), platform: PlatformSchema.default("YOUTUBE"), periodDays: z.number().int().min(1).max(90).default(30), targetMetric: z.string().min(1).max(80), minSampleSize: z.number().int().min(2).max(10_000), control: ExperimentStrategySchema, variant: ExperimentStrategySchema, successCriteria: z.object({ direction: z.enum(["higher", "lower"]).default("higher"), minRelativeImprovement: z.number().positive().max(1).default(0.1) }).strict(), stopCriteria: z.object({ maxAssignments: z.number().int().min(4).max(20_000) }).strict().optional() }).refine((value) => !value.stopCriteria || value.stopCriteria.maxAssignments >= value.minSampleSize * 2, "배정 상한은 두 그룹 최소 표본의 합 이상이어야 합니다.");
@@ -707,6 +718,10 @@ export type ExperimentResponse = z.infer<typeof ExperimentResponseSchema>;
 
 export const CostReportQuerySchema = z.object({ periodStart: z.string().datetime(), periodEnd: z.string().datetime(), channelId: z.string().min(1).optional(), contentItemId: z.string().min(1).optional(), provider: z.string().min(1).max(80).optional() }).refine((value) => value.periodStart < value.periodEnd, { message: "periodStart must precede periodEnd" });
 export const CostReportResponseSchema = z.object({ currency: z.string(), periodStart: z.string().datetime(), periodEnd: z.string().datetime(), estimated: z.number(), actual: z.number(), credit: z.number(), reconciled: z.boolean(), discrepancy: z.number(), byProvider: z.array(z.object({ provider: z.string(), estimated: z.number(), actual: z.number(), credit: z.number() })) });
+export const ReconcileUsageBillingSchema = z.object({ idempotencyKey: z.string().min(8).max(128), expectedRevision: z.number().int().nonnegative(), actualAmount: z.string().regex(/^\d{1,12}(?:\.\d{1,6})?$/), evidenceHash: z.string().regex(/^[a-f0-9]{64}$/), externalReference: z.string().min(1).max(191) }).strict();
+export const ReconcileProviderOutcomeSchema = z.object({ idempotencyKey: z.string().min(8).max(128), journal: z.enum(["MEDIA", "LLM"]), callKey: z.string().min(1).max(191), outcome: z.enum(["NOT_ACCEPTED", "RESULT_AVAILABLE"]), evidenceHash: z.string().regex(/^[a-f0-9]{64}$/), externalReference: z.string().min(1).max(191), cacheId: z.string().optional(), assetUsageId: z.string().optional(), providerUsageId: z.string().optional(),
+  llmResponse: z.object({ provider: z.literal("openai"), idempotencyKey: z.string(), createdAt: z.string().datetime(), model: z.string().max(120), promptVersion: z.string().max(120), structuredOutput: z.json(), usage: z.object({ promptTokens: z.number().int().nonnegative(), completionTokens: z.number().int().nonnegative(), totalTokens: z.number().int().nonnegative() }) }).strict().optional()
+}).strict().refine((value) => JSON.stringify(value).length <= 262144, "PROVIDER_RECEIPT_TOO_LARGE");
 export const NotificationResponseSchema = z.object({ id: z.string(), eventKey: z.string(), severity: z.enum(["INFO", "WARNING", "CRITICAL"]), payload: z.unknown(), acknowledgedAt: z.string().datetime().nullable(), createdAt: z.string().datetime() });
 export const AuditLogResponseSchema = z.object({ id: z.string(), action: z.string(), targetType: z.string(), targetId: z.string().nullable(), metadata: z.unknown().nullable(), createdAt: z.string().datetime() });
 export const DataLifecycleRequestTypeSchema = z.enum(["WORKSPACE_DELETE", "USER_DELETE", "RETENTION"]);
@@ -737,3 +752,8 @@ export type FactSourceLink = z.infer<typeof FactSourceLinkSchema>;
 export type GeneratedMetadata = z.infer<typeof GeneratedMetadataSchema>;
 export type GeneratedScript = z.infer<typeof GeneratedScriptSchema>;
 export type ScriptSceneGenerationResponse = z.infer<typeof ScriptSceneGenerationResponseSchema>;
+export { ProductionReferenceSchema, ProductionResultSchema, ProductionResultsResponseSchema, type ProductionReference, type ProductionResult } from "./production.js";
+
+export { hasHttpsVisualReference } from "./collection-profile.js";
+export { normalizeMediaReferences, type MediaReference } from "./collection-profile.js";
+export { BusinessProgressSchema, evaluateBusinessProgress, type BusinessProgress } from "./business-progress.js";

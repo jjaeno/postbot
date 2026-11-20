@@ -1,3 +1,5 @@
+import { GenerateSuggestionsRequestSchema, OptimizationSettingsSchema } from "@postbot/contracts";
+import { generateOptimization } from "@postbot/optimization";
 import { assertExecutionOwner, type Prisma, type PrismaClient } from "@postbot/database";
 import { assertPlatformEnabled, loadConfig } from "@postbot/config";
 import { FakeAnalyticsProvider, InstagramAnalyticsProvider, TikTokAnalyticsProvider, YouTubeAnalyticsProvider, type AnalyticsProvider } from "@postbot/providers";
@@ -11,6 +13,13 @@ const syncIdFromPayload = (payload: Record<string, unknown>): string | null => {
 export class AnalyticsProcessor {
   constructor(private readonly prisma: PrismaClient, private readonly providerOverride?: AnalyticsProvider) {}
   async process(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (payload.analysis) {
+      const input = GenerateSuggestionsRequestSchema.parse(payload.analysis);
+      const channel = await this.prisma.channel.findUniqueOrThrow({ where: { id: input.channelId } });
+      const settings = OptimizationSettingsSchema.parse(channel.optimizationSettings ?? {});
+      const suggestion = await generateOptimization(this.prisma, channel, input, settings);
+      return { analysisId: suggestion.id, status: suggestion.status };
+    }
     const syncId = syncIdFromPayload(payload);
     if (!syncId) return { skipped: true };
     const sync = await this.prisma.analyticsSync.findUnique({ where: { id: syncId } });
@@ -31,7 +40,7 @@ export class AnalyticsProcessor {
     try {
       const provider = this.providerOverride ?? await this.provider(sync.channelId, sync.platform);
       const domain = payload.analytics && typeof payload.analytics === "object" ? payload.analytics as Record<string, unknown> : {};
-      const posts = await this.prisma.platformPost.findMany({ where: { ...(typeof domain.platformPostId === "string" ? { id: domain.platformPostId } : {}), platform: sync.platform, publishPlan: { contentItem: { channelId: sync.channelId } } }, include: { publishPlan: { include: { sceneVersion: true } }, analyticsSnapshots: { where: { analyticsSyncId: sync.id }, orderBy: { revision: "desc" } } } });
+      const posts = await this.prisma.platformPost.findMany({ where: { publicationState: "PUBLISHED", publishedAt: { not: null }, ...(typeof domain.platformPostId === "string" ? { id: domain.platformPostId } : {}), platform: sync.platform, publishPlan: { contentItem: { channelId: sync.channelId } } }, include: { publishPlan: { include: { sceneVersion: true } }, analyticsSnapshots: { where: { analyticsSyncId: sync.id }, orderBy: { revision: "desc" } } } });
       const transient = (reason: string | null): boolean => reason !== null && /NOT_RETURNED|UNAVAILABLE|PENDING|DELAY/.test(reason) && !/NOT_PROVIDED|NOT_SUPPORTED|SEPARATE|NOT_EQUIVALENT|ZERO_DENOMINATOR/.test(reason);
       const currentMetrics = (post: typeof posts[number]) => [...new Map([...post.analyticsSnapshots].reverse().map((metric) => [metric.metric, metric])).values()];
       const pending = posts.filter((post) => !post.analyticsSnapshots.length || currentMetrics(post).some((metric) => transient(metric.unavailableReason) || (metric.rawSnapshot && typeof metric.rawSnapshot === "object" && !Array.isArray(metric.rawSnapshot) && metric.rawSnapshot.collectionPending === true)));
@@ -57,7 +66,7 @@ export class AnalyticsProcessor {
               const data: Prisma.AnalyticsMetricSnapshotCreateManyInput[] = [];
               for (const post of page.posts) {
                 const target = batch.find((item) => item.externalPostId === post.externalPostId);
-                if (!target) continue;
+                if (!target?.publishedAt) continue;
                 received.add(post.externalPostId);
                 const collectedAt = new Date(); const observation = post.observation;
                 const end = observation?.periodEnd ? new Date(observation.periodEnd) : null;
@@ -67,7 +76,7 @@ export class AnalyticsProcessor {
                 for (const metric of post.metrics) {
                   const revisionKey = `${target.id}:${metric.metric}`;
                   const revision = (latest.get(revisionKey) ?? 0) + 1; latest.set(revisionKey, revision);
-                  data.push({ analyticsSyncId: sync.id, platformPostId: target.id, metric: metric.metric, mappingVersion: "v3", status: metric.value === null ? "UNAVAILABLE" : "AVAILABLE", value: metric.value, unit: metric.unit, aggregation: metric.aggregation, unavailableReason: metric.unavailableReason, rawSnapshot: { ...post.raw, collectionPending: delayed, actualAgeSeconds: Math.max(0, (collectedAt.getTime() - target.publishedAt.getTime()) / 1000) }, observedAt: new Date(post.observedAt), collectedAt, observationKind: observation?.kind ?? "LEGACY_UNKNOWN", periodStart: observation?.periodStart ? new Date(observation.periodStart) : null, periodEnd: end, sceneVersionId: target.publishPlan.sceneVersionId, scriptVersionId: target.publishPlan.sceneVersion?.scriptVersionId, revision });
+                  data.push({ analyticsSyncId: sync.id, platformPostId: target.id, metric: metric.metric, mappingVersion: "v3", status: metric.value === null ? "UNAVAILABLE" : "AVAILABLE", value: metric.value, unit: metric.unit, aggregation: metric.aggregation, unavailableReason: metric.unavailableReason, rawSnapshot: { ...post.raw, ...(observation?.reportingTimezone ? { reportingTimezone: observation.reportingTimezone, coverageVerified: observation.coverageVerified === true } : {}), collectionPending: delayed, actualAgeSeconds: Math.max(0, (collectedAt.getTime() - target.publishedAt.getTime()) / 1000) }, observedAt: new Date(post.observedAt), collectedAt, observationKind: observation?.kind ?? "LEGACY_UNKNOWN", periodStart: observation?.periodStart ? new Date(observation.periodStart) : null, periodEnd: end, sceneVersionId: target.publishPlan.sceneVersionId, scriptVersionId: target.publishPlan.sceneVersion?.scriptVersionId, revision });
                 }
                 count++;
               }

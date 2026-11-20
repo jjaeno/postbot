@@ -1,10 +1,13 @@
 import { AssetRepository } from "@postbot/asset-library";
 import { PrismaClient } from "@postbot/database";
+import { z } from "zod";
 import { FakeLlmProvider } from "@postbot/providers";
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { ScriptGenerationProcessor } from "./script-generation-processor.js";
 import { DeterministicJobProcessor } from "./job-processor.js";
+import { recoverQueues } from "./queue-recovery.js";
+import { BullMqQueueAdapter } from "@postbot/jobs";
 
 const enabled = process.env.RUN_DB_INTEGRATION === "1" && new URL(process.env.DATABASE_URL ?? "mysql://invalid/").pathname.endsWith("_test");
 const prisma = new PrismaClient();
@@ -26,6 +29,16 @@ describe.skipIf(!enabled).sequential("real LLM call journal (mock HTTP, no paid 
     return { job, payload, output: valid.structuredOutput };
   };
   const response = (output: unknown) => Response.json({ status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify(output) }] }], usage: { input_tokens: 10, output_tokens: 20, total_tokens: 30 } });
+  it("resumes a recovered response under its original call key without another paid request", async () => {
+    const item = await fixture(); const callKey = `${item.payload.generation.request.idempotencyKey}:attempt:1`;
+    await prisma.productionJob.update({ where: { id: item.job.id }, data: { payload: { ...item.payload, _llmAttempts: { [callKey]: { state: "COMPLETED", response: { provider: "openai", idempotencyKey: callKey, createdAt: new Date().toISOString(), model: "gpt-5-mini", promptVersion: "recovered-v1", structuredOutput: z.json().parse(item.output), usage: { promptTokens: 10, completionTokens: 20, totalTokens: 30 }, estimatedCostUsd: "0.000030" } } }, _providerReconciliations: { fixture: { outcome: "RESULT_AVAILABLE", evidenceHash: "a".repeat(64) } } } } });
+    const network = vi.fn<typeof fetch>(); vi.stubGlobal("fetch", network);
+    const result = await new ScriptGenerationProcessor(prisma).process(item.job.id, item.payload);
+    expect(result).toHaveProperty("sceneVersionId"); expect(network).not.toHaveBeenCalled();
+    const saved = JSON.stringify((await prisma.productionJob.findUniqueOrThrow({ where: { id: item.job.id } })).payload);
+    expect(saved).toContain(JSON.stringify(callKey)); expect(saved).toContain('"state":"COMPLETED"');
+    expect(await prisma.costLedger.count({ where: { providerUsage: { productionJobId: item.job.id } } })).toBe(1);
+  });
   it("includes invalid schema attempts in usage and cost, and reuses a completed logical result", async () => {
     const item = await fixture();
     const network = vi.fn<typeof fetch>().mockResolvedValueOnce(response({ invalid: true })).mockResolvedValueOnce(response(item.output));
@@ -39,9 +52,20 @@ describe.skipIf(!enabled).sequential("real LLM call journal (mock HTTP, no paid 
     expect(await processor.process(item.job.id, item.payload)).toEqual(result);
     expect(network).toHaveBeenCalledTimes(2);
     await new DeterministicJobProcessor(prisma).process({ id: item.job.id, type: "SCRIPT", queueName: "script", runAfter: null, payload: item.payload });
-    expect(await prisma.automationCostReservation.findUniqueOrThrow({ where: { idempotencyKey: `automation:${item.payload.automation.runId}:script:youtube:cost` } })).toMatchObject({ releasedAt: null, settledAt: null });
+    expect(await prisma.automationCostReservation.findUniqueOrThrow({ where: { idempotencyKey: `automation:${item.payload.automation.runId}:script:youtube:cost` } })).toMatchObject({ releasedAt: null, settlementBasis: "KNOWN_USAGE_BILLING_PENDING" });
+    expect((await prisma.automationCostReservation.findUniqueOrThrow({ where: { idempotencyKey: `automation:${item.payload.automation.runId}:script:youtube:cost` } })).settledAt).not.toBeNull();
 
     expect(await prisma.costLedger.count({ where: { providerUsage: { productionJobId: item.job.id } } })).toBe(2);
+    const queue = new BullMqQueueAdapter(process.env.REDIS_URL ?? "redis://127.0.0.1:16379", `known-receipt-${randomUUID()}`);
+    try {
+      await prisma.productionJob.update({ where: { id: item.job.id }, data: { status: "RUNNING", heartbeatAt: new Date(Date.now() - 600000), executionToken: randomUUID() } });
+      await recoverQueues(prisma, queue, 60000);
+      expect((await prisma.productionJob.findUniqueOrThrow({ where: { id: item.job.id } })).status).toBe("RETRY_WAIT");
+      await new DeterministicJobProcessor(prisma).process({ id: item.job.id, type: "SCRIPT", queueName: "script", runAfter: null, payload: item.payload });
+      expect((await prisma.productionJob.findUniqueOrThrow({ where: { id: item.job.id } })).status).toBe("SUCCEEDED");
+      expect(network).toHaveBeenCalledTimes(2);
+      expect(await prisma.costLedger.count({ where: { providerUsage: { productionJobId: item.job.id } } })).toBe(2);
+    } finally { await queue.close(); }
   });
   it("refuses a long-input call before network I/O when remaining reservation is insufficient", async () => {
     const item = await fixture();

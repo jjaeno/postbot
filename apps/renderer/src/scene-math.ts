@@ -5,6 +5,7 @@ export const SHORTS_HEIGHT = 1920;
 export const SAFE_AREA = { top: 180, right: 72, bottom: 240, left: 72 } as const;
 
 export type CaptionTiming = {
+  readonly joiner?: string;
   readonly text: string;
   readonly startSeconds: number;
   readonly endSeconds: number;

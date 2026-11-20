@@ -5,9 +5,10 @@ import { OAuthCryptoService } from "../oauth/oauth-crypto.service.js";
 import { BullMqMaintenanceQueueAdapter } from "@postbot/jobs";
 import { loadConfig } from "@postbot/config";
 import { MAINTENANCE_QUEUE } from "./operations.service.js";
+import { ProviderRightsController } from "./provider-rights.controller.js";
 
 @Module({
-  controllers: [OperationsController],
+  controllers: [OperationsController, ProviderRightsController],
   providers: [
     OperationsService,
     OAuthCryptoService,

@@ -15,7 +15,7 @@ describe.skipIf(process.env.RUN_DB_INTEGRATION !== "1")("analytics batch recover
     const content = await prisma.contentItem.create({ data: { channelId: channel.id, title: "Fixture", topicKey: key } });
     const ids = Array.from({ length: 501 }, () => randomUUID());
     await prisma.publishPlan.createMany({ data: ids.map((id) => ({ id, contentItemId: content.id, platformAccountId: account.id, platform: "YOUTUBE", status: "PUBLISHED", scheduledAt: new Date(), idempotencyKey: id, title: "Fixture" })) });
-    await prisma.platformPost.createMany({ data: ids.map((id) => ({ id, publishPlanId: id, platformAccountId: account.id, platform: "YOUTUBE", externalPostId: id, postUrl: `https://example.com/${id}`, policyVersion: 1, publishedAt: new Date() })) });
+    await prisma.platformPost.createMany({ data: ids.map((id) => ({ publicationState: "PUBLISHED", id, publishPlanId: id, platformAccountId: account.id, platform: "YOUTUBE", externalPostId: id, postUrl: `https://example.com/${id}`, policyVersion: 1, publishedAt: new Date() })) });
     const sync = await prisma.analyticsSync.create({ data: { channelId: channel.id, platform: "YOUTUBE", idempotencyKey: key, status: "RUNNING", periodStart: new Date(0), periodEnd: new Date(), timezone: "UTC" } });
     let calls = 0;
     const fetchPage = vi.fn<AnalyticsProvider["fetchPage"]>((input) => {

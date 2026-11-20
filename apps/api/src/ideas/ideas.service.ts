@@ -1,6 +1,7 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import {
   CollectIdeasRequestSchema,
+  hasHttpsVisualReference,
   IdeaStatusSchema,
   UpdateIdeaStatusRequestSchema,
   type CollectIdeasRequest,
@@ -83,7 +84,8 @@ export class IdeasService {
   }
 
   private scoreCandidate(candidate: TopicSourceCandidate, settings: ChannelCollectionSettings): ScoredIdeaCandidate {
-    return scoreTopicCandidate(candidate, settings);
+    const scored = scoreTopicCandidate(candidate, settings);
+    return { ...scored, rejectionReason: scored.rejectionReason ?? (settings.requireVisualEvidence && !hasHttpsVisualReference({ reliability: candidate.reliabilityMetadata }) ? "VISUAL_REFERENCE_REQUIRED" : null) };
   }
 
   private parseCollectInput(rawInput: unknown): CollectIdeasRequest {

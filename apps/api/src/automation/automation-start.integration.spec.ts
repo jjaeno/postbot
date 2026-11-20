@@ -1,6 +1,7 @@
+import { collectionProfilePreset } from "@postbot/contracts";
 import { PrismaClient } from "@postbot/database";
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { AutomationService } from "./automation.service.js";
 import { JobsService } from "../jobs/jobs.service.js";
 import { PrismaJobsRepository } from "../jobs/prisma-jobs.repository.js";
@@ -10,6 +11,7 @@ import type { OperationsService } from "../operations/operations.service.js";
 const prisma = new PrismaClient();
 const suite = process.env.RUN_DB_INTEGRATION === "1" ? describe : describe.skip;
 suite("scheduler and manual start concurrency", () => {
+  afterEach(() => vi.unstubAllEnvs());
   beforeAll(async () => {
     await prisma.policyRule.createMany({
       skipDuplicates: true,
@@ -21,6 +23,36 @@ suite("scheduler and manual start concurrency", () => {
     });
   });
   afterAll(() => prisma.$disconnect());
+  it("enforces visual evidence for manually selected profile ideas before paid work", async () => {
+    vi.stubEnv("ENABLED_PLATFORMS", "youtube"); const key = randomUUID();
+    const user = await prisma.user.create({ data: { email: `${key}@manual-visual.test`, displayName: "Fixture", passwordHash: "fixture" } });
+    const workspace = await prisma.workspace.create({ data: { ownerId: user.id, name: "Fixture", slug: key } });
+    const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Fixture", slug: key, outputProfiles: { create: { platform: "YOUTUBE", minDurationSeconds: 35, maxDurationSeconds: 55 } }, collectionRules: { create: { profile: collectionProfilePreset("SCIENCE", "en"), recencyHours: 72, collectionFrequencyMinutes: 360, keywords: [], excludedKeywords: [], allowedSources: [], excludedSources: [] } } } });
+    const idea = await prisma.contentIdea.create({ data: { channelId: channel.id, title: "Fixture", canonicalUrl: "https://example.com/fixture", urlHash: key, contentHash: key, sourceName: "Fixture", sourceKind: "OFFICIAL", provider: "fixture", suitabilityScore: 1, freshnessScore: 1, reliabilityScore: 1, expectedValueScore: 1, rawSnapshot: { body: "Fixture without visual evidence" } } });
+    const queue: QueueAdapter = { enqueue: () => Promise.resolve(), cancel: () => Promise.resolve(), close: () => Promise.resolve() };
+    const service = new AutomationService(prisma, new JobsService(new PrismaJobsRepository(prisma), queue), { notify: vi.fn(() => Promise.resolve()), audit: vi.fn(() => Promise.resolve()) } as unknown as OperationsService);
+    await expect(service.start(workspace.id, { channelId: channel.id, ideaId: idea.id, idempotencyKey: key })).rejects.toThrow("VISUAL_REFERENCE_REQUIRED");
+    expect(await prisma.productionJob.count({ where: { channelId: channel.id } })).toBe(0);
+    expect(await prisma.providerUsage.count({ where: { contentItem: { channelId: channel.id } } })).toBe(0);
+    await prisma.contentIdea.update({ where: { id: idea.id }, data: { rawSnapshot: { body: "NASA space reference", visualReferences: { references: [{ href: "https://images-assets.nasa.gov/image/SPACE/SPACE~thumb.jpg", rel: "preview", render: "image" }], rights: "ITEM_REVIEW_REQUIRED" } } } });
+    await expect(service.start(workspace.id, { channelId: channel.id, ideaId: idea.id, idempotencyKey: `${key}:nasa` })).resolves.toMatchObject({ channelId: channel.id });
+    expect(await prisma.providerUsage.count({ where: { contentItem: { channelId: channel.id } } })).toBe(0);
+  });
+  it("holds only the affected account branch before paid production", async () => {
+    vi.stubEnv("ENABLED_PLATFORMS", "youtube,instagram");
+    const key = randomUUID();
+    const user = await prisma.user.create({ data: { email: `${key}@account-preflight.test`, displayName: "Fixture", passwordHash: "fixture" } });
+    const workspace = await prisma.workspace.create({ data: { ownerId: user.id, name: "Fixture", slug: key } });
+    await prisma.policyRule.createMany({ skipDuplicates: true, data: { platform: "INSTAGRAM", region: "GLOBAL", version: 1, effectiveAt: new Date(0), checkedAt: new Date(), durationRule: { minSeconds: 30, maxSeconds: 90 }, originalityRule: {}, aiDisclosureRule: {}, rightsRule: {}, restrictedTopics: [] } });
+    const channel = await prisma.channel.create({ data: { workspaceId: workspace.id, name: "Fixture", slug: key, outputProfiles: { create: [{ platform: "YOUTUBE", minDurationSeconds: 35, maxDurationSeconds: 55 }, { platform: "INSTAGRAM", minDurationSeconds: 35, maxDurationSeconds: 55, publicSetting: "PUBLIC" }] }, collectionRules: { create: { keywords: ["science"], recencyHours: 24, collectionFrequencyMinutes: 60 } } } });
+    await prisma.platformAccount.createMany({ data: [{ workspaceId: workspace.id, channelId: channel.id, platform: "YOUTUBE", externalAccountId: key, status: "EXPIRED" }, { workspaceId: workspace.id, channelId: channel.id, platform: "INSTAGRAM", externalAccountId: key, status: "CONNECTED" }] });
+    const queue: QueueAdapter = { enqueue: () => Promise.resolve(), cancel: () => Promise.resolve(), close: () => Promise.resolve() };
+    const service = new AutomationService(prisma, new JobsService(new PrismaJobsRepository(prisma), queue), {} as OperationsService);
+    const run = await service.start(workspace.id, { channelId: channel.id, idempotencyKey: key });
+    expect(run.steps.find((step) => step.stage === "SCRIPT" && step.platform === "YOUTUBE")).toMatchObject({ status: "HELD", errorCode: "ACCOUNT_REAUTH_REQUIRED" });
+    expect(run.steps.find((step) => step.stage === "SCRIPT" && step.platform === "INSTAGRAM")).toMatchObject({ status: "PENDING" });
+    expect(await prisma.productionJob.count({ where: { channelId: channel.id, type: { in: ["SCRIPT", "ASSET", "TTS"] } } })).toBe(0);
+  });
   it("rejects invalid policy duration before creating jobs and restores all legacy duplicate circuit breakers", async () => {
     const key = randomUUID();
     const user = await prisma.user.create({ data: { email: `${key}@preflight.test`, displayName: "Fixture", passwordHash: "fixture" } });
